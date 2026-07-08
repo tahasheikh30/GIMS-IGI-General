@@ -10,7 +10,7 @@ DEFAULT_TEMPLATE = {
     "name": "Standard Reminder",
     "subject": "Outstanding Balance Notice - {client_name}",
     "body": (
-        "Dear {client_name},\n\n"
+        "Dear {greeting_name},\n\n"
         "As per our records, your account currently shows an outstanding balance "
         "of PKR {amount} as of {report_date}.\n\n"
         "A detailed breakdown by department and year is attached for your reference.\n\n"
@@ -58,21 +58,27 @@ def fill_template(template, fields):
     return subject, body
 
 
-def build_email_drafts(qualifying_df, grand_totals, email_lookup, template=None, report_date=None):
+def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=None, template=None, report_date=None):
     """
     qualifying_df: index = client names that qualify
     grand_totals: Series client -> total O/s
     email_lookup: dict client_name -> email address (or None if missing)
+    poc_lookup: optional dict client_name -> point-of-contact person name.
+        When present for a client, the email greeting addresses that person
+        ("Dear John,") instead of the company name ("Dear ACME CORP,").
     Returns list of draft dicts: {client_name, email, subject, body, amount, status}
     """
     if template is None:
         template = DEFAULT_TEMPLATE
+    poc_lookup = poc_lookup or {}
     drafts = []
     for client in qualifying_df:
         amount = grand_totals.get(client, 0)
         email = email_lookup.get(client)
+        poc_name = poc_lookup.get(client)
         fields = {
             "client_name": client,
+            "greeting_name": poc_name if poc_name else client,
             "amount": f"{amount:,.0f}",
             "report_date": report_date or "",
         }
@@ -80,6 +86,7 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, template=None,
         drafts.append({
             "client_name": client,
             "email": email,
+            "poc_name": poc_name,
             "subject": subject,
             "body": body,
             "amount": amount,
@@ -94,8 +101,9 @@ if __name__ == "__main__":
     clean, issues = dp.validate_data(raw)
     df, totals = dp.build_pivot(clean)
     q = dp.qualifying_clients(df, totals, threshold=2_000_000)
-    fake_lookup = {q.index[0]: "finance@example-client.com"}
-    drafts = build_email_drafts(q.index[:3], totals, fake_lookup, report_date="2026-07-07")
+    fake_email_lookup = {q.index[0]: "finance@example-client.com", q.index[1]: "ap@example-client2.com"}
+    fake_poc_lookup = {q.index[0]: "Ahmed Khan"}  # only first client has a named POC
+    drafts = build_email_drafts(q.index[:3], totals, fake_email_lookup, poc_lookup=fake_poc_lookup, report_date="2026-07-07")
     for d in drafts:
         print(d["client_name"], "|", d["status"], "|", d["subject"])
-        print(d["body"][:150], "...\n")
+        print(d["body"][:80], "...\n")

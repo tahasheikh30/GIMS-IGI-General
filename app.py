@@ -46,6 +46,7 @@ class BalanceApp(tk.Tk):
         self.grand_totals = None
         self.qualifying = None
         self.email_lookup = {}
+        self.poc_lookup = {}
         self.drafts = []
         self.output_dir = os.path.join(os.getcwd(), "output")
 
@@ -443,6 +444,7 @@ class BalanceApp(tk.Tk):
 
         email_path = self.email_file_var.get().strip()
         self.email_lookup = {}
+        self.poc_lookup = {}
         if email_path and os.path.exists(email_path):
             try:
                 if email_path.lower().endswith(".csv"):
@@ -455,6 +457,24 @@ class BalanceApp(tk.Tk):
                     raise ValueError("Could not find an 'Email' column in the lookup file.")
                 self.email_lookup = dict(zip(edf[name_col].astype(str).str.strip(), edf[email_col].astype(str).str.strip()))
                 self.log(self.setup_log, f"Loaded {len(self.email_lookup)} client-email mappings from lookup file.")
+
+                # Optional POC / contact-person column: if present, the email
+                # greeting addresses this person by name instead of the company.
+                poc_col = next((c for c in edf.columns
+                                 if c != email_col and c != name_col
+                                 and any(k in c.lower() for k in ["poc", "contact", "attn", "attention", "recipient name", "contact person"])),
+                                None)
+                if poc_col:
+                    poc_lookup = {}
+                    for client_raw, poc_raw in zip(edf[name_col], edf[poc_col]):
+                        if pd.isna(client_raw) or pd.isna(poc_raw):
+                            continue
+                        client_name = str(client_raw).strip()
+                        poc_name = str(poc_raw).strip()
+                        if client_name and poc_name:
+                            poc_lookup[client_name] = poc_name
+                    self.poc_lookup = poc_lookup
+                    self.log(self.setup_log, f"Found POC column '{poc_col}' - {len(self.poc_lookup)} client(s) will be greeted by contact name.")
             except Exception as e:
                 self.log(self.setup_log, f"Warning: could not load email lookup file: {e}")
 
@@ -520,7 +540,7 @@ class BalanceApp(tk.Tk):
         from datetime import date
         self.drafts = eg.build_email_drafts(
             self.qualifying.index, self.grand_totals, self.email_lookup,
-            template=template, report_date=date.today().isoformat()
+            poc_lookup=self.poc_lookup, template=template, report_date=date.today().isoformat()
         )
         self.email_tree.delete(*self.email_tree.get_children())
         for d in self.drafts:

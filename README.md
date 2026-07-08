@@ -40,6 +40,11 @@ python app.py
    column and an `Email` column. Rows are matched to clients by exact name.
    If you skip this, drafted emails will be flagged "missing email" and you can
    fill them in manually in tab 3.
+   - **Optional POC/contact column:** if the lookup file also has a column named
+     something like `POC`, `Contact`, `Contact Person`, or `Attention`, that
+     person's name is used in the greeting ("Dear Ahmed Khan,") instead of the
+     company name. Rows with no name in that column just fall back to the
+     company name as before — no need for every row to have one.
 4. Click **Load & Validate Data** — this flags rows with a missing client name,
    missing department, or a non-numeric balance (these are excluded from totals,
    and listed in the log so you can fix the source sheet if needed).
@@ -82,7 +87,9 @@ templates at runtime (the `save_template()` function is ready to be wired to a
 "Save as new template" button if you want multiple templates — e.g. "First
 Reminder" vs "Final Notice" — let me know and I'll add that UI).
 
-Placeholders currently supported: `{client_name}`, `{amount}`, `{report_date}`.
+Placeholders currently supported: `{client_name}`, `{greeting_name}`, `{amount}`,
+`{report_date}`. `{greeting_name}` resolves to the matched POC name if one exists
+for that client, otherwise the company name — use it in the "Dear ..." line.
 Add more by including the field name in the template and passing it into
 `fields` in `build_email_drafts()`.
 
