@@ -1,0 +1,22 @@
+[
+  {
+    "timestamp": "2026-07-07T17:06:46",
+    "threshold": 10000000.0,
+    "company_filter": "",
+    "department_filter": [],
+    "num_qualifying": 1,
+    "num_sent": 1,
+    "num_failed": 0,
+    "dry_run": false
+  },
+  {
+    "timestamp": "2026-07-07T17:15:14",
+    "threshold": 10000000.0,
+    "company_filter": "",
+    "department_filter": [],
+    "num_qualifying": 1,
+    "num_sent": 1,
+    "num_failed": 0,
+    "dry_run": false
+  }
+]
