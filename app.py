@@ -374,13 +374,24 @@ class BalanceApp(tk.Tk):
         # fonts and clips the label. A classic tk.Button always sizes
         # itself exactly to its own text, so the full label is guaranteed
         # to render.
+        btn_row = ttk.Frame(right)
+        btn_row.grid(row=4, column=0, sticky="w")
+
         save_btn = tk.Button(
-            right, text="Save Edits to Selected Email", command=self.save_email_edit,
+            btn_row, text="Save Edits to Selected Email", command=self.save_email_edit,
             font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
             activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
             relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
         )
-        save_btn.grid(row=4, column=0, sticky="w")
+        save_btn.pack(side="left", padx=(0, 8))
+
+        send_one_btn = tk.Button(
+            btn_row, text="Send This Email", command=self.send_individual_email,
+            font=("Segoe UI", 10, "bold"), bg=self.COLOR_SUCCESS, fg="white",
+            activebackground="#1B5E20", activeforeground="white",
+            relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
+        )
+        send_one_btn.pack(side="left")
 
     # ---------- Actions ----------
     def browse_data_file(self):
@@ -594,6 +605,49 @@ class BalanceApp(tk.Tk):
                 self.email_tree.set(self.email_tree.get_children()[i], "status", "Sent" if r["sent"] else f"Failed: {r['send_message']}")
             messagebox.showinfo("Done", f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
             self.status_var.set(f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_individual_email(self):
+        sel = self.email_tree.selection()
+        if not sel:
+            messagebox.showinfo("No client selected", "Click a client in the list on the left first.")
+            return
+        idx = self.email_tree.index(sel[0])
+
+        # Save whatever is currently in the To/Subject/Body fields first,
+        # so the send always reflects what's on screen.
+        self.save_email_edit()
+        d = self.drafts[idx]
+
+        if not d.get("email"):
+            messagebox.showerror("Missing email", "Enter a recipient email address in the 'To' field before sending.")
+            return
+
+        report_path = os.path.join(self.output_dir, f"{rg.safe_filename(d['client_name'])}_OutstandingBalance_Report.xlsx")
+        attachment_path = report_path if os.path.exists(report_path) else None
+        if attachment_path is None:
+            if not messagebox.askyesno(
+                "No report generated",
+                f"No Excel report has been generated yet for {d['client_name']}. "
+                f"Send this email without an attachment?\n\n"
+                f"(Go to tab 2 and click 'Generate Excel Reports' first if you'd rather attach one.)"
+            ):
+                return
+
+        dry_run = self.dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", f"Send this email to {d['email']} ({d['client_name']}) now?"):
+                return
+
+        row_id = self.email_tree.get_children()[idx]
+
+        def worker():
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
+            self.email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
+            prefix = "[DRY RUN] " if dry_run else ""
+            messagebox.showinfo("Done", f"{prefix}{message}")
+            self.status_var.set(f"{prefix}{message}")
 
         threading.Thread(target=worker, daemon=True).start()
 
