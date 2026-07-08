@@ -17,10 +17,7 @@ DEFAULT_TEMPLATE = {
         "We would appreciate your settlement at your earliest convenience. "
         "If payment has already been made, please disregard this notice and share "
         "the payment confirmation with us.\n\n"
-        "Please do not hesitate to contact us if you have any questions.\n\n"
-        "Regards,\n"
-        "Finance Department\n"
-        "IGI General Takaful"
+        "Please do not hesitate to contact us if you have any questions.\n"
     ),
 }
 
