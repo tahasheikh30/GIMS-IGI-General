@@ -32,12 +32,14 @@ class BalanceApp(tk.Tk):
     COLOR_TEXT = "#1C2733"
     COLOR_MUTED = "#5B6B79"
     COLOR_BORDER = "#D3DEE8"
+    COLOR_SIDEBAR = "#F7FAFC"       # sidebar background - close to panel-alt, distinct from main canvas
+    COLOR_SIDEBAR_ACTIVE = "#E4EDF5"  # active nav item background tint
 
     def __init__(self):
         super().__init__()
-        self.title("Outstanding Balance Reporting & Email System")
+        self.title("GIMS - General Insurance Management System")
         self.geometry("1300x760")
-        self.minsize(1000, 600)
+        self.minsize(1050, 620)
         self.configure(bg=self.COLOR_BG)
 
         self.raw_df = None
@@ -123,14 +125,154 @@ class BalanceApp(tk.Tk):
 
     # ---------- UI construction ----------
     def _build_ui(self):
-        header = tk.Frame(self, bg=self.COLOR_PRIMARY, height=56)
+        self._build_header()
+
+        body = tk.Frame(self, bg=self.COLOR_BG)
+        body.pack(fill="both", expand=True, side="top")
+
+        self._build_sidebar(body)
+        self._build_content_area(body)
+
+        status_frame = tk.Frame(self, bg="#E3E8EC", height=30)
+        status_frame.pack(fill="x", side="bottom")
+        status_frame.pack_propagate(False)
+        self.status_var = tk.StringVar(value="Ready.")
+        tk.Label(status_frame, textvariable=self.status_var, bg="#E3E8EC", fg=self.COLOR_MUTED,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=12, pady=4)
+
+    def _build_header(self):
+        """Fixed top header with the GIMS wordmark - stays visible across
+        every sidebar section."""
+        header = tk.Frame(self, bg=self.COLOR_PRIMARY, height=64)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
-        ttk.Label(header, text="  Outstanding Balance Reporting & Email System", style="Title.TLabel").pack(side="left", padx=8, pady=8)
-        ttk.Label(header, text="Finance Department", background=self.COLOR_PRIMARY, foreground="#CFE0EE",
-                  font=("Segoe UI", 10)).pack(side="right", padx=16)
 
-        notebook = ttk.Notebook(self)
+        brand = tk.Frame(header, bg=self.COLOR_PRIMARY)
+        brand.pack(side="left", padx=20, pady=10)
+
+        # Simple drawn logo mark (no external image asset needed) - a
+        # rounded accent-colored square with the "G" initial.
+        mark = tk.Canvas(brand, width=40, height=40, bg=self.COLOR_PRIMARY, highlightthickness=0)
+        mark.pack(side="left", padx=(0, 12))
+        mark.create_oval(0, 0, 40, 40, fill=self.COLOR_ACCENT, outline="")
+        mark.create_text(20, 21, text="G", fill="white", font=("Segoe UI", 17, "bold"))
+
+        text_col = tk.Frame(brand, bg=self.COLOR_PRIMARY)
+        text_col.pack(side="left")
+        tk.Label(text_col, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
+                 bg=self.COLOR_PRIMARY, fg="white").pack(anchor="w")
+        tk.Label(text_col, text="General Insurance Management System", font=("Segoe UI", 9),
+                 bg=self.COLOR_PRIMARY, fg="#BFD4E6").pack(anchor="w")
+
+        tk.Label(header, text="General Department", font=("Segoe UI", 10),
+                 bg=self.COLOR_PRIMARY, fg="#CFE0EE").pack(side="right", padx=20)
+
+    def _build_sidebar(self, parent):
+        """Persistent left sidebar with the three module sections. The
+        active section is shown with a left accent bar, bold text, and a
+        tinted background."""
+        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=232)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+
+        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=18).pack(fill="x")
+        tk.Label(sidebar, text="MODULES", font=("Segoe UI", 8, "bold"), bg=self.COLOR_SIDEBAR,
+                 fg=self.COLOR_MUTED).pack(anchor="w", padx=20, pady=(0, 6))
+
+        nav_labels = [
+            ("outstanding_premium", "Outstanding Premium"),
+            ("loss_ratio", "Loss Ratio"),
+            ("renewal", "Renewal"),
+        ]
+        self.nav_items = {}
+        for key, label in nav_labels:
+            self.nav_items[key] = self._make_nav_item(sidebar, key, label)
+
+        # Thin divider between the sidebar and content area
+        tk.Frame(parent, bg=self.COLOR_BORDER, width=1).pack(side="left", fill="y")
+
+    def _make_nav_item(self, parent, key, text):
+        wrapper = tk.Frame(parent, bg=self.COLOR_SIDEBAR, cursor="hand2")
+        wrapper.pack(fill="x")
+
+        accent = tk.Frame(wrapper, bg=self.COLOR_SIDEBAR, width=4)
+        accent.pack(side="left", fill="y")
+
+        label = tk.Label(wrapper, text=text, font=("Segoe UI", 11), bg=self.COLOR_SIDEBAR,
+                          fg=self.COLOR_MUTED, anchor="w")
+        label.pack(side="left", fill="both", expand=True, padx=(14, 10), pady=14)
+
+        def on_click(event=None, k=key):
+            self.select_nav(k)
+
+        for widget in (wrapper, accent, label):
+            widget.bind("<Button-1>", on_click)
+
+        wrapper.accent = accent
+        wrapper.label = label
+        return wrapper
+
+    def select_nav(self, key):
+        """Switch the visible content page and restyle the sidebar so only
+        the active section shows the accent bar / bold text / tinted bg."""
+        self.active_nav = key
+        for k, item in self.nav_items.items():
+            selected = (k == key)
+            bg = self.COLOR_SIDEBAR_ACTIVE if selected else self.COLOR_SIDEBAR
+            item.configure(bg=bg)
+            item.accent.configure(bg=self.COLOR_ACCENT if selected else self.COLOR_SIDEBAR)
+            item.label.configure(
+                bg=bg,
+                fg=self.COLOR_PRIMARY if selected else self.COLOR_MUTED,
+                font=("Segoe UI", 11, "bold" if selected else "normal"),
+            )
+        self.nav_pages[key].tkraise()
+
+    def _build_content_area(self, parent):
+        """Stacked pages sharing one grid cell; select_nav() raises the
+        active one. Outstanding Premium hosts the existing full workflow;
+        the other two are placeholders reserved for future modules."""
+        container = tk.Frame(parent, bg=self.COLOR_BG)
+        container.pack(side="left", fill="both", expand=True)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        self.nav_pages = {}
+
+        outstanding_page = ttk.Frame(container)
+        outstanding_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["outstanding_premium"] = outstanding_page
+        self._build_outstanding_premium_page(outstanding_page)
+
+        for key, title in [("loss_ratio", "Loss Ratio"), ("renewal", "Renewal")]:
+            page = self._build_placeholder_page(container, title)
+            page.grid(row=0, column=0, sticky="nsew")
+            self.nav_pages[key] = page
+
+        self.select_nav("outstanding_premium")
+
+    def _build_placeholder_page(self, parent, title):
+        """Clean, on-brand empty state for modules not built yet."""
+        page = tk.Frame(parent, bg=self.COLOR_BG)
+        center = tk.Frame(page, bg=self.COLOR_BG)
+        center.place(relx=0.5, rely=0.42, anchor="center")
+
+        icon = tk.Canvas(center, width=64, height=64, bg=self.COLOR_BG, highlightthickness=0)
+        icon.pack(pady=(0, 16))
+        icon.create_oval(2, 2, 62, 62, outline=self.COLOR_BORDER, width=2, fill=self.COLOR_PANEL)
+        icon.create_text(32, 34, text="+", fill=self.COLOR_ACCENT, font=("Segoe UI", 26, "bold"))
+
+        tk.Label(center, text=title, font=("Segoe UI Semibold", 18, "bold"),
+                 bg=self.COLOR_BG, fg=self.COLOR_PRIMARY).pack(pady=(0, 6))
+        tk.Label(center, text="This module is coming soon.", font=("Segoe UI", 11),
+                 bg=self.COLOR_BG, fg=self.COLOR_MUTED).pack()
+        return page
+
+    def _build_outstanding_premium_page(self, parent):
+        """The existing Outstanding Premium workflow (Upload & Filter,
+        Qualifying Clients, Review & Send Emails) - unchanged logic, now
+        hosted as one sidebar section instead of the whole app."""
+        notebook = ttk.Notebook(parent)
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 4))
 
         self.tab_setup = ttk.Frame(notebook)
@@ -143,13 +285,6 @@ class BalanceApp(tk.Tk):
         self._build_setup_tab()
         self._build_results_tab()
         self._build_emails_tab()
-
-        status_frame = tk.Frame(self, bg="#E3E8EC", height=30)
-        status_frame.pack(fill="x", side="bottom")
-        status_frame.pack_propagate(False)
-        self.status_var = tk.StringVar(value="Ready.")
-        tk.Label(status_frame, textvariable=self.status_var, bg="#E3E8EC", fg=self.COLOR_MUTED,
-                 font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=12, pady=4)
 
     def _build_setup_tab(self):
         f = self.tab_setup

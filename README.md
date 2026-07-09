@@ -1,9 +1,12 @@
-# Outstanding Balance Reporting & Client Email System
+# GIMS — General Insurance Management System
 
-A desktop tool for the Finance department that replaces manual pivot-table
-building and email drafting: upload the client balance sheet, set a
-threshold, and it generates per-client Excel breakdowns and drafts
-(and optionally sends) reminder emails through your own Outlook account.
+A desktop tool for the Finance department, built around a persistent sidebar
+with three modules:
+- **Outstanding Premium** — fully built: upload the client balance sheet, set
+  a threshold, generate per-client Excel PivotTable reports, and draft/send
+  reminder emails through your own Outlook account.
+- **Loss Ratio** — placeholder, reserved for a future module.
+- **Renewal** — placeholder, reserved for a future module.
 
 ## What's included
 
@@ -37,6 +40,13 @@ pip install -r requirements.txt
 ```
 python app.py
 ```
+
+On launch you'll see a fixed header with the GIMS wordmark, and a left
+sidebar with three sections: **Outstanding Premium**, **Loss Ratio**, and
+**Renewal**. The active section is highlighted with an accent bar and bold
+text. All the functionality below (Steps 1–3) lives inside **Outstanding
+Premium** — click it in the sidebar if it isn't already selected. The other
+two sections are placeholders reserved for future modules.
 
 ### Step 1 — Upload & Filter
 1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
