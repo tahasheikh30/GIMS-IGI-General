@@ -15,6 +15,7 @@ import data_processor as dp
 import report_generator as rg
 import email_generator as eg
 import outlook_sender as osend
+import pivot_native_generator as pivot_native
 import run_log
 
 
@@ -416,7 +417,9 @@ class BalanceApp(tk.Tk):
             return
         try:
             self.raw_df = dp.load_raw_data(path, sheet_name=self.sheet_name_var.get())
-            self.clean_df, self.issues_df = dp.validate_data(self.raw_df, date_col_for_year=self.date_col_var.get())
+            self.clean_df, self.issues_df, dropped_columns = dp.validate_data(
+                self.raw_df, date_col_for_year=self.date_col_var.get()
+            )
         except Exception as e:
             messagebox.showerror("Error loading file", str(e))
             return
@@ -433,6 +436,8 @@ class BalanceApp(tk.Tk):
                 self.agent_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
 
         self.log(self.setup_log, f"Loaded {len(self.raw_df)} rows, {len(self.clean_df)} valid after cleaning.")
+        if dropped_columns:
+            self.log(self.setup_log, f"Removed {len(dropped_columns)} completely empty column(s) from the data: {', '.join(dropped_columns)}")
         if len(self.issues_df) > 0:
             self.log(self.setup_log, f"{len(self.issues_df)} rows flagged with issues (missing client/department, non-numeric balance):")
             for _, r in self.issues_df.head(20).iterrows():
@@ -517,14 +522,53 @@ class BalanceApp(tk.Tk):
             messagebox.showwarning("Nothing to generate", "Run Analyze first (tab 1).")
             return
         os.makedirs(self.output_dir, exist_ok=True)
+
+        use_native = pivot_native.EXCEL_AVAILABLE
+        excel_app = None
         generated = []
-        for client in self.qualifying.index:
-            pivot = dp.client_pivot_table(self.filtered_df, client)
-            raw_rows = dp.get_client_raw_rows(self.filtered_df, client)
-            fp = rg.write_client_report(client, pivot, self.output_dir, raw_df=raw_rows)
-            generated.append(fp)
-        messagebox.showinfo("Done", f"Generated {len(generated)} report(s) in:\n{self.output_dir}")
-        self.status_var.set(f"Generated {len(generated)} Excel reports.")
+        native_failures = []
+
+        self.status_var.set("Generating reports..." + (" (building native PivotTables in Excel)" if use_native else ""))
+        self.update_idletasks()
+
+        try:
+            if use_native:
+                try:
+                    excel_app = pivot_native.start_excel()
+                except Exception as e:
+                    use_native = False
+                    self.log(self.setup_log, f"Could not start Excel for native PivotTables ({e}) - using static formatted tables instead.")
+
+            for client in self.qualifying.index:
+                raw_rows = dp.get_client_raw_rows(self.filtered_df, client)
+                fp = None
+                if use_native:
+                    try:
+                        fp = rg.write_raw_only_workbook(client, raw_rows, self.output_dir)
+                        pivot_native.add_native_pivot_table(fp, client_name=client, excel_app=excel_app)
+                    except Exception as e:
+                        native_failures.append(client)
+                        pivot_df = dp.client_pivot_table(self.filtered_df, client)
+                        fp = rg.write_client_report(client, pivot_df, self.output_dir, raw_df=raw_rows)
+                else:
+                    pivot_df = dp.client_pivot_table(self.filtered_df, client)
+                    fp = rg.write_client_report(client, pivot_df, self.output_dir, raw_df=raw_rows)
+                generated.append(fp)
+        finally:
+            pivot_native.stop_excel(excel_app)
+
+        msg = f"Generated {len(generated)} report(s) in:\n{self.output_dir}"
+        if not pivot_native.EXCEL_AVAILABLE:
+            msg += ("\n\nMicrosoft Excel/pywin32 wasn't detected on this machine, so reports use a "
+                    "static formatted table instead of an interactive native PivotTable. Install "
+                    "Excel (and pywin32) for real, drillable PivotTables.")
+        elif native_failures:
+            msg += (f"\n\n{len(native_failures)} report(s) fell back to a static table after an Excel "
+                    f"error: {', '.join(native_failures[:5])}" + (", ..." if len(native_failures) > 5 else ""))
+        else:
+            msg += "\n\nEach report contains a genuine, interactive Excel PivotTable (with the field list, filters, and drill-down) built from that client's Raw Data sheet."
+        messagebox.showinfo("Done", msg)
+        self.status_var.set(f"Generated {len(generated)} report(s).")
 
     def open_output_folder(self):
         if os.path.exists(self.output_dir):

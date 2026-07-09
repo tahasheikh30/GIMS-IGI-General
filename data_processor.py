@@ -18,8 +18,11 @@ def load_raw_data(filepath, sheet_name=0):
 
 def validate_data(df, date_col_for_year=DEFAULT_DATE_COL_FOR_YEAR):
     """
-    Validate the raw dataframe. Returns (clean_df, issues_df).
+    Validate the raw dataframe. Returns (clean_df, issues_df, dropped_columns).
     issues_df lists rows flagged with a problem and why.
+    dropped_columns lists source columns that were entirely empty across
+    the whole dataset and were removed (they'd add nothing but clutter to
+    every generated report).
     date_col_for_year: which date column to derive the "Year" from
         ("Issue Date" or "Comm.  Date" - note the double space in the
         source column name).
@@ -30,6 +33,15 @@ def validate_data(df, date_col_for_year=DEFAULT_DATE_COL_FOR_YEAR):
     missing_cols = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
+
+    # Drop columns that are 100% empty in the source sheet (never drop the
+    # columns we require for validation/aggregation, even if somehow blank).
+    dropped_columns = [
+        c for c in df.columns
+        if c not in REQUIRED_COLS and df[c].isna().all()
+    ]
+    if dropped_columns:
+        df = df.drop(columns=dropped_columns)
 
     # Flag missing client name
     mask_no_client = df["Client/Participant"].isna() | (df["Client/Participant"].astype(str).str.strip() == "")
@@ -59,7 +71,7 @@ def validate_data(df, date_col_for_year=DEFAULT_DATE_COL_FOR_YEAR):
     else:
         clean_df["Year"] = "Unknown"
 
-    return clean_df, issues_df
+    return clean_df, issues_df, dropped_columns
 
 
 def build_pivot(clean_df, company_filter=None, department_filter=None, agent_filter=None):
@@ -129,7 +141,7 @@ if __name__ == "__main__":
     import sys
     fp = sys.argv[1] if len(sys.argv) > 1 else "/mnt/user-data/uploads/Karachi_Conventional_Outstanding.xlsx"
     raw = load_raw_data(fp, sheet_name="Sheet1")
-    clean, issues = validate_data(raw)
+    clean, issues, _dropped = validate_data(raw)
     print(f"Raw rows: {len(raw)}, Clean rows: {len(clean)}, Issues: {len(issues)}")
     print(issues.head(10))
     df, totals = build_pivot(clean)

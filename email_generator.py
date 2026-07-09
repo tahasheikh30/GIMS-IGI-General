@@ -17,7 +17,10 @@ DEFAULT_TEMPLATE = {
         "We would appreciate your settlement at your earliest convenience. "
         "If payment has already been made, please disregard this notice and share "
         "the payment confirmation with us.\n\n"
-        "Please do not hesitate to contact us if you have any questions.\n"
+        "Please do not hesitate to contact us if you have any questions.\n\n"
+        "Regards,\n"
+        "Finance Department\n"
+        "IGI General Takaful"
     ),
 }
 
@@ -95,7 +98,7 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
 if __name__ == "__main__":
     import data_processor as dp
     raw = dp.load_raw_data("/mnt/user-data/uploads/Karachi_Conventional_Outstanding.xlsx", sheet_name="Sheet1")
-    clean, issues = dp.validate_data(raw)
+    clean, issues, _dropped = dp.validate_data(raw)
     df, totals = dp.build_pivot(clean)
     q = dp.qualifying_clients(df, totals, threshold=2_000_000)
     fake_email_lookup = {q.index[0]: "finance@example-client.com", q.index[1]: "ap@example-client2.com"}

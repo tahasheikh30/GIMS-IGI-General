@@ -11,7 +11,8 @@ threshold, and it generates per-client Excel breakdowns and drafts
 |---|---|
 | `app.py` | Main desktop GUI (Tkinter) — run this |
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
-| `report_generator.py` | Builds one styled Excel file per qualifying client (Department x Year) |
+| `report_generator.py` | Writes each client's raw transaction data into its own Excel file |
+| `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
 | `email_generator.py` | Fills the email template per client; template stored in `templates.json` |
 | `outlook_sender.py` | Sends via Outlook COM automation (your own signed-in account) |
 | `run_log.py` | Writes an audit trail to `run_history.json` |
@@ -20,6 +21,10 @@ threshold, and it generates per-client Excel breakdowns and drafts
 
 - Windows PC with **Microsoft Outlook desktop app** installed and signed in
   (emails send through your own mailbox — no separate login needed)
+- **Microsoft Excel desktop app installed** — needed to build genuine, interactive
+  PivotTables (real field list, filters, drill-down) in each report. Without Excel,
+  the app still works but falls back to a static formatted table that looks similar
+  but can't be interacted with like a real pivot.
 - Python 3.9+
 
 Install dependencies:
@@ -63,9 +68,20 @@ within any filters applied) meets or exceeds the threshold, largest first, along
 with the agent(s)/agency associated with that client. Click **Generate Excel
 Reports** to write one file per client (named
 `ClientName_OutstandingBalance_Report.xlsx`) into an `output/` folder. Each file
-now contains **two sheets**:
-- **"Outstanding Balance"** — the Department x Year pivot with Grand Total row/column
-- **"Raw Data"** — every original transaction row for that client from the source sheet
+contains **two sheets**:
+- **"Outstanding Balance"** — a genuine, interactive **Excel PivotTable** (built
+  by driving Excel itself via COM automation), with Department in rows, Year in
+  columns, and Sum of O/s as the value — fully drillable, filterable, and
+  re-configurable using Excel's normal PivotTable Field List, exactly as if you'd
+  built it by hand via Insert → PivotTable.
+- **"Raw Data"** — every original transaction row for that client from the source
+  sheet (this is also the PivotTable's source range, so refreshing the pivot
+  in Excel re-pulls from this sheet)
+
+If Microsoft Excel isn't installed on the machine generating the reports, this
+step automatically falls back to a static formatted table that *looks* like a
+pivot but has no interactive functionality — you'll see a note in the completion
+popup if that happens.
 
 ### Step 3 — Review & Send Emails
 1. Click **Draft Emails** to generate a personalized email per qualifying client
