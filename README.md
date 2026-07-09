@@ -73,7 +73,8 @@ contains **two sheets**:
   by driving Excel itself via COM automation), with Department in rows, Year in
   columns, and Sum of O/s as the value — fully drillable, filterable, and
   re-configurable using Excel's normal PivotTable Field List, exactly as if you'd
-  built it by hand via Insert → PivotTable.
+  built it by hand via Insert → PivotTable. The header cells read "Department"
+  and "Year" (rather than Excel's generic "Row Labels"/"Column Labels" default).
 - **"Raw Data"** — every original transaction row for that client from the source
   sheet (this is also the PivotTable's source range, so refreshing the pivot
   in Excel re-pulls from this sheet)
@@ -84,16 +85,21 @@ pivot but has no interactive functionality — you'll see a note in the completi
 popup if that happens.
 
 ### Step 3 — Review & Send Emails
-1. Click **Draft Emails** to generate a personalized email per qualifying client
+1. At the top of this tab, there's a **"Your Signature"** box — whatever you
+   type there appears after "Regards," at the end of every email. It's saved
+   automatically the moment you click **Draft Emails** (or explicitly via
+   **Save Signature**), and reloads automatically the next time you open the
+   app, so you only need to set it once.
+2. Click **Draft Emails** to generate a personalized email per qualifying client
    from the template in `email_generator.py` / `templates.json`.
-2. Click any row to preview/edit its subject and body. Click **Save Edits** to
+3. Click any row to preview/edit its subject and body. Click **Save Edits** to
    keep your changes for that client only.
-3. **Dry run** is checked by default — this lets you preview exactly what would
+4. **Dry run** is checked by default — this lets you preview exactly what would
    be sent (and to whom) without actually sending anything.
-4. Uncheck dry run and click **Send All** to send for real. Each email attaches
+5. Uncheck dry run and click **Send All** to send for real. Each email attaches
    that client's report from `output/` if one was generated. You'll get a
    confirmation prompt first since this action can't be undone.
-5. Every run (qualifying count, sent/failed counts, filters used) is logged to
+6. Every run (qualifying count, sent/failed counts, filters used) is logged to
    `run_history.json` for audit purposes.
 
 ## Customizing the email template
@@ -104,10 +110,12 @@ templates at runtime (the `save_template()` function is ready to be wired to a
 Reminder" vs "Final Notice" — let me know and I'll add that UI).
 
 Placeholders currently supported: `{client_name}`, `{greeting_name}`, `{amount}`,
-`{report_date}`. `{greeting_name}` resolves to the matched POC name if one exists
-for that client, otherwise the company name — use it in the "Dear ..." line.
-Add more by including the field name in the template and passing it into
-`fields` in `build_email_drafts()`.
+`{report_date}`, `{signature}`. `{greeting_name}` resolves to the matched POC
+name if one exists for that client, otherwise the company name — use it in the
+"Dear ..." line. `{signature}` resolves to whatever is saved in the "Your
+Signature" box on tab 3 (falls back to a generic Finance Department signature
+if left blank). Add more by including the field name in the template and
+passing it into `fields` in `build_email_drafts()`.
 
 ## Packaging as a Windows .exe (optional)
 

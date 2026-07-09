@@ -105,6 +105,21 @@ def add_native_pivot_table(filepath, client_name, raw_sheet_name="Raw Data",
         except Exception:
             pass  # cosmetic only - don't fail the whole report over a style name
 
+        # Excel's default headers say "Row Labels" / "Column Labels" rather
+        # than the actual field names - rename them so the sheet reads
+        # "Department" / "Year" instead. Using Find() rather than a fixed
+        # cell offset so this is robust regardless of exact pivot layout.
+        try:
+            table_range = pivot_table.TableRange2
+            row_label_cell = table_range.Find("Row Labels")
+            if row_label_cell is not None:
+                row_label_cell.Value = row_field
+            col_label_cell = table_range.Find("Column Labels")
+            if col_label_cell is not None:
+                col_label_cell.Value = column_field
+        except Exception:
+            pass  # cosmetic only - don't fail the whole report over a header rename
+
         pivot_ws.Columns("A:F").AutoFit()
         pivot_ws.Move(Before=wb.Sheets(1))  # put the pivot sheet first
 

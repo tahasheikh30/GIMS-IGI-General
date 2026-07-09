@@ -6,6 +6,8 @@ Templates use {placeholder} syntax, e.g.:
 import json
 import os
 
+DEFAULT_SIGNATURE = "Finance Department\nIGI General Takaful"
+
 DEFAULT_TEMPLATE = {
     "name": "Standard Reminder",
     "subject": "Outstanding Balance Notice - {client_name}",
@@ -19,12 +21,29 @@ DEFAULT_TEMPLATE = {
         "the payment confirmation with us.\n\n"
         "Please do not hesitate to contact us if you have any questions.\n\n"
         "Regards,\n"
-        "Finance Department\n"
-        "IGI General Takaful"
+        "{signature}"
     ),
 }
 
 TEMPLATES_FILE = os.path.join(os.path.dirname(__file__), "templates.json")
+SIGNATURE_FILE = os.path.join(os.path.dirname(__file__), "signature.json")
+
+
+def load_signature():
+    """Load the user's personal signature (persisted locally per machine/user)."""
+    if os.path.exists(SIGNATURE_FILE):
+        try:
+            with open(SIGNATURE_FILE, "r") as f:
+                data = json.load(f)
+                return data.get("signature", DEFAULT_SIGNATURE)
+        except Exception:
+            pass
+    return DEFAULT_SIGNATURE
+
+
+def save_signature(signature_text):
+    with open(SIGNATURE_FILE, "w") as f:
+        json.dump({"signature": signature_text}, f, indent=2)
 
 
 def load_templates():
@@ -58,7 +77,7 @@ def fill_template(template, fields):
     return subject, body
 
 
-def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=None, template=None, report_date=None):
+def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=None, template=None, report_date=None, signature=None):
     """
     qualifying_df: index = client names that qualify
     grand_totals: Series client -> total O/s
@@ -66,11 +85,14 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
     poc_lookup: optional dict client_name -> point-of-contact person name.
         When present for a client, the email greeting addresses that person
         ("Dear John,") instead of the company name ("Dear ACME CORP,").
+    signature: text shown after "Regards," at the end of every email. Falls
+        back to DEFAULT_SIGNATURE if not provided or blank.
     Returns list of draft dicts: {client_name, email, subject, body, amount, status}
     """
     if template is None:
         template = DEFAULT_TEMPLATE
     poc_lookup = poc_lookup or {}
+    signature = signature.strip() if signature and signature.strip() else DEFAULT_SIGNATURE
     drafts = []
     for client in qualifying_df:
         amount = grand_totals.get(client, 0)
@@ -81,6 +103,7 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
             "greeting_name": poc_name if poc_name else client,
             "amount": f"{amount:,.0f}",
             "report_date": report_date or "",
+            "signature": signature,
         }
         subject, body = fill_template(template, fields)
         drafts.append({

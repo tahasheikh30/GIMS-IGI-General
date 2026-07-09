@@ -318,6 +318,20 @@ class BalanceApp(tk.Tk):
         ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.dry_run_var).pack(side="left", padx=(0, 12))
         ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_emails, width=14).pack(side="left")
 
+        sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email)  ", padding=10)
+        sig_frame.pack(fill="x", padx=12, pady=(0, 8))
+        sig_frame.columnconfigure(0, weight=1)
+        self.signature_text = tk.Text(sig_frame, height=3, font=("Segoe UI", 10), relief="solid", borderwidth=1, wrap="word")
+        self.signature_text.grid(row=0, column=0, sticky="ew")
+        self.signature_text.insert("1.0", eg.load_signature())
+        sig_btn = tk.Button(
+            sig_frame, text="Save Signature", command=self.save_signature,
+            font=("Segoe UI", 9, "bold"), bg=self.COLOR_ACCENT, fg="white",
+            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
+            relief="flat", padx=10, pady=4, cursor="hand2", borderwidth=0,
+        )
+        sig_btn.grid(row=0, column=1, sticky="n", padx=(10, 0))
+
         body = ttk.Frame(f)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         # Give the list a fixed proportion and the preview panel the rest,
@@ -581,10 +595,13 @@ class BalanceApp(tk.Tk):
             messagebox.showwarning("Nothing to draft", "Run Analyze first (tab 1).")
             return
         template = eg.load_templates().get("Standard Reminder", eg.DEFAULT_TEMPLATE)
+        signature = self.signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)  # persist automatically so it's remembered next time
         from datetime import date
         self.drafts = eg.build_email_drafts(
             self.qualifying.index, self.grand_totals, self.email_lookup,
-            poc_lookup=self.poc_lookup, template=template, report_date=date.today().isoformat()
+            poc_lookup=self.poc_lookup, template=template, report_date=date.today().isoformat(),
+            signature=signature,
         )
         self.email_tree.delete(*self.email_tree.get_children())
         for d in self.drafts:
@@ -593,6 +610,11 @@ class BalanceApp(tk.Tk):
             status = d["status"] if d["status"] != "Ready" else ("Ready" if has_report else "Ready (no report yet)")
             self.email_tree.insert("", "end", values=(d["client_name"], d["email"] or "(missing)", status))
         self.status_var.set(f"Drafted {len(self.drafts)} emails.")
+
+    def save_signature(self):
+        signature = self.signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)
+        self.status_var.set("Signature saved. It will be used the next time you draft emails (or click Draft Emails again to refresh existing drafts).")
 
     def on_select_email(self, event):
         sel = self.email_tree.selection()
