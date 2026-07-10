@@ -16,6 +16,8 @@ import report_generator as rg
 import email_generator as eg
 import outlook_sender as osend
 import pivot_native_generator as pivot_native
+import loss_ratio_processor as lrp
+import loss_ratio_generator as lrg
 import run_log
 
 
@@ -52,6 +54,8 @@ class BalanceApp(tk.Tk):
         self.poc_lookup = {}
         self.drafts = []
         self.output_dir = os.path.join(os.getcwd(), "output")
+
+        self.loss_group_files = []  # list of filepaths selected in Group mode
 
         self._setup_style()
         self._build_ui()
@@ -141,31 +145,26 @@ class BalanceApp(tk.Tk):
                  font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=12, pady=4)
 
     def _build_header(self):
-        """Fixed top header with the GIMS wordmark - stays visible across
-        every sidebar section."""
+        """Fixed top header showing only the GIMS logo + wordmark - stays
+        visible across every sidebar section and never breaks on resize
+        (fixed height, left-anchored content, no elements that depend on
+        window width)."""
         header = tk.Frame(self, bg=self.COLOR_PRIMARY, height=64)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
         brand = tk.Frame(header, bg=self.COLOR_PRIMARY)
-        brand.pack(side="left", padx=20, pady=10)
+        brand.place(relx=0, rely=0.5, x=20, anchor="w")  # vertically centered, fixed left inset
 
         # Simple drawn logo mark (no external image asset needed) - a
-        # rounded accent-colored square with the "G" initial.
+        # circular accent-colored badge with the "G" initial.
         mark = tk.Canvas(brand, width=40, height=40, bg=self.COLOR_PRIMARY, highlightthickness=0)
         mark.pack(side="left", padx=(0, 12))
         mark.create_oval(0, 0, 40, 40, fill=self.COLOR_ACCENT, outline="")
         mark.create_text(20, 21, text="G", fill="white", font=("Segoe UI", 17, "bold"))
 
-        text_col = tk.Frame(brand, bg=self.COLOR_PRIMARY)
-        text_col.pack(side="left")
-        tk.Label(text_col, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
-                 bg=self.COLOR_PRIMARY, fg="white").pack(anchor="w")
-        tk.Label(text_col, text="General Insurance Management System", font=("Segoe UI", 9),
-                 bg=self.COLOR_PRIMARY, fg="#BFD4E6").pack(anchor="w")
-
-        tk.Label(header, text="General Department", font=("Segoe UI", 10),
-                 bg=self.COLOR_PRIMARY, fg="#CFE0EE").pack(side="right", padx=20)
+        tk.Label(brand, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
+                 bg=self.COLOR_PRIMARY, fg="white").pack(side="left")
 
     def _build_sidebar(self, parent):
         """Persistent left sidebar with the three module sections. The
@@ -244,10 +243,14 @@ class BalanceApp(tk.Tk):
         self.nav_pages["outstanding_premium"] = outstanding_page
         self._build_outstanding_premium_page(outstanding_page)
 
-        for key, title in [("loss_ratio", "Loss Ratio"), ("renewal", "Renewal")]:
-            page = self._build_placeholder_page(container, title)
-            page.grid(row=0, column=0, sticky="nsew")
-            self.nav_pages[key] = page
+        loss_ratio_page = ttk.Frame(container)
+        loss_ratio_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["loss_ratio"] = loss_ratio_page
+        self._build_loss_ratio_page(loss_ratio_page)
+
+        renewal_page = self._build_placeholder_page(container, "Renewal")
+        renewal_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["renewal"] = renewal_page
 
         self.select_nav("outstanding_premium")
 
@@ -267,6 +270,202 @@ class BalanceApp(tk.Tk):
         tk.Label(center, text="This module is coming soon.", font=("Segoe UI", 11),
                  bg=self.COLOR_BG, fg=self.COLOR_MUTED).pack()
         return page
+
+    # ---------- Loss Ratio module ----------
+    def _build_loss_ratio_page(self, parent):
+        pad = {"padx": 16, "pady": 8}
+
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=16, pady=(16, 4))
+        ttk.Label(header, text="Loss Ratio", font=("Segoe UI Semibold", 16, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Loss Ratio % = (Incurred Loss + Commission Accrual) \u00f7 Gross Premium Written. "
+                                "Choose Individual for one company, or Group to combine several files "
+                                "into one summary with a Total row.",
+                  foreground=self.COLOR_MUTED, wraplength=760).pack(anchor="w", pady=(4, 0))
+
+        # --- Mode selector ---
+        mode_frame = ttk.Labelframe(parent, text="  Mode  ", padding=12)
+        mode_frame.pack(fill="x", **pad)
+        self.loss_mode_var = tk.StringVar(value="individual")
+        ttk.Radiobutton(mode_frame, text="Individual Company (1 file)", variable=self.loss_mode_var,
+                         value="individual", command=self._toggle_loss_mode).pack(side="left", padx=(0, 24))
+        ttk.Radiobutton(mode_frame, text="Group of Companies (multiple files)", variable=self.loss_mode_var,
+                         value="group", command=self._toggle_loss_mode).pack(side="left")
+        ttk.Label(mode_frame, text="Group / Report Name:").pack(side="left", padx=(30, 6))
+        self.loss_group_name_var = tk.StringVar(value="")
+        ttk.Entry(mode_frame, textvariable=self.loss_group_name_var, width=28).pack(side="left")
+
+        # --- File selection: two stacked frames, only one visible at a time ---
+        file_container = ttk.Frame(parent)
+        file_container.pack(fill="x", **pad)
+        file_container.columnconfigure(0, weight=1)
+
+        self.loss_individual_frame = ttk.Labelframe(file_container, text="  Excel File  ", padding=12)
+        self.loss_individual_frame.grid(row=0, column=0, sticky="ew")
+        self.loss_individual_file_var = tk.StringVar()
+        ttk.Entry(self.loss_individual_frame, textvariable=self.loss_individual_file_var, width=70)\
+            .pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(self.loss_individual_frame, text="Browse...", command=self._browse_loss_individual_file, width=14)\
+            .pack(side="left")
+
+        self.loss_group_frame = ttk.Labelframe(file_container, text="  Excel Files (one per company)  ", padding=12)
+        self.loss_group_frame.grid(row=0, column=0, sticky="ew")
+        group_top = ttk.Frame(self.loss_group_frame)
+        group_top.pack(fill="x", pady=(0, 8))
+        ttk.Button(group_top, text="Add File(s)...", command=self._add_loss_group_files, width=16).pack(side="left", padx=(0, 8))
+        ttk.Button(group_top, text="Remove Selected", command=self._remove_loss_group_file, width=16).pack(side="left")
+
+        list_frame = tk.Frame(self.loss_group_frame, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_frame.pack(fill="x")
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        self.loss_group_listbox = tk.Listbox(list_frame, height=6, font=("Segoe UI", 10), selectmode="extended",
+                                              activestyle="none", relief="flat", borderwidth=0,
+                                              selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                              highlightthickness=0, yscrollcommand=list_scroll.set)
+        list_scroll.configure(command=self.loss_group_listbox.yview)
+        self.loss_group_listbox.pack(side="left", fill="both", expand=True)
+        list_scroll.pack(side="right", fill="y")
+
+        # --- Threshold + Calculate ---
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill="x", **pad)
+        ttk.Label(action_frame, text="Red highlight threshold (%):").pack(side="left", padx=(0, 6))
+        self.loss_threshold_var = tk.StringVar(value="100")
+        ttk.Entry(action_frame, textvariable=self.loss_threshold_var, width=8).pack(side="left", padx=(0, 20))
+        ttk.Label(action_frame, text="(rows \u2265 70% are always flagged amber)",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
+
+        calc_btn = tk.Button(
+            action_frame, text="Calculate Loss Ratio", command=self._calculate_loss_ratio,
+            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
+            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
+            relief="flat", padx=16, pady=8, cursor="hand2", borderwidth=0,
+        )
+        calc_btn.pack(side="left")
+
+        # --- Results / error log ---
+        log_frame = ttk.Labelframe(parent, text="  Processing Log  ", padding=10)
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+        self.loss_log = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9),
+                                                    relief="solid", borderwidth=1)
+        self.loss_log.pack(fill="both", expand=True)
+
+        self._toggle_loss_mode()  # show the correct file-selection frame initially
+
+    def _toggle_loss_mode(self):
+        if self.loss_mode_var.get() == "individual":
+            self.loss_individual_frame.tkraise()
+        else:
+            self.loss_group_frame.tkraise()
+
+    def _browse_loss_individual_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if path:
+            self.loss_individual_file_var.set(path)
+
+    def _add_loss_group_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx")])
+        added = 0
+        for p in paths:
+            if p not in self.loss_group_files:
+                self.loss_group_files.append(p)
+                self.loss_group_listbox.insert("end", os.path.basename(p))
+                added += 1
+        if added:
+            self.status_var.set(f"Added {added} file(s) to the Loss Ratio group ({len(self.loss_group_files)} total).")
+
+    def _remove_loss_group_file(self):
+        selected = list(self.loss_group_listbox.curselection())
+        if not selected:
+            messagebox.showinfo("Nothing selected", "Select one or more files in the list to remove.")
+            return
+        for idx in reversed(selected):
+            self.loss_group_listbox.delete(idx)
+            del self.loss_group_files[idx]
+        self.status_var.set(f"{len(self.loss_group_files)} file(s) remaining in the group.")
+
+    def _log_loss(self, msg):
+        self.loss_log.insert("end", msg + "\n")
+        self.loss_log.see("end")
+
+    def _calculate_loss_ratio(self):
+        mode = self.loss_mode_var.get()
+
+        if mode == "individual":
+            path = self.loss_individual_file_var.get().strip()
+            if not path:
+                messagebox.showerror("No file selected", "Browse to an Excel file first.")
+                return
+            if not os.path.exists(path):
+                messagebox.showerror("File not found", f"Could not find:\n{path}")
+                return
+            filepaths = [path]
+        else:
+            if not self.loss_group_files:
+                messagebox.showerror("No files selected", "Add at least one Excel file to the group first.")
+                return
+            filepaths = list(self.loss_group_files)
+
+        try:
+            threshold = float(self.loss_threshold_var.get())
+        except ValueError:
+            messagebox.showerror("Invalid threshold", "The red highlight threshold must be a number, e.g. 100.")
+            return
+
+        self.loss_log.delete("1.0", "end")
+        self._log_loss(f"Processing {len(filepaths)} file(s) in {'Individual' if mode == 'individual' else 'Group'} mode...\n")
+
+        rows, errors = lrp.process_files(filepaths)
+
+        for r in rows:
+            lr = f"{r['loss_ratio']*100:.2f}%" if r["loss_ratio"] is not None else "N/A"
+            note = f"  [!] {r['warning']}" if r["warning"] else ""
+            self._log_loss(f"  OK   {r['Company Name']:<35} GP={r['Gross Premium Written']:>14,.0f}  Claim={r['Incurred Loss']:>12,.0f}  Comm={r['Commission Accrual']:>12,.0f}  LR={lr}{note}")
+        for e in errors:
+            self._log_loss(f"  ERROR  {e.filename}: {e.message}")
+
+        if not rows:
+            self._log_loss("\nNo files processed successfully - nothing to write.")
+            messagebox.showerror(
+                "Processing failed",
+                "None of the selected file(s) could be processed. See the Processing Log for details."
+            )
+            return
+
+        if errors:
+            proceed = messagebox.askyesno(
+                "Some files had errors",
+                f"{len(rows)} file(s) processed successfully, but {len(errors)} file(s) had errors "
+                f"(see the Processing Log for details).\n\nContinue and generate the report for the "
+                f"{len(rows)} successful file(s)?"
+            )
+            if not proceed:
+                return
+
+        group_name = self.loss_group_name_var.get().strip() or ("LOSS RATIO SUMMARY" if mode == "individual" else "GROUP SUMMARY")
+        default_name = "LossRatio_Group_Summary.xlsx" if mode == "group" else f"LossRatio_{rg.safe_filename(rows[0]['Company Name'])}.xlsx"
+        output_path = filedialog.asksaveasfilename(
+            title="Save Loss Ratio Report As",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=default_name,
+        )
+        if not output_path:
+            self._log_loss("\nSave cancelled - report was not written.")
+            return
+
+        try:
+            lrg.build_loss_ratio_workbook(rows, mode=mode, output_path=output_path,
+                                           group_name=group_name, red_threshold_pct=threshold)
+        except Exception as e:
+            self._log_loss(f"\nERROR writing output file: {e}")
+            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{e}")
+            return
+
+        self._log_loss(f"\nSaved: {output_path}")
+        self.status_var.set(f"Loss Ratio report saved: {os.path.basename(output_path)}")
+        messagebox.showinfo("Done", f"Loss Ratio report generated successfully:\n{output_path}")
 
     def _build_outstanding_premium_page(self, parent):
         """The existing Outstanding Premium workflow (Upload & Filter,
@@ -459,13 +658,19 @@ class BalanceApp(tk.Tk):
         self.signature_text = tk.Text(sig_frame, height=3, font=("Segoe UI", 10), relief="solid", borderwidth=1, wrap="word")
         self.signature_text.grid(row=0, column=0, sticky="ew")
         self.signature_text.insert("1.0", eg.load_signature())
+
+        # Wrap the button in its own cell-filling frame and pack(expand=True)
+        # inside it, so the button is centered vertically against the
+        # multi-line text box rather than floating at the top of the row.
+        sig_btn_holder = tk.Frame(sig_frame, bg=self.COLOR_PANEL)
+        sig_btn_holder.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         sig_btn = tk.Button(
-            sig_frame, text="Save Signature", command=self.save_signature,
+            sig_btn_holder, text="Save Signature", command=self.save_signature,
             font=("Segoe UI", 9, "bold"), bg=self.COLOR_ACCENT, fg="white",
             activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
             relief="flat", padx=10, pady=4, cursor="hand2", borderwidth=0,
         )
-        sig_btn.grid(row=0, column=1, sticky="n", padx=(10, 0))
+        sig_btn.pack(expand=True)
 
         body = ttk.Frame(f)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 12))

@@ -5,7 +5,9 @@ with three modules:
 - **Outstanding Premium** — fully built: upload the client balance sheet, set
   a threshold, generate per-client Excel PivotTable reports, and draft/send
   reminder emails through your own Outlook account.
-- **Loss Ratio** — placeholder, reserved for a future module.
+- **Loss Ratio** — fully built: calculate Loss Ratio (Claims Paid ÷ Gross
+  Premium) for one company or a group of companies from their own Excel
+  files, with a styled, color-flagged summary report.
 - **Renewal** — placeholder, reserved for a future module.
 
 ## What's included
@@ -18,6 +20,8 @@ with three modules:
 | `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
 | `email_generator.py` | Fills the email template per client; template stored in `templates.json` |
 | `outlook_sender.py` | Sends via Outlook COM automation (your own signed-in account) |
+| `loss_ratio_processor.py` | Reads/validates Loss Ratio input files, normalizes column-name variations, aggregates per company |
+| `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output |
 | `run_log.py` | Writes an audit trail to `run_history.json` |
 
 ## Requirements
@@ -111,6 +115,69 @@ popup if that happens.
    confirmation prompt first since this action can't be undone.
 6. Every run (qualifying count, sent/failed counts, filters used) is logged to
    `run_history.json` for audit purposes.
+
+## Loss Ratio module
+
+Click **Loss Ratio** in the sidebar.
+
+**Formula (verified against a real IGI sample file and its source report):**
+```
+Loss Ratio % = (Incurred Loss + Commission Accrual) / Gross Premium Written × 100
+```
+This matches your system's own "Loss Ratio (B+C/A)" definition, where A = Gross
+Premium Written, B = Incurred Loss, C = Commission Accrual.
+
+1. **Choose a mode:**
+   - **Individual Company** — browse to a single Excel file for one company.
+   - **Group of Companies** — click **Add File(s)...** to select one or more
+     Excel files at once, one per company. Select a file in the list and
+     click **Remove Selected** to take it out before processing.
+2. **Group / Report Name** — text shown in the green banner at the top of the
+   output (e.g. "POPULAR GROUP"). Leave blank for a generic default.
+3. **Set the red highlight threshold** (default 100%) — any company's Loss
+   Ratio above this is flagged red. Anything ≥70% is always flagged amber
+   (this coloring is an addition on top of your existing template, which
+   doesn't otherwise style individual rows).
+4. Click **Calculate Loss Ratio**. The Processing Log shows each file's
+   result or error — a problem in one file (missing column, non-numeric
+   value, unreadable file) doesn't stop the others from processing. If any
+   files errored, you'll be asked whether to continue with just the
+   successful ones.
+5. A **Save As** dialog lets you choose where to save the output `.xlsx`.
+
+**Expected input columns** (case-insensitive, naming variations like
+"Gross Premium Written ( A )" or "GP" are automatically recognized):
+- Required: `Gross Premium Written`, `Incurred Loss`
+- Optional: `Commission Accrual` (treated as 0 if absent — flagged in the
+  Processing Log so it's never silently wrong), `Company Name` (falls back
+  to the filename if absent)
+
+**Multi-year source files:** if a file has one row per policy year (matching
+your system's per-client export format) plus a "Client Total" or "Grand
+Total" row, that total row is used directly rather than summing every row —
+this avoids double-counting. A leading account-code prefix in the client
+name cell (e.g. "1120106182 SAYA WEAVING MILLS...") is stripped automatically.
+
+**Output format** replicates your real "Group Summary" template exactly:
+merged green group-name banner, `CLIENT | GP | CLAIM | COMMISSION | LR`
+header row, and — critically — **live Excel formulas** for the LR column
+(`=SUM(D:E)/C%`) and the Total row, not hardcoded numbers, so the sheet
+recalculates correctly if you ever edit a value by hand. The Total row's LR
+cell is highlighted yellow, matching your existing template.
+
+I validated this by reconstructing all 11 companies from your real
+`Popular_Group_Loss_Ratio.xlsx` sample as separate input files and confirmed
+every single computed value — down to 6 decimal places — matches your
+original file exactly, including the 105.408432% group total.
+
+If any of your real files use column headers not covered by the alias list,
+send me an example and I'll add them to `loss_ratio_processor.py`'s
+`ALIASES` dict.
+
+**Output:** a "Loss Ratio Summary" sheet with one row per company, a bold
+Total/Group row in Group mode, and cells color-coded red/amber based on the
+Loss Ratio thresholds — styled consistently with the Outstanding Premium
+reports (same fonts, header colors, borders, number formats).
 
 ## Customizing the email template
 
