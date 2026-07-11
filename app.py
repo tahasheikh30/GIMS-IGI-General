@@ -273,43 +273,85 @@ class BalanceApp(tk.Tk):
 
     # ---------- Loss Ratio module ----------
     def _build_loss_ratio_page(self, parent):
-        pad = {"padx": 16, "pady": 8}
+        # Scrollable container - same safety pattern as the Outstanding
+        # Premium setup tab, so nothing can ever be pushed off-screen on a
+        # smaller window.
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(parent)
-        header.pack(fill="x", padx=16, pady=(16, 4))
-        ttk.Label(header, text="Loss Ratio", font=("Segoe UI Semibold", 16, "bold"),
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        PAD_X = 20
+
+        # --- Page header ---
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Loss Ratio", font=("Segoe UI Semibold", 17, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
-        ttk.Label(header, text="Loss Ratio % = (Incurred Loss + Commission Accrual) \u00f7 Gross Premium Written. "
-                                "Choose Individual for one company, or Group to combine several files "
-                                "into one summary with a Total row.",
-                  foreground=self.COLOR_MUTED, wraplength=760).pack(anchor="w", pady=(4, 0))
+        ttk.Label(header, text="Calculate and summarize Loss Ratio for one company or a group, from Excel or PDF source files.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
 
-        # --- Mode selector ---
-        mode_frame = ttk.Labelframe(parent, text="  Mode  ", padding=12)
-        mode_frame.pack(fill="x", **pad)
+        formula_badge = tk.Frame(header, bg=self.COLOR_SIDEBAR_ACTIVE)
+        formula_badge.pack(anchor="w")
+        tk.Label(formula_badge, text="Loss Ratio %  =  (Incurred Loss + Commission Accrual)  \u00f7  Gross Premium Written  \u00d7  100",
+                 bg=self.COLOR_SIDEBAR_ACTIVE, fg=self.COLOR_PRIMARY, font=("Consolas", 10, "bold"),
+                 padx=14, pady=8).pack()
+
+        # --- Section 1: Mode ---
+        s1 = self._loss_section_card(body, "1", "Mode & Report Name", PAD_X)
         self.loss_mode_var = tk.StringVar(value="individual")
-        ttk.Radiobutton(mode_frame, text="Individual Company (1 file)", variable=self.loss_mode_var,
-                         value="individual", command=self._toggle_loss_mode).pack(side="left", padx=(0, 24))
-        ttk.Radiobutton(mode_frame, text="Group of Companies (multiple files)", variable=self.loss_mode_var,
+        mode_row = ttk.Frame(s1)
+        mode_row.pack(fill="x", pady=(0, 12))
+        ttk.Radiobutton(mode_row, text="Individual Company  (1 file)", variable=self.loss_mode_var,
+                         value="individual", command=self._toggle_loss_mode).pack(side="left", padx=(0, 30))
+        ttk.Radiobutton(mode_row, text="Group of Companies  (multiple files)", variable=self.loss_mode_var,
                          value="group", command=self._toggle_loss_mode).pack(side="left")
-        ttk.Label(mode_frame, text="Group / Report Name:").pack(side="left", padx=(30, 6))
-        self.loss_group_name_var = tk.StringVar(value="")
-        ttk.Entry(mode_frame, textvariable=self.loss_group_name_var, width=28).pack(side="left")
 
-        # --- File selection: two stacked frames, only one visible at a time ---
-        file_container = ttk.Frame(parent)
-        file_container.pack(fill="x", **pad)
+        name_row = ttk.Frame(s1)
+        name_row.pack(fill="x")
+        ttk.Label(name_row, text="Group / Report Name", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(name_row, text="Shown in the green banner at the top of the output (e.g. \"POPULAR GROUP\"). Optional.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 4))
+        self.loss_group_name_var = tk.StringVar(value="")
+        ttk.Entry(name_row, textvariable=self.loss_group_name_var, width=40, font=("Segoe UI", 10)).pack(anchor="w")
+
+        # --- Section 2: File selection ---
+        s2 = self._loss_section_card(body, "2", "Input Files", PAD_X)
+        ttk.Label(s2, text="Accepts .xlsx and .pdf. A single multi-client PDF (covering a client range) can populate an entire group automatically.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+
+        file_container = ttk.Frame(s2)
+        file_container.pack(fill="x")
         file_container.columnconfigure(0, weight=1)
 
-        self.loss_individual_frame = ttk.Labelframe(file_container, text="  Excel File  ", padding=12)
+        self.loss_individual_frame = ttk.Frame(file_container)
         self.loss_individual_frame.grid(row=0, column=0, sticky="ew")
         self.loss_individual_file_var = tk.StringVar()
-        ttk.Entry(self.loss_individual_frame, textvariable=self.loss_individual_file_var, width=70)\
+        ttk.Entry(self.loss_individual_frame, textvariable=self.loss_individual_file_var, font=("Segoe UI", 10))\
             .pack(side="left", fill="x", expand=True, padx=(0, 8))
         ttk.Button(self.loss_individual_frame, text="Browse...", command=self._browse_loss_individual_file, width=14)\
             .pack(side="left")
 
-        self.loss_group_frame = ttk.Labelframe(file_container, text="  Excel Files (one per company)  ", padding=12)
+        self.loss_group_frame = ttk.Frame(file_container)
         self.loss_group_frame.grid(row=0, column=0, sticky="ew")
         group_top = ttk.Frame(self.loss_group_frame)
         group_top.pack(fill="x", pady=(0, 8))
@@ -327,31 +369,54 @@ class BalanceApp(tk.Tk):
         self.loss_group_listbox.pack(side="left", fill="both", expand=True)
         list_scroll.pack(side="right", fill="y")
 
-        # --- Threshold + Calculate ---
-        action_frame = ttk.Frame(parent)
-        action_frame.pack(fill="x", **pad)
-        ttk.Label(action_frame, text="Red highlight threshold (%):").pack(side="left", padx=(0, 6))
+        # --- Section 3: Threshold + Calculate ---
+        s3 = self._loss_section_card(body, "3", "Threshold & Generate", PAD_X)
+        threshold_row = ttk.Frame(s3)
+        threshold_row.pack(fill="x", pady=(0, 14))
+        ttk.Label(threshold_row, text="Red highlight threshold:", font=("Segoe UI", 10)).pack(side="left", padx=(0, 8))
         self.loss_threshold_var = tk.StringVar(value="100")
-        ttk.Entry(action_frame, textvariable=self.loss_threshold_var, width=8).pack(side="left", padx=(0, 20))
-        ttk.Label(action_frame, text="(rows \u2265 70% are always flagged amber)",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(0, 20))
+        ttk.Entry(threshold_row, textvariable=self.loss_threshold_var, width=6, font=("Segoe UI", 10)).pack(side="left")
+        ttk.Label(threshold_row, text="%", font=("Segoe UI", 10)).pack(side="left", padx=(4, 16))
+        ttk.Label(threshold_row, text="Rows \u2265 70% are always flagged amber, regardless of this value.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
 
         calc_btn = tk.Button(
-            action_frame, text="Calculate Loss Ratio", command=self._calculate_loss_ratio,
+            s3, text="Calculate Loss Ratio", command=self._calculate_loss_ratio,
             font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
             activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=16, pady=8, cursor="hand2", borderwidth=0,
+            relief="flat", padx=18, pady=9, cursor="hand2", borderwidth=0,
         )
-        calc_btn.pack(side="left")
+        calc_btn.pack(anchor="w")
 
-        # --- Results / error log ---
-        log_frame = ttk.Labelframe(parent, text="  Processing Log  ", padding=10)
-        log_frame.pack(fill="both", expand=True, padx=16, pady=(8, 16))
-        self.loss_log = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9),
+        # --- Section 4: Log ---
+        s4 = self._loss_section_card(body, "4", "Processing Log", PAD_X, expand_bottom=True)
+        self.loss_log = scrolledtext.ScrolledText(s4, height=10, font=("Consolas", 9),
                                                     relief="solid", borderwidth=1)
         self.loss_log.pack(fill="both", expand=True)
 
         self._toggle_loss_mode()  # show the correct file-selection frame initially
+
+    def _loss_section_card(self, parent, number, title, pad_x, expand_bottom=False):
+        """A numbered section card matching the app's '1. Upload & Filter'
+        style numbering convention, for visual consistency across pages."""
+        wrapper = tk.Frame(parent, bg=self.COLOR_PANEL, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        wrapper.pack(fill="both" if expand_bottom else "x", expand=expand_bottom,
+                     padx=pad_x, pady=8)
+
+        title_row = tk.Frame(wrapper, bg=self.COLOR_PANEL)
+        title_row.pack(fill="x", padx=16, pady=(14, 10))
+
+        badge = tk.Canvas(title_row, width=22, height=22, bg=self.COLOR_PANEL, highlightthickness=0)
+        badge.pack(side="left", padx=(0, 8))
+        badge.create_oval(1, 1, 21, 21, fill=self.COLOR_ACCENT, outline="")
+        badge.create_text(11, 11, text=number, fill="white", font=("Segoe UI", 9, "bold"))
+
+        tk.Label(title_row, text=title, bg=self.COLOR_PANEL, fg=self.COLOR_PRIMARY,
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+
+        content = tk.Frame(wrapper, bg=self.COLOR_PANEL)
+        content.pack(fill="both" if expand_bottom else "x", expand=expand_bottom, padx=16, pady=(0, 16))
+        return content
 
     def _toggle_loss_mode(self):
         if self.loss_mode_var.get() == "individual":
@@ -360,12 +425,20 @@ class BalanceApp(tk.Tk):
             self.loss_group_frame.tkraise()
 
     def _browse_loss_individual_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel or PDF files", "*.xlsx *.xls *.pdf"),
+            ("Excel files", "*.xlsx *.xls"),
+            ("PDF files", "*.pdf"),
+        ])
         if path:
             self.loss_individual_file_var.set(path)
 
     def _add_loss_group_files(self):
-        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx")])
+        paths = filedialog.askopenfilenames(filetypes=[
+            ("Excel or PDF files", "*.xlsx *.xls *.pdf"),
+            ("Excel files", "*.xlsx *.xls"),
+            ("PDF files", "*.pdf"),
+        ])
         added = 0
         for p in paths:
             if p not in self.loss_group_files:
@@ -418,10 +491,14 @@ class BalanceApp(tk.Tk):
 
         rows, errors = lrp.process_files(filepaths)
 
+        from collections import Counter
+        rows_per_source = Counter(r.get("source_file", "") for r in rows)
+
         for r in rows:
             lr = f"{r['loss_ratio']*100:.2f}%" if r["loss_ratio"] is not None else "N/A"
             note = f"  [!] {r['warning']}" if r["warning"] else ""
-            self._log_loss(f"  OK   {r['Company Name']:<35} GP={r['Gross Premium Written']:>14,.0f}  Claim={r['Incurred Loss']:>12,.0f}  Comm={r['Commission Accrual']:>12,.0f}  LR={lr}{note}")
+            multi_note = "  (multi-client PDF)" if rows_per_source.get(r.get("source_file", ""), 1) > 1 else ""
+            self._log_loss(f"  OK   [{r.get('source_file', '?'):<28}] {r['Company Name']:<35} GP={r['Gross Premium Written']:>14,.0f}  Claim={r['Incurred Loss']:>12,.0f}  Comm={r['Commission Accrual']:>12,.0f}  LR={lr}{note}{multi_note}")
         for e in errors:
             self._log_loss(f"  ERROR  {e.filename}: {e.message}")
 

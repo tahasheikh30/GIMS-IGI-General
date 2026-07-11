@@ -19,6 +19,12 @@ import os
 import re
 import pandas as pd
 
+try:
+    import pdfplumber
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 REQUIRED_CANONICAL = ["Gross Premium Written", "Incurred Loss"]
 OPTIONAL_CANONICAL = ["Commission Accrual"]
 
@@ -55,6 +61,138 @@ for canonical, aliases in ALIASES.items():
 # source export (e.g. "Client Total", "Grand Total") - matched as a
 # case-insensitive substring.
 TOTAL_ROW_MARKERS = ["grand total", "client total"]
+
+
+def _parse_number(tok):
+    """'1,354,723' -> 1354723.0, '(1,234)' -> -1234.0, '-' -> 0.0"""
+    tok = tok.strip()
+    if tok in ("", "-", "--"):
+        return 0.0
+    negative = tok.startswith("(") and tok.endswith(")")
+    tok = tok.strip("()").replace(",", "")
+    try:
+        val = float(tok)
+    except ValueError:
+        return 0.0
+    return -val if negative else val
+
+
+_NUMBER_RE = re.compile(r"\(?-?[\d,]+(?:\.\d+)?\)?")
+_CLIENT_HEADER_RE = re.compile(r"^\s*\d{5,}\s+([A-Za-z].*?)\s*$")
+_CLIENT_TOTAL_RE = re.compile(r"^\s*Client\s+Total\s+(.*)$", re.IGNORECASE)
+_GRAND_TOTAL_RE = re.compile(r"^\s*Grand\s+Total\s+(.*)$", re.IGNORECASE)
+
+
+def _extract_pdf_text(filepath):
+    if not PDF_AVAILABLE:
+        raise LossRatioInputError(
+            filepath, "pdfplumber is not installed - PDF input requires 'pip install pdfplumber'"
+        )
+    try:
+        lines = []
+        with pdfplumber.open(filepath) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text(layout=True) or ""
+                lines.extend(text.split("\n"))
+        return lines
+    except Exception as e:
+        raise LossRatioInputError(filepath, f"Could not read PDF file ({e})")
+
+
+def _totals_from_tokens(tokens):
+    """Given the 24 numeric tokens after a Client/Grand Total label
+    (Premium block of 6, Loss block of 6, Commission block of 6, Ratio
+    block of 6 - each ordered Fire/Marine/Motor/Bond-Engg/Others/Total),
+    return the three Total (6th) values from the first three blocks."""
+    values = [_parse_number(t) for t in _NUMBER_RE.findall(tokens)]
+    if len(values) < 18:
+        return None  # not a well-formed totals line
+    gross_premium = values[5]
+    incurred_loss = values[11]
+    commission = values[17]
+    return gross_premium, incurred_loss, commission
+
+
+def _parse_client_total_lines(lines, filepath="pdf_input"):
+    """Core parsing logic, separated from PDF file I/O so it can be unit
+    tested against synthetic line lists. See extract_rows_from_pdf for
+    the full behavior description."""
+    rows = []
+    current_client_name = None
+    fallback_grand_total_tokens = None
+
+    for line in lines:
+        header_match = _CLIENT_HEADER_RE.match(line)
+        if header_match:
+            current_client_name = _clean_company_name(header_match.group(1))
+            continue
+
+        ct_match = _CLIENT_TOTAL_RE.match(line)
+        if ct_match:
+            totals = _totals_from_tokens(ct_match.group(1))
+            if totals:
+                gross_premium, incurred_loss, commission = totals
+                rows.append({
+                    "Company Name": current_client_name or os.path.splitext(os.path.basename(filepath))[0],
+                    "Gross Premium Written": gross_premium,
+                    "Incurred Loss": incurred_loss,
+                    "Commission Accrual": commission,
+                    "source_file": os.path.basename(filepath),
+                })
+            continue
+
+        gt_match = _GRAND_TOTAL_RE.match(line)
+        if gt_match:
+            totals = _totals_from_tokens(gt_match.group(1))
+            if totals:
+                fallback_grand_total_tokens = (current_client_name, totals)
+            continue
+
+    if not rows and fallback_grand_total_tokens:
+        name, (gross_premium, incurred_loss, commission) = fallback_grand_total_tokens
+        rows.append({
+            "Company Name": name or os.path.splitext(os.path.basename(filepath))[0],
+            "Gross Premium Written": gross_premium,
+            "Incurred Loss": incurred_loss,
+            "Commission Accrual": commission,
+            "source_file": os.path.basename(filepath),
+        })
+
+    return rows
+
+
+def extract_rows_from_pdf(filepath):
+    """
+    Parse IGI's "Loss Ratio Gross Premium Written" Crystal Reports PDF
+    export. Returns one row per client block found (a PDF run for a single
+    client yields one row; a PDF run across a client range yields one row
+    per client - each client's own "Client Total" line is used so
+    per-year rows aren't double-counted, and the report's own single
+    trailing "Grand Total" - which sums across every client in the PDF -
+    is not treated as an extra company row).
+
+    Falls back to using a standalone "Grand Total" line if no per-client
+    "Client Total" lines are found at all (single-block report variants).
+    """
+    lines = _extract_pdf_text(filepath)
+    rows = _parse_client_total_lines(lines, filepath)
+
+    if not rows:
+        raise LossRatioInputError(
+            filepath,
+            "Could not find a 'Client Total' or 'Grand Total' row in this PDF - "
+            "the layout may not match the expected Loss Ratio report format."
+        )
+
+    for row in rows:
+        if row["Gross Premium Written"] == 0:
+            row["loss_ratio"] = None
+            row["warning"] = "Gross Premium Written is zero - Loss Ratio not computable"
+        else:
+            row["loss_ratio"] = (row["Incurred Loss"] + row["Commission Accrual"]) / row["Gross Premium Written"]
+            row["warning"] = None
+
+    return rows
 
 
 def _normalize_header(header):
@@ -109,9 +247,11 @@ def _find_total_row_mask(df, label_col):
     return mask
 
 
-def read_and_aggregate_file(filepath):
+def _read_excel_rows(filepath):
     """
-    Read one Excel file and collapse it to a single company row:
+    Read one Excel file and collapse it to a single company row (returned
+    as a one-item list, for a uniform interface with the PDF reader, which
+    can return multiple rows from one file):
       {Company Name, Gross Premium Written, Incurred Loss, Commission Accrual,
        loss_ratio (fraction, or None if Gross Premium Written is 0),
        warning, source_file}
@@ -206,13 +346,29 @@ def read_and_aggregate_file(filepath):
         row["loss_ratio"] = (incurred_loss + commission) / gross_premium
 
     row["warning"] = "; ".join(warnings) if warnings else None
-    return row
+    return [row]
+
+
+def read_file(filepath):
+    """
+    Dispatches to the Excel or PDF reader based on file extension. Both
+    return a list of one or more company row dicts.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".pdf":
+        return extract_rows_from_pdf(filepath)
+    elif ext in (".xlsx", ".xls", ".xlsm"):
+        return _read_excel_rows(filepath)
+    else:
+        raise LossRatioInputError(filepath, f"Unsupported file type '{ext}' - only .xlsx and .pdf are supported")
 
 
 def process_files(filepaths):
     """
-    Process a batch of files. Returns (rows, errors):
-      rows: list of successfully aggregated company rows
+    Process a batch of files (Excel and/or PDF, mixed freely). Returns
+    (rows, errors):
+      rows: list of successfully aggregated company rows - a single PDF
+            covering a client range can contribute multiple rows
       errors: list of LossRatioInputError for files that failed - a
               failure in one file doesn't stop the others from processing.
     """
@@ -220,7 +376,7 @@ def process_files(filepaths):
     errors = []
     for fp in filepaths:
         try:
-            rows.append(read_and_aggregate_file(fp))
+            rows.extend(read_file(fp))
         except LossRatioInputError as e:
             errors.append(e)
         except Exception as e:

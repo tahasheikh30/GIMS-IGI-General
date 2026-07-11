@@ -118,7 +118,9 @@ popup if that happens.
 
 ## Loss Ratio module
 
-Click **Loss Ratio** in the sidebar.
+Click **Loss Ratio** in the sidebar. The page is organized into four
+numbered cards: Mode & Report Name, Input Files, Threshold & Generate, and
+Processing Log.
 
 **Formula (verified against a real IGI sample file and its source report):**
 ```
@@ -127,36 +129,50 @@ Loss Ratio % = (Incurred Loss + Commission Accrual) / Gross Premium Written × 1
 This matches your system's own "Loss Ratio (B+C/A)" definition, where A = Gross
 Premium Written, B = Incurred Loss, C = Commission Accrual.
 
+**Accepted input files: Excel (`.xlsx`) or PDF.**
+- **Excel**: expects `Gross Premium Written`, `Incurred Loss`, and optionally
+  `Commission Accrual` columns (see alias list below). Multi-year files with
+  a "Client Total"/"Grand Total" row use that row directly rather than
+  summing every row, to avoid double-counting.
+- **PDF**: reads IGI's own "Loss Ratio Gross Premium Written" Crystal
+  Reports export format directly — the same layout as your system's PDF
+  print-out. It finds each client's "Client Total" line and pulls the
+  Gross Premium Written / Incurred Loss / Commission Accrual totals from
+  it. **A single PDF covering a client range produces one row per client**,
+  so one multi-client PDF export can populate an entire Group report by
+  itself — you don't need to split it into per-company files first. The
+  report's own overall "Grand Total" line (the sum across every client in
+  the PDF) is correctly excluded from the row list, since it isn't a company.
+
 1. **Choose a mode:**
-   - **Individual Company** — browse to a single Excel file for one company.
-   - **Group of Companies** — click **Add File(s)...** to select one or more
-     Excel files at once, one per company. Select a file in the list and
-     click **Remove Selected** to take it out before processing.
-2. **Group / Report Name** — text shown in the green banner at the top of the
-   output (e.g. "POPULAR GROUP"). Leave blank for a generic default.
+   - **Individual Company** — browse to a single file for one company.
+   - **Group of Companies** — click **Add File(s)...** to select one or
+     more files (Excel and PDF can be mixed freely in the same batch).
+     Select a file in the list and click **Remove Selected** to take it
+     out before processing.
+2. **Group / Report Name** — text shown in the green banner at the top of
+   the output (e.g. "POPULAR GROUP"). Leave blank for a generic default.
 3. **Set the red highlight threshold** (default 100%) — any company's Loss
    Ratio above this is flagged red. Anything ≥70% is always flagged amber
    (this coloring is an addition on top of your existing template, which
    doesn't otherwise style individual rows).
 4. Click **Calculate Loss Ratio**. The Processing Log shows each file's
-   result or error — a problem in one file (missing column, non-numeric
-   value, unreadable file) doesn't stop the others from processing. If any
-   files errored, you'll be asked whether to continue with just the
-   successful ones.
+   result or error, tagged with the source filename — a problem in one
+   file (missing column, non-numeric value, unreadable file, unrecognized
+   PDF layout) doesn't stop the others from processing. If any files
+   errored, you'll be asked whether to continue with just the successful
+   ones.
 5. A **Save As** dialog lets you choose where to save the output `.xlsx`.
 
-**Expected input columns** (case-insensitive, naming variations like
+**Expected Excel column names** (case-insensitive, naming variations like
 "Gross Premium Written ( A )" or "GP" are automatically recognized):
 - Required: `Gross Premium Written`, `Incurred Loss`
 - Optional: `Commission Accrual` (treated as 0 if absent — flagged in the
   Processing Log so it's never silently wrong), `Company Name` (falls back
   to the filename if absent)
 
-**Multi-year source files:** if a file has one row per policy year (matching
-your system's per-client export format) plus a "Client Total" or "Grand
-Total" row, that total row is used directly rather than summing every row —
-this avoids double-counting. A leading account-code prefix in the client
-name cell (e.g. "1120106182 SAYA WEAVING MILLS...") is stripped automatically.
+A leading account-code prefix in a client name cell (e.g. "1120106182 SAYA
+WEAVING MILLS...") is stripped automatically, in both Excel and PDF inputs.
 
 **Output format** replicates your real "Group Summary" template exactly:
 merged green group-name banner, `CLIENT | GP | CLAIM | COMMISSION | LR`
@@ -165,14 +181,14 @@ header row, and — critically — **live Excel formulas** for the LR column
 recalculates correctly if you ever edit a value by hand. The Total row's LR
 cell is highlighted yellow, matching your existing template.
 
-I validated this by reconstructing all 11 companies from your real
-`Popular_Group_Loss_Ratio.xlsx` sample as separate input files and confirmed
-every single computed value — down to 6 decimal places — matches your
-original file exactly, including the 105.408432% group total.
+I validated this two ways: reconstructing all 11 companies from your real
+`Popular_Group_Loss_Ratio.xlsx` sample as separate input files (every value
+matched to 6 decimal places, including the 105.408432% group total), and
+parsing your real `Loss_Ratio.pdf` sample directly (extracted GP, Loss, and
+Commission matched the report's own printed 10.73% total ratio exactly).
 
-If any of your real files use column headers not covered by the alias list,
-send me an example and I'll add them to `loss_ratio_processor.py`'s
-`ALIASES` dict.
+If any of your real files use column headers, or a PDF layout, not covered
+here, send me an example and I'll extend the matching.
 
 **Output:** a "Loss Ratio Summary" sheet with one row per company, a bold
 Total/Group row in Group mode, and cells color-coded red/amber based on the
