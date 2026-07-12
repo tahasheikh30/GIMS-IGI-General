@@ -24,6 +24,8 @@ with the following sections:
 | File | Purpose |
 |---|---|
 | `app.py` | Main desktop GUI (Tkinter) — run this |
+| `assets/gims_logo_cropped.png` | GIMS logo shown top-left in the header |
+| `assets/company_logo_cropped.png` | Company logo shown top-right in the header |
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
 | `report_generator.py` | Writes each client's raw transaction data into its own Excel file |
 | `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
@@ -47,6 +49,9 @@ with the following sections:
   the app still works but falls back to a static formatted table that looks similar
   but can't be interacted with like a real pivot.
 - Python 3.9+
+- **Pillow** (for the header logos — falls back to a plain drawn "G" badge on
+  the left if it isn't installed or the `assets/` files are missing; the
+  rest of the app is unaffected either way)
 
 Install dependencies:
 ```

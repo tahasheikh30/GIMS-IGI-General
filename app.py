@@ -11,6 +11,12 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 import pandas as pd
 
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 import data_processor as dp
 import report_generator as rg
 import email_generator as eg
@@ -26,6 +32,23 @@ import receivable_run_log as rvlog
 import run_log
 
 
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+GIMS_LOGO_PATH = os.path.join(ASSETS_DIR, "gims_logo_cropped.png")
+COMPANY_LOGO_PATH = os.path.join(ASSETS_DIR, "company_logo_cropped.png")
+
+# Simple leading glyphs for each sidebar nav item - kept as plain
+# characters (no emoji) so they render consistently across Windows font
+# sets instead of relying on a specific icon font being installed.
+NAV_ICONS = {
+    "outstanding_premium": "\u25A3",   # filled-grid square - balances/reporting
+    "loss_ratio": "\u25B3",            # triangle - ratio/analysis
+    "coinsurance_pc_email": "\u2709",  # envelope - email automation
+    "coinsurance_premium_register": "\u2263",  # stacked lines - register/list
+    "coinsurance_claims_register": "\u2263",
+    "renewal": "\u27F3",               # circular arrow - renewal
+}
+
+
 class BalanceApp(tk.Tk):
     # Palette
     COLOR_BG = "#EAF0F6"       # soft blue-grey app background (was flat light grey)
@@ -39,8 +62,11 @@ class BalanceApp(tk.Tk):
     COLOR_TEXT = "#1C2733"
     COLOR_MUTED = "#5B6B79"
     COLOR_BORDER = "#D3DEE8"
-    COLOR_SIDEBAR = "#F7FAFC"       # sidebar background - close to panel-alt, distinct from main canvas
+    COLOR_SIDEBAR = "#F9FBFD"       # sidebar background - close to panel-alt, distinct from main canvas
     COLOR_SIDEBAR_ACTIVE = "#E4EDF5"  # active nav item background tint
+    COLOR_SIDEBAR_HOVER = "#EEF3F8"   # hover tint, one step lighter than active
+    COLOR_SIDEBAR_SUBBG = "#F2F6FA"   # subtle tint behind the Coinsurance submenu block
+    COLOR_HEADER_BORDER = "#153252"   # hairline shadow strip under the header, elevates it off the page
 
     def __init__(self):
         super().__init__()
@@ -60,6 +86,7 @@ class BalanceApp(tk.Tk):
         self.drafts = []
         self.output_dir = os.path.join(os.getcwd(), "output")
 
+        self.active_nav = None
         self.loss_group_files = []  # list of filepaths selected in Group mode
 
         self.receivable_raw_df = None
@@ -73,8 +100,35 @@ class BalanceApp(tk.Tk):
         self.receivable_poc_lookup = {}
         self.receivable_drafts = []
 
+        self._load_logos()
         self._setup_style()
         self._build_ui()
+
+    def _load_logos(self):
+        """Load the GIMS wordmark logo and the company logo for the header,
+        scaled to a fixed pixel height so both stay crisp and evenly
+        matched regardless of their native resolution. Falls back to the
+        drawn 'G' badge (see _build_header) if Pillow or the asset files
+        aren't available, so the app still runs without either."""
+        self.logo_gims_img = None
+        self.logo_company_img = None
+        if not PIL_AVAILABLE:
+            return
+
+        def _load(path, target_height):
+            if not os.path.exists(path):
+                return None
+            try:
+                im = Image.open(path).convert("RGBA")
+                ratio = target_height / im.height
+                w = max(1, int(im.width * ratio))
+                im = im.resize((w, target_height), Image.LANCZOS)
+                return ImageTk.PhotoImage(im)
+            except Exception:
+                return None
+
+        self.logo_gims_img = _load(GIMS_LOGO_PATH, 40)
+        self.logo_company_img = _load(COMPANY_LOGO_PATH, 34)
 
     def _setup_style(self):
         style = ttk.Style(self)
@@ -161,26 +215,52 @@ class BalanceApp(tk.Tk):
                  font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=12, pady=4)
 
     def _build_header(self):
-        """Fixed top header showing only the GIMS logo + wordmark - stays
-        visible across every sidebar section and never breaks on resize
-        (fixed height, left-anchored content, no elements that depend on
-        window width)."""
-        header = tk.Frame(self, bg=self.COLOR_PRIMARY, height=64)
+        """Fixed top header - GIMS mark + wordmark on the left, the
+        company logo on the right. Stays visible across every sidebar
+        section and never breaks on resize (fixed height, edge-anchored
+        content via place(), no elements that depend on window width)."""
+        header_wrap = tk.Frame(self, bg=self.COLOR_PRIMARY)
+        header_wrap.pack(fill="x", side="top")
+
+        header = tk.Frame(header_wrap, bg=self.COLOR_PRIMARY, height=68)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
+        # Thin darker strip under the header reads as a subtle drop
+        # shadow, lifting the header off the page instead of it sitting
+        # perfectly flush with the content below.
+        tk.Frame(header_wrap, bg=self.COLOR_HEADER_BORDER, height=2).pack(fill="x", side="top")
+
+        # ---- Left: GIMS mark + wordmark ----
         brand = tk.Frame(header, bg=self.COLOR_PRIMARY)
-        brand.place(relx=0, rely=0.5, x=20, anchor="w")  # vertically centered, fixed left inset
+        brand.place(relx=0, rely=0.5, x=22, anchor="w")  # vertically centered, fixed left inset
 
-        # Simple drawn logo mark (no external image asset needed) - a
-        # circular accent-colored badge with the "G" initial.
-        mark = tk.Canvas(brand, width=40, height=40, bg=self.COLOR_PRIMARY, highlightthickness=0)
-        mark.pack(side="left", padx=(0, 12))
-        mark.create_oval(0, 0, 40, 40, fill=self.COLOR_ACCENT, outline="")
-        mark.create_text(20, 21, text="G", fill="white", font=("Segoe UI", 17, "bold"))
+        if self.logo_gims_img is not None:
+            tk.Label(brand, image=self.logo_gims_img, bg=self.COLOR_PRIMARY).pack(side="left", padx=(0, 12))
+        else:
+            # Fallback drawn mark if Pillow / the asset file isn't available
+            mark = tk.Canvas(brand, width=40, height=40, bg=self.COLOR_PRIMARY, highlightthickness=0)
+            mark.pack(side="left", padx=(0, 12))
+            mark.create_oval(0, 0, 40, 40, fill=self.COLOR_ACCENT, outline="")
+            mark.create_text(20, 21, text="G", fill="white", font=("Segoe UI", 17, "bold"))
 
-        tk.Label(brand, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
-                 bg=self.COLOR_PRIMARY, fg="white").pack(side="left")
+        wordmark_col = tk.Frame(brand, bg=self.COLOR_PRIMARY)
+        wordmark_col.pack(side="left")
+        tk.Label(wordmark_col, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
+                 bg=self.COLOR_PRIMARY, fg="white").pack(anchor="w")
+        tk.Label(wordmark_col, text="General Insurance Management System",
+                 font=("Segoe UI", 8), bg=self.COLOR_PRIMARY, fg="#B9CBDD").pack(anchor="w")
+
+        # ---- Right: company logo ----
+        company_slot = tk.Frame(header, bg=self.COLOR_PRIMARY)
+        company_slot.place(relx=1.0, rely=0.5, x=-22, anchor="e")  # vertically centered, fixed right inset
+
+        if self.logo_company_img is not None:
+            # White pill behind the logo so it reads cleanly against the
+            # dark header regardless of the logo's own background.
+            pill = tk.Frame(company_slot, bg="white")
+            pill.pack()
+            tk.Label(pill, image=self.logo_company_img, bg="white").pack(padx=12, pady=6)
 
     def _build_sidebar(self, parent):
         """Persistent left sidebar. Outstanding Premium, Loss Ratio, and
@@ -188,13 +268,13 @@ class BalanceApp(tk.Tk):
         parent with three sub-items. The active section (top-level or
         sub-item) is shown with a left accent bar, bold text, and a
         tinted background."""
-        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=232)
+        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=240)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=18).pack(fill="x")
+        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=20).pack(fill="x")
         tk.Label(sidebar, text="MODULES", font=("Segoe UI", 8, "bold"), bg=self.COLOR_SIDEBAR,
-                 fg=self.COLOR_MUTED).pack(anchor="w", padx=20, pady=(0, 6))
+                 fg=self.COLOR_MUTED).pack(anchor="w", padx=22, pady=(0, 8))
 
         self.nav_items = {}
 
@@ -205,39 +285,67 @@ class BalanceApp(tk.Tk):
         for key, label in top_labels_before:
             self.nav_items[key] = self._make_nav_item(sidebar, key, label)
 
-        self._build_coinsurance_menu(sidebar)
+        # Built *after* Coinsurance so we have a stable sibling to anchor
+        # the submenu frame's pack(before=...) against every time it's
+        # toggled - see _build_coinsurance_menu for why this matters.
+        renewal_anchor = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=1)
+        renewal_anchor.pack(fill="x")
+
+        self._build_coinsurance_menu(sidebar, before=renewal_anchor)
 
         top_labels_after = [
             ("renewal", "Renewal"),
         ]
         for key, label in top_labels_after:
-            self.nav_items[key] = self._make_nav_item(sidebar, key, label)
+            self.nav_items[key] = self._make_nav_item(sidebar, key, label, before=renewal_anchor)
 
         # Thin divider between the sidebar and content area
         tk.Frame(parent, bg=self.COLOR_BORDER, width=1).pack(side="left", fill="y")
 
-    def _build_coinsurance_menu(self, sidebar):
-        """Collapsible 'Coinsurance' parent item with three sub-items.
-        Clicking the header only expands/collapses it (it isn't itself a
-        page); clicking a sub-item navigates like any other nav item."""
+    def _build_coinsurance_menu(self, sidebar, before):
+        """Collapsible 'Coinsurance' parent item with three sub-items,
+        shown inside a subtly tinted block with a left indent guide so the
+        hierarchy (parent -> sub-items) is visually obvious. Clicking the
+        header only expands/collapses it (it isn't itself a page);
+        clicking a sub-item navigates like any other nav item.
+
+        `before`: a stable sibling widget (packed once, ahead of any
+        later top-level items like Renewal) that the submenu frame is
+        always re-packed against via pack(before=...). Without this,
+        toggling the submenu with a plain pack_forget()/pack() would drop
+        it to the *end* of the sidebar's packing order - i.e. below
+        Renewal - the first time it's collapsed and re-expanded.
+        """
         header = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, cursor="hand2")
-        header.pack(fill="x")
+        header.pack(fill="x", before=before)
 
         header_accent = tk.Frame(header, bg=self.COLOR_SIDEBAR, width=4)
         header_accent.pack(side="left", fill="y")
 
         header_inner = tk.Frame(header, bg=self.COLOR_SIDEBAR)
-        header_inner.pack(side="left", fill="both", expand=True, padx=(14, 10), pady=14)
+        header_inner.pack(side="left", fill="both", expand=True, padx=(14, 12), pady=14)
 
-        self.coinsurance_caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 9),
-                                           bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED)
-        self.coinsurance_caret.pack(side="right")
+        icon_label = tk.Label(header_inner, text="\u2295", font=("Segoe UI", 10), width=2,
+                               bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
+        icon_label.pack(side="left")
 
         header_label = tk.Label(header_inner, text="Coinsurance", font=("Segoe UI", 11),
                                  bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
         header_label.pack(side="left", fill="both", expand=True)
 
-        self.coinsurance_submenu_frame = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR)
+        self.coinsurance_caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 9),
+                                           bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED)
+        self.coinsurance_caret.pack(side="right")
+
+        # Tinted wrapper block for the sub-items, with a thin vertical
+        # indent guide on the left so the sub-items read as nested under
+        # "Coinsurance" rather than as flat, unrelated rows.
+        submenu_block = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
+        submenu_block.pack(fill="x", before=before)
+        guide = tk.Frame(submenu_block, bg=self.COLOR_BORDER, width=1)
+        guide.place(x=28, y=0, relheight=1.0)
+
+        self.coinsurance_submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
         self.coinsurance_submenu_frame.pack(fill="x")  # starts expanded
 
         sub_labels = [
@@ -246,41 +354,79 @@ class BalanceApp(tk.Tk):
             ("coinsurance_claims_register", "Claims Register"),
         ]
         for key, label in sub_labels:
-            self.nav_items[key] = self._make_nav_item(self.coinsurance_submenu_frame, key, label, indent=True)
+            self.nav_items[key] = self._make_nav_item(
+                self.coinsurance_submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
+            )
 
         def toggle_coinsurance(event=None):
-            if self.coinsurance_submenu_frame.winfo_ismapped():
-                self.coinsurance_submenu_frame.pack_forget()
+            if submenu_block.winfo_ismapped():
+                submenu_block.pack_forget()
                 self.coinsurance_caret.configure(text="\u25B8")
             else:
-                self.coinsurance_submenu_frame.pack(fill="x")
+                submenu_block.pack(fill="x", before=before)
                 self.coinsurance_caret.configure(text="\u25BE")
 
-        for w in (header, header_accent, header_inner, self.coinsurance_caret, header_label):
+        for w in (header, header_accent, header_inner, icon_label, self.coinsurance_caret, header_label):
             w.bind("<Button-1>", toggle_coinsurance)
+            w.bind("<Enter>", lambda e: self._hover_coinsurance_header(header, header_accent, header_inner, icon_label, header_label, True))
+            w.bind("<Leave>", lambda e: self._hover_coinsurance_header(header, header_accent, header_inner, icon_label, header_label, False))
 
-    def _make_nav_item(self, parent, key, text, indent=False):
-        wrapper = tk.Frame(parent, bg=self.COLOR_SIDEBAR, cursor="hand2")
-        wrapper.pack(fill="x")
+    def _hover_coinsurance_header(self, header, header_accent, header_inner, icon_label, header_label, entering):
+        bg = self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR
+        for w in (header, header_inner, icon_label, header_label):
+            w.configure(bg=bg)
+        header_accent.configure(bg=self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR)
 
-        accent = tk.Frame(wrapper, bg=self.COLOR_SIDEBAR, width=4)
+    def _make_nav_item(self, parent, key, text, indent=False, before=None, base_bg=None):
+        base_bg = base_bg or self.COLOR_SIDEBAR
+        wrapper = tk.Frame(parent, bg=base_bg, cursor="hand2")
+        pack_kwargs = {"fill": "x"}
+        if before is not None:
+            pack_kwargs["before"] = before
+        wrapper.pack(**pack_kwargs)
+
+        accent = tk.Frame(wrapper, bg=base_bg, width=4)
         accent.pack(side="left", fill="y")
 
-        label = tk.Label(wrapper, text=text, font=("Segoe UI", 10 if indent else 11),
-                          bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w",
-                          wraplength=170 if indent else None, justify="left")
-        label.pack(side="left", fill="both", expand=True,
-                    padx=(30, 10) if indent else (14, 10), pady=12 if indent else 14)
+        inner = tk.Frame(wrapper, bg=base_bg)
+        inner.pack(side="left", fill="both", expand=True,
+                    padx=(26, 10) if indent else (10, 10), pady=12 if indent else 14)
+
+        icon = NAV_ICONS.get(key, "")
+        icon_label = tk.Label(inner, text=icon, font=("Segoe UI", 9 if indent else 10), width=2,
+                               bg=base_bg, fg=self.COLOR_MUTED, anchor="w")
+        icon_label.pack(side="left")
+
+        label = tk.Label(inner, text=text, font=("Segoe UI", 10 if indent else 11),
+                          bg=base_bg, fg=self.COLOR_MUTED, anchor="w",
+                          wraplength=160 if indent else None, justify="left")
+        label.pack(side="left", fill="both", expand=True)
 
         def on_click(event=None, k=key):
             self.select_nav(k)
 
-        for widget in (wrapper, accent, label):
+        def on_enter(event=None):
+            if self.active_nav != key:
+                hover_bg = self.COLOR_SIDEBAR_HOVER if not indent else "#E9EFF5"
+                for w in (wrapper, accent, inner, icon_label, label):
+                    w.configure(bg=hover_bg)
+
+        def on_leave(event=None):
+            if self.active_nav != key:
+                for w in (wrapper, accent, inner, icon_label, label):
+                    w.configure(bg=base_bg)
+
+        for widget in (wrapper, accent, inner, icon_label, label):
             widget.bind("<Button-1>", on_click)
+            widget.bind("<Enter>", on_enter)
+            widget.bind("<Leave>", on_leave)
 
         wrapper.accent = accent
+        wrapper.inner = inner
+        wrapper.icon_label = icon_label
         wrapper.label = label
         wrapper.indent = indent
+        wrapper.base_bg = base_bg
         return wrapper
 
     def select_nav(self, key):
@@ -290,10 +436,12 @@ class BalanceApp(tk.Tk):
         self.active_nav = key
         for k, item in self.nav_items.items():
             selected = (k == key)
-            bg = self.COLOR_SIDEBAR_ACTIVE if selected else self.COLOR_SIDEBAR
+            bg = self.COLOR_SIDEBAR_ACTIVE if selected else item.base_bg
             base_size = 10 if item.indent else 11
             item.configure(bg=bg)
-            item.accent.configure(bg=self.COLOR_ACCENT if selected else self.COLOR_SIDEBAR)
+            item.accent.configure(bg=self.COLOR_ACCENT if selected else bg)
+            item.inner.configure(bg=bg)
+            item.icon_label.configure(bg=bg, fg=self.COLOR_PRIMARY if selected else self.COLOR_MUTED)
             item.label.configure(
                 bg=bg,
                 fg=self.COLOR_PRIMARY if selected else self.COLOR_MUTED,
