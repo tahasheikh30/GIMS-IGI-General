@@ -1,17 +1,22 @@
 # GIMS — General Insurance Management System
 
 A desktop tool for the Finance department, built around a persistent sidebar
-with four modules:
+with the following sections:
 - **Outstanding Premium** — fully built: upload the client balance sheet, set
   a threshold, generate per-client Excel PivotTable reports, and draft/send
   reminder emails through your own Outlook account.
 - **Loss Ratio** — fully built: calculate Loss Ratio (Claims Paid ÷ Gross
   Premium) for one company or a group of companies from their own Excel
   files, with a styled, color-flagged summary report.
-- **Premium & Claims Receivable** — fully built: reads a co-insurance
-  outstanding-position export, generates one two-sheet Excel statement
-  (Premium Receivable / Claims Receivable) per Client + Company group, and
-  drafts/sends the notification emails through your own Outlook account.
+- **Coinsurance** — a collapsible menu with three sub-items:
+  - **Premium/Claims Email Automation** — fully built: reads a co-insurance
+    outstanding-position export, generates one two-sheet Excel statement
+    (Premium Receivable / Claims Receivable) per Client + Company group, and
+    drafts/sends the notification emails through your own Outlook account.
+    Structured as the same three-tab workflow as Outstanding Premium
+    (Upload & Validate → Client + Company Groups → Review & Send Emails).
+  - **Premium Register** — placeholder, reserved for a future module.
+  - **Claims Register** — placeholder, reserved for a future module.
 - **Renewal** — placeholder, reserved for a future module.
 
 ## What's included
@@ -29,7 +34,7 @@ with four modules:
 | `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
 | `receivable_generator.py` | Writes each Client+Company group's two-sheet (Premium Receivable / Claims Receivable) Excel statement |
 | `receivable_email.py` | Drafts the statement email per group and sends via `outlook_sender` |
-| `receivable_automation.py` | Orchestrates the Receivable module end-to-end (load → validate → generate → draft → send); also runnable standalone from the command line |
+| `receivable_automation.py` | `load_email_lookup_from_addresses_sheet()` (used by the GUI) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
 
@@ -55,11 +60,14 @@ python app.py
 ```
 
 On launch you'll see a fixed header with the GIMS wordmark, and a left
-sidebar with three sections: **Outstanding Premium**, **Loss Ratio**, and
-**Renewal**. The active section is highlighted with an accent bar and bold
-text. All the functionality below (Steps 1–3) lives inside **Outstanding
-Premium** — click it in the sidebar if it isn't already selected. The other
-two sections are placeholders reserved for future modules.
+sidebar with **Outstanding Premium**, **Loss Ratio**, a collapsible
+**Coinsurance** menu (click it to expand/collapse its three sub-items:
+**Premium/Claims Email Automation**, **Premium Register**, **Claims
+Register**), and **Renewal**. The active section is highlighted with an
+accent bar and bold text. All the functionality below (Steps 1–3) lives
+inside **Outstanding Premium** — click it in the sidebar if it isn't
+already selected. Premium Register, Claims Register, and Renewal are
+placeholders reserved for future modules.
 
 ### Step 1 — Upload & Filter
 1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
@@ -204,10 +212,21 @@ Total/Group row in Group mode, and cells color-coded red/amber based on the
 Loss Ratio thresholds — styled consistently with the Outstanding Premium
 reports (same fonts, header colors, borders, number formats).
 
-## Premium & Claims Receivable module
+## Coinsurance > Premium/Claims Email Automation module
 
-Click **Premium & Claims Receivable** in the sidebar. The page has three
-numbered cards: Source File, Output & Options, and Processing Log.
+Click **Coinsurance** in the sidebar to expand it, then click
+**Premium/Claims Email Automation**. The page uses the same three-tab
+structure as Outstanding Premium:
+
+- **1. Upload & Validate** — source file, sheet names, validation options,
+  and an optional Client/Company filter, plus an Activity Log.
+- **2. Client + Company Groups** — the list of groups found (with Premium
+  Receivable and Claims Receivable totals per group), and the "Generate
+  Excel Reports" / "Open Output Folder" buttons.
+- **3. Review & Send Emails** — draft, preview/edit, and send the
+  statement emails, with a shared "Your Signature" box, dry run toggle,
+  and per-row Send/Save Edits buttons — identical interaction pattern to
+  Outstanding Premium's tab 3.
 
 **What it does:** reads a co-insurance outstanding-position export, groups
 every transaction row by **Client Name + Company** (Company here is the
@@ -224,7 +243,7 @@ Company, Date, Type, etc.) is preserved exactly as it appears in the
 source file — nothing is renamed or reformatted beyond splitting rows into
 the two sheets and number-formatting the relevant amount column.
 
-**1. Source File**
+### Tab 1 — Upload & Validate
 - **Master workbook** — the same file the co-insurance export already
   comes in. Both the transaction sheet and the address-book sheet are
   read from this one file.
@@ -239,13 +258,8 @@ the two sheets and number-formatting the relevant amount column.
   cell (comma or semicolon separated) — all of them are used as Outlook
   "To" recipients. If a company's contact-person column is present, that
   name is used in the email greeting instead of the company name.
-
-**2. Output & Options**
 - **Output folder** — configurable; created automatically if it doesn't
   exist.
-- **Dry run** (checked by default) — generates every workbook and drafts
-  every email, but doesn't actually send anything, so you can review the
-  Processing Log first.
 - **Require Leader Ref Number on claims-only rows** (checked by default,
   matching the original spec literally: any row with a blank Client Name,
   Company, or Leader Ref Number is flagged and excluded). **Important —
@@ -256,32 +270,42 @@ the two sheets and number-formatting the relevant amount column.
   Claims Receivable sheets will come out mostly or entirely empty on a
   file shaped like the sample. Uncheck it to keep a claims-only row even
   without a Leader Ref Number (it's still flagged in the validation
-  log — just not excluded). Decide this based on whether your Finance
-  team's export genuinely always carries a Leader Ref Number for claims
-  lines, or whether that's expected to be blank.
+  log — just not excluded).
 - **Look up recipient emails from the address-book sheet** — uncheck to
   skip email lookup entirely (every draft will show "Missing email" and
-  can still be reviewed/sent manually in a future update, or simply left
-  as dry-run only).
+  can still be reviewed/sent manually on tab 3).
+- Click **Load & Validate Data** to load the file — the Activity Log shows
+  the detected column layout and a per-issue-type validation count.
+- **Filters** — optional Client filter and/or Company filter (comma-
+  separated exact names). Click **Analyze / Build Groups** to apply them
+  and populate tab 2.
 
-Click **Run Receivable Automation** to execute the full pipeline: load →
-validate → generate workbooks → draft emails → send (or preview, in dry
-run). The Processing Log shows the detected column layout, a per-issue-
-type validation count, every file generated, every group with no
-recipient email (flagged, never silently skipped), and a final run
-summary (groups processed, workbooks generated, emails sent/previewed/
-failed, missing-email count). Every run is also logged to
-`receivable_run_history.json` for audit purposes, the same way the
-Outstanding Premium module logs to `run_history.json`.
+### Tab 2 — Client + Company Groups
+Shows every Client + Company group found, with its Premium Receivable and
+Claims Receivable totals. Click **Generate Excel Reports** to write one
+workbook per group (named per the pattern below) into the output folder
+set on tab 1, or **Open Output Folder** to browse what's been generated.
+
+### Tab 3 — Review & Send Emails
+1. **Your Signature** — shared with the Outstanding Premium module (same
+   `signature.json`), so it only needs to be set once across both modules.
+2. Click **Draft Emails** to generate a statement email per group.
+3. Click any row to preview/edit its recipient, subject, and body. Click
+   **Save Edits to Selected Email** to keep changes for that group only.
+4. **Dry run** is checked by default — preview exactly what would be sent
+   without actually sending.
+5. Uncheck dry run and click **Send All** (or **Send This Email** for a
+   single group) to send for real via Outlook. Each email attaches that
+   group's generated workbook if one exists. Every run is logged to
+   `receivable_run_history.json`, the same way the Outstanding Premium
+   module logs to `run_history.json`.
 
 **Email subject/body:**
 ```
 Subject: Premium & Claims Receivable Statement – {Client Name} – {Date}
 ```
 The body is a short cover note referencing the attached statement and its
-Premium/Claims Receivable totals, signed with the same signature saved in
-the Outstanding Premium module's "Your Signature" box (tab 3) — no
-separate signature to maintain.
+Premium/Claims Receivable totals.
 
 **Filename format:** `{ClientName}_{CompanyName}_Receivable_{DDMMYYYY}.xlsx`,
 with spaces and special characters stripped from each name component for
@@ -301,6 +325,9 @@ export uses different header text than what's listed there, add it to
 works on Windows with Outlook installed and signed in — this could only be
 verified here in dry-run mode. Please test a dry run first, then send to
 yourself before using it on real recipients.
+
+**Premium Register and Claims Register**, the other two items under the
+Coinsurance menu, are placeholders reserved for future modules.
 
 ## Customizing the email template
 

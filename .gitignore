@@ -3,3 +3,4 @@ output/
 dist/
 build/
 GIMS.spec
+receivable_run_history.json
