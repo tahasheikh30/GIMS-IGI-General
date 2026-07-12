@@ -18,6 +18,7 @@ import outlook_sender as osend
 import pivot_native_generator as pivot_native
 import loss_ratio_processor as lrp
 import loss_ratio_generator as lrg
+import receivable_automation as ra
 import run_log
 
 
@@ -181,6 +182,7 @@ class BalanceApp(tk.Tk):
         nav_labels = [
             ("outstanding_premium", "Outstanding Premium"),
             ("loss_ratio", "Loss Ratio"),
+            ("receivable", "Premium & Claims Receivable"),
             ("renewal", "Renewal"),
         ]
         self.nav_items = {}
@@ -247,6 +249,11 @@ class BalanceApp(tk.Tk):
         loss_ratio_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["loss_ratio"] = loss_ratio_page
         self._build_loss_ratio_page(loss_ratio_page)
+
+        receivable_page = ttk.Frame(container)
+        receivable_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["receivable"] = receivable_page
+        self._build_receivable_page(receivable_page)
 
         renewal_page = self._build_placeholder_page(container, "Renewal")
         renewal_page.grid(row=0, column=0, sticky="nsew")
@@ -543,6 +550,181 @@ class BalanceApp(tk.Tk):
         self._log_loss(f"\nSaved: {output_path}")
         self.status_var.set(f"Loss Ratio report saved: {os.path.basename(output_path)}")
         messagebox.showinfo("Done", f"Loss Ratio report generated successfully:\n{output_path}")
+
+    # ---------- Premium & Claims Receivable module ----------
+    def _build_receivable_page(self, parent):
+        """Premium & Claims Receivable automation - reads a master file
+        (transaction sheet + address-book sheet), generates one two-sheet
+        workbook per Client+Company group, and drafts/sends the statement
+        emails, mirroring the Outstanding Premium / Loss Ratio pages'
+        numbered-card layout."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        PAD_X = 20
+
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Premium & Claims Receivable", font=("Segoe UI Semibold", 17, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Generate a Premium Receivable / Claims Receivable statement per Client + "
+                                "Company group, and draft/send the notification emails.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+
+        # --- Section 1: Source file ---
+        s1 = self._loss_section_card(body, "1", "Source File", PAD_X)
+        ttk.Label(s1, text="Master workbook (.xlsx) - both the transaction sheet and the address-book "
+                            "sheet are read from this same file.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+
+        file_row = ttk.Frame(s1)
+        file_row.pack(fill="x", pady=(0, 10))
+        self.receivable_file_var = tk.StringVar()
+        ttk.Entry(file_row, textvariable=self.receivable_file_var, font=("Segoe UI", 10)).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(file_row, text="Browse...", command=self._browse_receivable_file, width=14).pack(side="left")
+
+        sheet_row = ttk.Frame(s1)
+        sheet_row.pack(fill="x")
+        ttk.Label(sheet_row, text="Transaction sheet name", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(sheet_row, text="Address-book sheet name", font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.receivable_sheet_var = tk.StringVar(value="Detail")
+        self.receivable_addresses_sheet_var = tk.StringVar(value="Addresses Co Insurance")
+        ttk.Entry(sheet_row, textvariable=self.receivable_sheet_var, width=28, font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+        ttk.Entry(sheet_row, textvariable=self.receivable_addresses_sheet_var, width=28, font=("Segoe UI", 10)).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+
+        # --- Section 2: Options ---
+        s2 = self._loss_section_card(body, "2", "Output & Options", PAD_X)
+
+        out_row = ttk.Frame(s2)
+        out_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(out_row, text="Output folder", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        out_entry_row = ttk.Frame(out_row)
+        out_entry_row.pack(fill="x", pady=(4, 0))
+        self.receivable_output_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "receivable_output"))
+        ttk.Entry(out_entry_row, textvariable=self.receivable_output_dir_var, font=("Segoe UI", 10)).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_entry_row, text="Browse...", command=self._browse_receivable_output_dir, width=14).pack(side="left")
+
+        self.receivable_dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s2, text="Dry run (generate files and preview emails, do not actually send)",
+                         variable=self.receivable_dry_run_var).pack(anchor="w", pady=(4, 2))
+
+        self.receivable_require_ref_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s2, text="Require Leader Ref Number on claims-only rows (unchecking still flags "
+                                  "these rows, but keeps them in the Claims Receivable sheet)",
+                         variable=self.receivable_require_ref_var).pack(anchor="w", pady=(2, 2))
+
+        self.receivable_load_email_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s2, text="Look up recipient emails from the address-book sheet",
+                         variable=self.receivable_load_email_var).pack(anchor="w", pady=(2, 8))
+
+        run_btn = tk.Button(
+            s2, text="Run Receivable Automation", command=self._run_receivable_automation,
+            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
+            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
+            relief="flat", padx=18, pady=9, cursor="hand2", borderwidth=0,
+        )
+        run_btn.pack(anchor="w")
+
+        # --- Section 3: Log ---
+        s3 = self._loss_section_card(body, "3", "Processing Log", PAD_X, expand_bottom=True)
+        self.receivable_log = scrolledtext.ScrolledText(s3, height=16, font=("Consolas", 9),
+                                                          relief="solid", borderwidth=1)
+        self.receivable_log.pack(fill="both", expand=True)
+
+    def _browse_receivable_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        if path:
+            self.receivable_file_var.set(path)
+
+    def _browse_receivable_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.receivable_output_dir_var.set(path)
+
+    def _log_receivable(self, msg):
+        self.receivable_log.insert("end", str(msg) + "\n")
+        self.receivable_log.see("end")
+        self.receivable_log.update_idletasks()
+
+    def _run_receivable_automation(self):
+        filepath = self.receivable_file_var.get().strip()
+        if not filepath or not os.path.exists(filepath):
+            messagebox.showerror("No file selected", "Browse to a master workbook first.")
+            return
+
+        output_dir = self.receivable_output_dir_var.get().strip()
+        if not output_dir:
+            messagebox.showerror("No output folder", "Choose an output folder first.")
+            return
+
+        dry_run = self.receivable_dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", "This will send real emails via Outlook for every "
+                                                    "Client + Company group with a recipient email. "
+                                                    "This cannot be undone. Continue?"):
+                return
+
+        self.receivable_log.delete("1.0", "end")
+        self.status_var.set("Running Premium & Claims Receivable automation...")
+
+        sheet_name = self.receivable_sheet_var.get().strip() or "Detail"
+        addresses_sheet_name = self.receivable_addresses_sheet_var.get().strip() or "Addresses Co Insurance"
+        require_ref = self.receivable_require_ref_var.get()
+        load_email = self.receivable_load_email_var.get()
+
+        def worker():
+            try:
+                summary = ra.run_pipeline(
+                    master_filepath=filepath,
+                    output_dir=output_dir,
+                    sheet_name=sheet_name,
+                    addresses_sheet_name=addresses_sheet_name,
+                    load_email_lookup=load_email,
+                    require_ref_for_claims_only_rows=require_ref,
+                    dry_run=dry_run,
+                    logger=self._log_receivable,
+                )
+            except Exception as e:
+                self._log_receivable(f"\nUNEXPECTED ERROR: {e}")
+                messagebox.showerror("Error", f"An unexpected error occurred:\n\n{e}")
+                self.status_var.set("Receivable automation failed.")
+                return
+
+            num_sent = sum(1 for r in summary["send_results"] if r["sent"])
+            num_failed = len(summary["send_results"]) - num_sent
+            msg = (f"Groups processed: {summary['num_groups']}\n"
+                   f"Workbooks generated: {len(summary['generated_files'])}\n"
+                   f"Emails {'previewed (dry run)' if dry_run else 'sent'}: {num_sent}\n"
+                   f"Emails failed: {num_failed}\n"
+                   f"Missing email: {len(summary['missing_email'])}\n"
+                   f"Other errors: {len(summary['errors'])}\n\n"
+                   f"Output folder:\n{output_dir}")
+            messagebox.showinfo("Done", msg)
+            self.status_var.set(f"Receivable automation complete - {len(summary['generated_files'])} file(s), "
+                                 f"{num_sent} email(s) {'previewed' if dry_run else 'sent'}.")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_outstanding_premium_page(self, parent):
         """The existing Outstanding Premium workflow (Upload & Filter,

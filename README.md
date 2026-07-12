@@ -1,13 +1,17 @@
 # GIMS — General Insurance Management System
 
 A desktop tool for the Finance department, built around a persistent sidebar
-with three modules:
+with four modules:
 - **Outstanding Premium** — fully built: upload the client balance sheet, set
   a threshold, generate per-client Excel PivotTable reports, and draft/send
   reminder emails through your own Outlook account.
 - **Loss Ratio** — fully built: calculate Loss Ratio (Claims Paid ÷ Gross
   Premium) for one company or a group of companies from their own Excel
   files, with a styled, color-flagged summary report.
+- **Premium & Claims Receivable** — fully built: reads a co-insurance
+  outstanding-position export, generates one two-sheet Excel statement
+  (Premium Receivable / Claims Receivable) per Client + Company group, and
+  drafts/sends the notification emails through your own Outlook account.
 - **Renewal** — placeholder, reserved for a future module.
 
 ## What's included
@@ -22,7 +26,12 @@ with three modules:
 | `outlook_sender.py` | Sends via Outlook COM automation (your own signed-in account) |
 | `loss_ratio_processor.py` | Reads/validates Loss Ratio input files, normalizes column-name variations, aggregates per company |
 | `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output |
-| `run_log.py` | Writes an audit trail to `run_history.json` |
+| `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
+| `receivable_generator.py` | Writes each Client+Company group's two-sheet (Premium Receivable / Claims Receivable) Excel statement |
+| `receivable_email.py` | Drafts the statement email per group and sends via `outlook_sender` |
+| `receivable_automation.py` | Orchestrates the Receivable module end-to-end (load → validate → generate → draft → send); also runnable standalone from the command line |
+| `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
+| `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
 
 ## Requirements
 
@@ -194,6 +203,104 @@ here, send me an example and I'll extend the matching.
 Total/Group row in Group mode, and cells color-coded red/amber based on the
 Loss Ratio thresholds — styled consistently with the Outstanding Premium
 reports (same fonts, header colors, borders, number formats).
+
+## Premium & Claims Receivable module
+
+Click **Premium & Claims Receivable** in the sidebar. The page has three
+numbered cards: Source File, Output & Options, and Processing Log.
+
+**What it does:** reads a co-insurance outstanding-position export, groups
+every transaction row by **Client Name + Company** (Company here is the
+co-insurance partner, e.g. "ADAMJEE INSURANCE COMPANY LTD" — the company
+that owes IGI its share of a client's premium/claims), and writes one
+Excel workbook per group with exactly two sheets:
+- **"Premium Receivable"** — that group's rows with a non-zero Premium
+  Receivable amount
+- **"Claims Receivable"** — that group's rows with a non-zero Claim
+  Receivable amount (still written with headers only if the group has none)
+
+Every other original column (Class, Leader Ref. No, Code, Insurance
+Company, Date, Type, etc.) is preserved exactly as it appears in the
+source file — nothing is renamed or reformatted beyond splitting rows into
+the two sheets and number-formatting the relevant amount column.
+
+**1. Source File**
+- **Master workbook** — the same file the co-insurance export already
+  comes in. Both the transaction sheet and the address-book sheet are
+  read from this one file.
+- **Transaction sheet name** — defaults to `Detail` (the real sample's
+  sheet name). The real header row is located automatically even though
+  the source file has a few title/banner rows above it (report title, "As
+  at ..." date, a blank row) — you don't need to trim those first.
+- **Address-book sheet name** — defaults to `Addresses Co Insurance`. This
+  sheet is keyed by **Company Name**, matching the "Company" field on the
+  transaction sheet, so recipient emails are looked up by co-insurance
+  company rather than by client. A company can list several emails in one
+  cell (comma or semicolon separated) — all of them are used as Outlook
+  "To" recipients. If a company's contact-person column is present, that
+  name is used in the email greeting instead of the company name.
+
+**2. Output & Options**
+- **Output folder** — configurable; created automatically if it doesn't
+  exist.
+- **Dry run** (checked by default) — generates every workbook and drafts
+  every email, but doesn't actually send anything, so you can review the
+  Processing Log first.
+- **Require Leader Ref Number on claims-only rows** (checked by default,
+  matching the original spec literally: any row with a blank Client Name,
+  Company, or Leader Ref Number is flagged and excluded). **Important —
+  confirmed against a real sample file:** claims transactions in this
+  export format very commonly don't carry a Leader Ref Number the way
+  premium transactions do (in the sample, 460 of 461 blank-Leader-Ref-
+  Number rows were exactly the claims-only rows). With this box checked,
+  Claims Receivable sheets will come out mostly or entirely empty on a
+  file shaped like the sample. Uncheck it to keep a claims-only row even
+  without a Leader Ref Number (it's still flagged in the validation
+  log — just not excluded). Decide this based on whether your Finance
+  team's export genuinely always carries a Leader Ref Number for claims
+  lines, or whether that's expected to be blank.
+- **Look up recipient emails from the address-book sheet** — uncheck to
+  skip email lookup entirely (every draft will show "Missing email" and
+  can still be reviewed/sent manually in a future update, or simply left
+  as dry-run only).
+
+Click **Run Receivable Automation** to execute the full pipeline: load →
+validate → generate workbooks → draft emails → send (or preview, in dry
+run). The Processing Log shows the detected column layout, a per-issue-
+type validation count, every file generated, every group with no
+recipient email (flagged, never silently skipped), and a final run
+summary (groups processed, workbooks generated, emails sent/previewed/
+failed, missing-email count). Every run is also logged to
+`receivable_run_history.json` for audit purposes, the same way the
+Outstanding Premium module logs to `run_history.json`.
+
+**Email subject/body:**
+```
+Subject: Premium & Claims Receivable Statement – {Client Name} – {Date}
+```
+The body is a short cover note referencing the attached statement and its
+Premium/Claims Receivable totals, signed with the same signature saved in
+the Outstanding Premium module's "Your Signature" box (tab 3) — no
+separate signature to maintain.
+
+**Filename format:** `{ClientName}_{CompanyName}_Receivable_{DDMMYYYY}.xlsx`,
+with spaces and special characters stripped from each name component for
+filesystem/attachment safety.
+
+**Column layout flexibility:** the module recognizes two possible source
+layouts automatically — (a) separate "Premium Receivable" and "Claim
+Receivable" amount columns on every row (the confirmed real format), or
+(b) a single "Amount" column plus a "Type"/"Category" column naming which
+category each row belongs to (a fallback in case a different export
+format is used later). Column headers are matched case-insensitively
+against a small alias list in `receivable_processor.py` — if a future
+export uses different header text than what's listed there, add it to
+`ALIASES` rather than renaming columns in the source file.
+
+**Known limitation:** like the Outstanding Premium module, sending only
+works on Windows with Outlook installed and signed in — this could only be
+verified here in dry-run mode. Please test a dry run first, then send to
+yourself before using it on real recipients.
 
 ## Customizing the email template
 
