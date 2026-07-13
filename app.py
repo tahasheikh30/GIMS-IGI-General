@@ -95,6 +95,7 @@ class BalanceApp(tk.Tk):
         self.receivable_colmap = None
         self.receivable_groups = None
         self.receivable_totals = None
+        self.receivable_filtered_df = None
         self.receivable_filename_lookup = {}
         self.receivable_email_lookup = {}
         self.receivable_poc_lookup = {}
@@ -537,7 +538,7 @@ class BalanceApp(tk.Tk):
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self._enable_mousewheel(canvas, _on_mousewheel)
 
         PAD_X = 20
 
@@ -706,6 +707,25 @@ class BalanceApp(tk.Tk):
 
         self._toggle_loss_mode()  # show the correct file-selection frame initially
         self._refresh_loss_group_count()  # sync the empty-state placeholder/count label
+
+    def _enable_mousewheel(self, canvas, on_scroll):
+        """canvas.bind_all() is application-wide, and each call silently
+        REPLACES any previous global <MouseWheel> binding rather than
+        adding to it. Every scrollable page (Outstanding Premium, Loss
+        Ratio, Coinsurance) used to call bind_all() once, unconditionally,
+        at build time - so whichever page was built LAST (Coinsurance)
+        permanently owned the only working scroll handler, and two-finger
+        scroll silently did nothing on every page built before it.
+        Scoping the binding to <Enter>/<Leave> means each canvas only
+        claims global scroll while the cursor is actually over it, and
+        releases it immediately on <Leave> - so every scrollable page
+        keeps working independently of build order."""
+        def _on_enter(event):
+            canvas.bind_all("<MouseWheel>", on_scroll)
+        def _on_leave(event):
+            canvas.unbind_all("<MouseWheel>")
+        canvas.bind("<Enter>", _on_enter)
+        canvas.bind("<Leave>", _on_leave)
 
     def _make_pill_button(self, parent, text, command, bg, fg="white", outline=False):
         """Small factory for the flat, rounded-look buttons already used
@@ -900,7 +920,7 @@ class BalanceApp(tk.Tk):
     def _build_receivable_page(self, parent):
         """Premium & Claims Receivable automation, structured as three tabs
         that mirror the Outstanding Premium workflow exactly: Upload &
-        Validate, Client + Company Groups, and Review & Send Emails."""
+        Validate, Insurance Company Files, and Review & Send Emails."""
         notebook = ttk.Notebook(parent)
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 4))
 
@@ -908,7 +928,7 @@ class BalanceApp(tk.Tk):
         self.tab_receivable_groups = ttk.Frame(notebook)
         self.tab_receivable_emails = ttk.Frame(notebook)
         notebook.add(self.tab_receivable_setup, text="1. Upload & Validate")
-        notebook.add(self.tab_receivable_groups, text="2. Client + Company Groups")
+        notebook.add(self.tab_receivable_groups, text="2. Insurance Company Files")
         notebook.add(self.tab_receivable_emails, text="3. Review & Send Emails")
 
         self._build_receivable_setup_tab()
@@ -941,7 +961,7 @@ class BalanceApp(tk.Tk):
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
 
@@ -978,7 +998,7 @@ class BalanceApp(tk.Tk):
                          variable=self.receivable_load_email_var).grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 6))
 
         ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
-                   command=self.load_receivable_data).grid(row=6, column=1, sticky="w", pady=(6, 4))
+                   command=self.load_receivable_data).grid(row=6, column=0, sticky="w", padx=10, pady=(10, 4))
 
         # ---- Section: Filters ----
         filter_box = ttk.Labelframe(canvas_frame, text="  Filters  ", padding=14)
@@ -1013,20 +1033,25 @@ class BalanceApp(tk.Tk):
         ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
                    command=self.generate_receivable_reports).pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Open Output Folder", command=self.open_receivable_output_folder, width=20).pack(side="left")
-        self.receivable_results_summary_var = tk.StringVar(value="Run Analyze on tab 1 to see Client + Company groups here.")
+        self.receivable_results_summary_var = tk.StringVar(value="Run Analyze on tab 1 to see one row per output file here.")
         ttk.Label(top, textvariable=self.receivable_results_summary_var, style="Muted.TLabel").pack(side="right")
+
+        hint = ttk.Label(f, text="One workbook is generated per insurance company (covering every client for that "
+                                  "company); every company with \"OFC\" in its name is pooled into a single shared \"OFC\" file.",
+                          style="Muted.TLabel", font=("Segoe UI", 9))
+        hint.pack(anchor="w", padx=14, pady=(0, 6))
 
         tree_frame = ttk.Frame(f)
         tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        columns = ("client", "company", "premium_total", "claims_total")
+        columns = ("company", "num_clients", "premium_total", "claims_total")
         self.receivable_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
-        self.receivable_results_tree.heading("client", text="Client Name")
-        self.receivable_results_tree.heading("company", text="Company")
+        self.receivable_results_tree.heading("company", text="Insurance Company (output file)")
+        self.receivable_results_tree.heading("num_clients", text="Clients")
         self.receivable_results_tree.heading("premium_total", text="Premium Receivable Total")
         self.receivable_results_tree.heading("claims_total", text="Claims Receivable Total")
-        self.receivable_results_tree.column("client", width=280)
-        self.receivable_results_tree.column("company", width=260)
+        self.receivable_results_tree.column("company", width=380)
+        self.receivable_results_tree.column("num_clients", width=80, anchor="center")
         self.receivable_results_tree.column("premium_total", width=170, anchor="e")
         self.receivable_results_tree.column("claims_total", width=170, anchor="e")
         self.receivable_results_tree.tag_configure("oddrow", background="#F4F7FA")
@@ -1072,17 +1097,17 @@ class BalanceApp(tk.Tk):
 
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
-        ttk.Label(left, text="Client + Company Groups", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        ttk.Label(left, text="Insurance Company Files", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
         list_frame = ttk.Frame(left)
         list_frame.pack(fill="both", expand=True)
-        columns = ("client", "company", "email", "status")
+        columns = ("company", "clients", "email", "status")
         self.receivable_email_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=26)
-        self.receivable_email_tree.heading("client", text="Client")
         self.receivable_email_tree.heading("company", text="Company")
+        self.receivable_email_tree.heading("clients", text="Clients")
         self.receivable_email_tree.heading("email", text="Email")
         self.receivable_email_tree.heading("status", text="Status")
-        self.receivable_email_tree.column("client", width=200)
-        self.receivable_email_tree.column("company", width=190)
+        self.receivable_email_tree.column("company", width=210)
+        self.receivable_email_tree.column("clients", width=60, anchor="center")
         self.receivable_email_tree.column("email", width=170)
         self.receivable_email_tree.column("status", width=150)
         tree_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.receivable_email_tree.yview)
@@ -1209,20 +1234,22 @@ class BalanceApp(tk.Tk):
             company_filter = [c.strip() for c in company_text.split(",") if c.strip()]
             df = df[df[company_col].isin(company_filter)]
 
-        self.receivable_groups = rvp.build_groups(df)
-        self.receivable_totals = rvp.group_totals(df, self.receivable_groups)
+        self.receivable_filtered_df = df  # kept for the per-client chart breakdown when generating reports
+        self.receivable_groups = rvp.build_company_groups(df)
+        self.receivable_totals = rvp.company_totals(df, self.receivable_groups)
 
         self.receivable_results_tree.delete(*self.receivable_results_tree.get_children())
-        for i, ((client, company), _g) in enumerate(self.receivable_groups.items()):
-            t = self.receivable_totals[(client, company)]
+        for i, (bucket_label, _g) in enumerate(self.receivable_groups.items()):
+            t = self.receivable_totals[bucket_label]
             tag = "evenrow" if i % 2 == 0 else "oddrow"
             self.receivable_results_tree.insert("", "end", values=(
-                client, company, f"{t['premium_total']:,.0f}", f"{t['claims_total']:,.0f}"
+                bucket_label, t["num_clients"], f"{t['premium_total']:,.0f}", f"{t['claims_total']:,.0f}"
             ), tags=(tag,))
-        self.receivable_results_summary_var.set(f"{len(self.receivable_groups)} Client + Company group(s) identified")
+        self.receivable_results_summary_var.set(f"{len(self.receivable_groups)} output file(s) identified")
 
-        self.log_receivable(f"\nAnalysis complete: {len(self.receivable_groups)} Client + Company group(s).")
-        self.status_var.set(f"{len(self.receivable_groups)} groups. See tab 2.")
+        self.log_receivable(f"\nAnalysis complete: {len(self.receivable_groups)} output file(s) "
+                             f"(one per insurance company, OFC-named companies pooled into one shared file).")
+        self.status_var.set(f"{len(self.receivable_groups)} files. See tab 2.")
 
     def generate_receivable_reports(self):
         if not getattr(self, "receivable_groups", None):
@@ -1241,23 +1268,26 @@ class BalanceApp(tk.Tk):
         else:
             premium_amount_col = claims_amount_col = colmap["amount"]
 
+        source_df = getattr(self, "receivable_filtered_df", self.receivable_clean_df)
+
         self.receivable_filename_lookup = {}
         generated = []
         errors = []
-        for (client, company), g in self.receivable_groups.items():
+        for bucket_label, g in self.receivable_groups.items():
             try:
-                fp = rvg.build_receivable_workbook(
-                    client, company, g["premium_rows"], g["claims_rows"], output_dir,
+                breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
+                fp = rvg.build_company_workbook(
+                    bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
                     premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
                 )
                 generated.append(fp)
-                self.receivable_filename_lookup[(client, company)] = os.path.basename(fp)
+                self.receivable_filename_lookup[bucket_label] = os.path.basename(fp)
             except Exception as e:
-                errors.append(f"{client} / {company}: {e}")
+                errors.append(f"{bucket_label}: {e}")
 
         msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
         if errors:
-            msg += f"\n\n{len(errors)} group(s) failed:\n" + "\n".join(errors[:10])
+            msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
         messagebox.showinfo("Done", msg)
         self.status_var.set(f"Generated {len(generated)} Receivable workbook(s).")
 
@@ -1296,7 +1326,7 @@ class BalanceApp(tk.Tk):
         self.receivable_email_tree.delete(*self.receivable_email_tree.get_children())
         for d in self.receivable_drafts:
             self.receivable_email_tree.insert("", "end", values=(
-                d["client_name"], d["company_name"], d["email"] or "(missing)", d["status"]
+                d["company_name"], d["num_clients"], d["email"] or "(missing)", d["status"]
             ))
         self.status_var.set(f"Drafted {len(self.receivable_drafts)} Receivable emails.")
 
@@ -1319,7 +1349,7 @@ class BalanceApp(tk.Tk):
     def save_receivable_email_edit(self):
         sel = self.receivable_email_tree.selection()
         if not sel:
-            messagebox.showinfo("No group selected", "Select a Client + Company group from the list on the left first.")
+            messagebox.showinfo("No company selected", "Select an insurance company from the list on the left first.")
             return
         idx = self.receivable_email_tree.index(sel[0])
         new_email = self.receivable_email_to_var.get().strip()
@@ -1332,8 +1362,7 @@ class BalanceApp(tk.Tk):
         self.receivable_email_tree.set(row_id, "email", new_email or "(missing)")
         self.receivable_email_tree.set(row_id, "status", status)
 
-        self.status_var.set(f"Updated draft for {self.receivable_drafts[idx]['client_name']} / "
-                             f"{self.receivable_drafts[idx]['company_name']}.")
+        self.status_var.set(f"Updated draft for {self.receivable_drafts[idx]['company_name']}.")
 
     def send_all_receivable_emails(self):
         if not getattr(self, "receivable_drafts", None):
@@ -1341,12 +1370,12 @@ class BalanceApp(tk.Tk):
             return
 
         filename_lookup = getattr(self, "receivable_filename_lookup", {})
-        missing = [f"{d['client_name']} / {d['company_name']}" for d in self.receivable_drafts
-                   if (d["client_name"], d["company_name"]) not in filename_lookup]
+        missing = [d["company_name"] for d in self.receivable_drafts
+                   if d["company_name"] not in filename_lookup]
         if missing:
             proceed = messagebox.askyesno(
                 "Reports not generated",
-                f"{len(missing)} of {len(self.receivable_drafts)} group(s) have no generated Excel workbook yet, "
+                f"{len(missing)} of {len(self.receivable_drafts)} file(s) have no generated Excel workbook yet, "
                 f"so those emails would go out with no attachment:\n\n"
                 + "\n".join(missing[:10]) + (f"\n...and {len(missing) - 10} more" if len(missing) > 10 else "")
                 + "\n\nGo to tab 2 and click 'Generate Excel Reports' first, "
@@ -1386,7 +1415,7 @@ class BalanceApp(tk.Tk):
     def send_individual_receivable_email(self):
         sel = self.receivable_email_tree.selection()
         if not sel:
-            messagebox.showinfo("No group selected", "Click a Client + Company group in the list on the left first.")
+            messagebox.showinfo("No company selected", "Click an insurance company in the list on the left first.")
             return
         idx = self.receivable_email_tree.index(sel[0])
 
@@ -1399,12 +1428,12 @@ class BalanceApp(tk.Tk):
 
         output_dir = self.receivable_output_dir_var.get().strip()
         filename_lookup = getattr(self, "receivable_filename_lookup", {})
-        fname = filename_lookup.get((d["client_name"], d["company_name"]))
+        fname = filename_lookup.get(d["company_name"])
         attachment_path = os.path.join(output_dir, fname) if fname and os.path.exists(os.path.join(output_dir, fname)) else None
         if attachment_path is None:
             if not messagebox.askyesno(
                 "No report generated",
-                f"No Excel workbook has been generated yet for {d['client_name']} / {d['company_name']}. "
+                f"No Excel workbook has been generated yet for {d['company_name']}. "
                 f"Send this email without an attachment?\n\n"
                 f"(Go to tab 2 and click 'Generate Excel Reports' first if you'd rather attach one.)"
             ):
@@ -1412,7 +1441,7 @@ class BalanceApp(tk.Tk):
 
         dry_run = self.receivable_dry_run_var.get()
         if not dry_run:
-            if not messagebox.askyesno("Confirm", f"Send this email to {d['email']} ({d['client_name']} / {d['company_name']}) now?"):
+            if not messagebox.askyesno("Confirm", f"Send this email to {d['email']} ({d['company_name']}) now?"):
                 return
 
         row_id = self.receivable_email_tree.get_children()[idx]
@@ -1473,7 +1502,7 @@ class BalanceApp(tk.Tk):
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
 
@@ -1503,7 +1532,7 @@ class BalanceApp(tk.Tk):
         ttk.Button(source_box, text="Browse...", command=self.browse_email_file).grid(row=3, column=2, **pad)
 
         ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
-                   command=self.load_data).grid(row=4, column=1, sticky="w", pady=(10, 4))
+                   command=self.load_data).grid(row=4, column=0, sticky="w", padx=10, pady=(10, 4))
 
         # ---- Section: Threshold & Filters ----
         filter_box = ttk.Labelframe(canvas_frame, text="  Threshold & Filters  ", padding=14)

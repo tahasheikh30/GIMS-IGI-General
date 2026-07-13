@@ -125,12 +125,12 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
 
     Returns a summary dict:
         {
-          "num_groups": int,
+          "num_groups": int,   # number of output files/buckets (companies + pooled OFC)
           "generated_files": [filepath, ...],
           "validation_issues": DataFrame,
           "drafts": [draft, ...],
           "send_results": [result, ...],
-          "missing_email": [ (client, company), ... ],
+          "missing_email": [company_name, ...],
           "errors": [str, ...],
         }
     """
@@ -167,9 +167,10 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
                    "export format - if Claims Receivable sheets come out mostly empty, re-run with "
                    "require_ref_for_claims_only_rows=False.")
 
-    groups = rp.build_groups(clean_df)
-    totals = rp.group_totals(clean_df, groups)
-    logger(f"\n{len(groups)} Client+Company group(s) identified.")
+    groups = rp.build_company_groups(clean_df)
+    totals = rp.company_totals(clean_df, groups)
+    logger(f"\n{len(groups)} output file(s) identified (one per insurance company, "
+           f"with every company containing \"OFC\" in its name pooled into a single shared 'OFC' file).")
 
     if colmap["mode"] == "dual":
         premium_amount_col, claims_amount_col = colmap["premium_amount"], colmap["claims_amount"]
@@ -179,18 +180,19 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
     os.makedirs(output_dir, exist_ok=True)
     generated_files = []
     filename_lookup = {}
-    for (client_name, company_name), g in groups.items():
+    for bucket_label, g in groups.items():
         try:
-            fp = rg.build_receivable_workbook(
-                client_name, company_name, g["premium_rows"], g["claims_rows"],
+            breakdown = rp.client_breakdown_for_bucket(clean_df, bucket_label)
+            fp = rg.build_company_workbook(
+                bucket_label, g["premium_rows"], g["claims_rows"], breakdown,
                 output_dir, premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
                 run_date=None,
             )
             generated_files.append(fp)
-            filename_lookup[(client_name, company_name)] = os.path.basename(fp)
-            logger(f"  Generated: {os.path.basename(fp)}")
+            filename_lookup[bucket_label] = os.path.basename(fp)
+            logger(f"  Generated: {os.path.basename(fp)} ({totals[bucket_label]['num_clients']} client(s))")
         except Exception as e:
-            msg = f"Failed to generate workbook for {client_name} / {company_name}: {e}"
+            msg = f"Failed to generate workbook for {bucket_label}: {e}"
             logger(f"  ERROR: {msg}")
             errors.append(msg)
 
@@ -212,11 +214,11 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
         signature=signature, report_date=report_date,
     )
 
-    missing_email = [(d["client_name"], d["company_name"]) for d in drafts if not d.get("email")]
+    missing_email = [d["company_name"] for d in drafts if not d.get("email")]
     if missing_email:
-        logger(f"\n{len(missing_email)} group(s) have no recipient email (flagged, not skipped):")
-        for client_name, company_name in missing_email[:20]:
-            logger(f"   {client_name} / {company_name}")
+        logger(f"\n{len(missing_email)} file(s) have no recipient email (flagged, not skipped):")
+        for company_name in missing_email[:20]:
+            logger(f"   {company_name}")
         if len(missing_email) > 20:
             logger(f"   ...and {len(missing_email) - 20} more.")
 
@@ -224,7 +226,7 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
     send_results = re_.send_receivable_emails(
         drafts, output_dir, filename_lookup, dry_run=dry_run,
         progress_callback=lambda i, total, r: logger(
-            f"  [{i}/{total}] {r['client_name']} / {r['company_name']}: {r['send_message']}"
+            f"  [{i}/{total}] {r['company_name']}: {r['send_message']}"
         ),
     )
 
@@ -244,7 +246,7 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
     logger("\n" + "=" * 60)
     logger("RUN SUMMARY")
     logger("=" * 60)
-    logger(f"Groups processed:      {len(groups)}")
+    logger(f"Files processed:       {len(groups)}")
     logger(f"Workbooks generated:   {len(generated_files)}")
     logger(f"Emails {'previewed (dry run)' if dry_run else 'sent'}:      {num_sent}")
     logger(f"Emails failed:         {num_failed}")

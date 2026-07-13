@@ -34,8 +34,8 @@ with the following sections:
 | `loss_ratio_processor.py` | Reads/validates Loss Ratio input files, normalizes column-name variations, aggregates per company |
 | `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output |
 | `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
-| `receivable_generator.py` | Writes each Client+Company group's two-sheet (Premium Receivable / Claims Receivable) Excel statement |
-| `receivable_email.py` | Drafts the statement email per group and sends via `outlook_sender` |
+| `receivable_generator.py` | Writes each insurance company's three-sheet (Summary w/ charts, Premium Receivable, Claims Receivable) Excel statement, covering every client for that company |
+| `receivable_email.py` | Drafts the statement email per company file and sends via `outlook_sender` |
 | `receivable_automation.py` | `load_email_lookup_from_addresses_sheet()` (used by the GUI) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
@@ -225,28 +225,48 @@ structure as Outstanding Premium:
 
 - **1. Upload & Validate** — source file, sheet names, validation options,
   and an optional Client/Company filter, plus an Activity Log.
-- **2. Client + Company Groups** — the list of groups found (with Premium
-  Receivable and Claims Receivable totals per group), and the "Generate
-  Excel Reports" / "Open Output Folder" buttons.
+- **2. Insurance Company Files** — one row per output file (one per
+  insurance company, with every "OFC"-named company pooled into a single
+  shared file — see below), showing its client count and Premium/Claims
+  Receivable totals, plus the "Generate Excel Reports" / "Open Output
+  Folder" buttons.
 - **3. Review & Send Emails** — draft, preview/edit, and send the
-  statement emails, with a shared "Your Signature" box, dry run toggle,
-  and per-row Send/Save Edits buttons — identical interaction pattern to
-  Outstanding Premium's tab 3.
+  statement emails (one per company file), with a shared "Your Signature"
+  box, dry run toggle, and per-row Send/Save Edits buttons — identical
+  interaction pattern to Outstanding Premium's tab 3.
 
-**What it does:** reads a co-insurance outstanding-position export, groups
-every transaction row by **Client Name + Company** (Company here is the
-co-insurance partner, e.g. "ADAMJEE INSURANCE COMPANY LTD" — the company
-that owes IGI its share of a client's premium/claims), and writes one
-Excel workbook per group with exactly two sheets:
-- **"Premium Receivable"** — that group's rows with a non-zero Premium
-  Receivable amount
-- **"Claims Receivable"** — that group's rows with a non-zero Claim
-  Receivable amount (still written with headers only if the group has none)
+**What it does:** reads a co-insurance outstanding-position export and
+groups every transaction row by **Company** (the co-insurance partner,
+e.g. "ADAMJEE INSURANCE COMPANY LTD" — the company that owes IGI its
+share of a client's premium/claims), writing **one Excel workbook per
+insurance company**, covering every client that company is associated
+with. Every company whose name contains "OFC" (case-insensitive) is
+pulled out of the normal per-company grouping and pooled together into a
+single shared file named `OFC_Receivable_{date}.xlsx` instead — so if you
+have several differently-named OFC branches/entities in your data, they
+all land in one combined file rather than each getting their own.
 
-Every other original column (Class, Leader Ref. No, Code, Insurance
+Each output workbook has exactly three sheets:
+- **"Summary"** (opens first) — total Premium/Claims Receivable for the
+  whole file, a pie chart showing the Premium-vs-Claims split, and a
+  per-client bar chart comparing Premium and Claims Receivable across
+  every client in that file. Both charts are genuine embedded Excel chart
+  objects (built via openpyxl) fed by a plain data table on the same
+  sheet, not static pictures — you can click into them and adjust like
+  any chart you built by hand, and the underlying numbers are visible
+  right next to them.
+- **"Premium Receivable"** — every row (across every client in the file)
+  with a non-zero Premium Receivable amount
+- **"Claims Receivable"** — every row with a non-zero Claim Receivable
+  amount (still written with headers only if the file has none)
+
+Every other original column (Class, Leader Ref. No, Code, Client Name,
 Company, Date, Type, etc.) is preserved exactly as it appears in the
-source file — nothing is renamed or reformatted beyond splitting rows into
-the two sheets and number-formatting the relevant amount column.
+source file on the two data sheets — nothing is renamed or reformatted
+beyond splitting rows by category and number-formatting the relevant
+amount column. Client Name stays visible on every row, since a file now
+covers many clients at once (and, for the pooled OFC file, several
+different real companies too).
 
 ### Tab 1 — Upload & Validate
 - **Master workbook** — the same file the co-insurance export already
@@ -259,10 +279,14 @@ the two sheets and number-formatting the relevant amount column.
 - **Address-book sheet name** — defaults to `Addresses Co Insurance`. This
   sheet is keyed by **Company Name**, matching the "Company" field on the
   transaction sheet, so recipient emails are looked up by co-insurance
-  company rather than by client. A company can list several emails in one
-  cell (comma or semicolon separated) — all of them are used as Outlook
-  "To" recipients. If a company's contact-person column is present, that
-  name is used in the email greeting instead of the company name.
+  company rather than by client. For the pooled OFC file, the lookup key
+  is literally `OFC` — add a row with that exact name to the address book
+  if you want that file's email to resolve automatically; otherwise it's
+  flagged "Missing email" for manual entry on tab 3, same as any other
+  unmatched company. A company can list several emails in one cell (comma
+  or semicolon separated) — all of them are used as Outlook "To"
+  recipients. If a company's contact-person column is present, that name
+  is used in the email greeting instead of the company name.
 - **Output folder** — configurable; created automatically if it doesn't
   exist.
 - **Require Leader Ref Number on claims-only rows** (checked by default,
@@ -285,36 +309,39 @@ the two sheets and number-formatting the relevant amount column.
   separated exact names). Click **Analyze / Build Groups** to apply them
   and populate tab 2.
 
-### Tab 2 — Client + Company Groups
-Shows every Client + Company group found, with its Premium Receivable and
-Claims Receivable totals. Click **Generate Excel Reports** to write one
-workbook per group (named per the pattern below) into the output folder
-set on tab 1, or **Open Output Folder** to browse what's been generated.
+### Tab 2 — Insurance Company Files
+Shows one row per output file — each insurance company (plus the pooled
+"OFC" row, if any OFC-named companies are present) — with its client
+count and Premium/Claims Receivable totals. Click **Generate Excel
+Reports** to write one workbook per row (named per the pattern below)
+into the output folder set on tab 1, or **Open Output Folder** to browse
+what's been generated.
 
 ### Tab 3 — Review & Send Emails
 1. **Your Signature** — shared with the Outstanding Premium module (same
    `signature.json`), so it only needs to be set once across both modules.
-2. Click **Draft Emails** to generate a statement email per group.
+2. Click **Draft Emails** to generate one statement email per company file.
 3. Click any row to preview/edit its recipient, subject, and body. Click
-   **Save Edits to Selected Email** to keep changes for that group only.
+   **Save Edits to Selected Email** to keep changes for that file only.
 4. **Dry run** is checked by default — preview exactly what would be sent
    without actually sending.
 5. Uncheck dry run and click **Send All** (or **Send This Email** for a
-   single group) to send for real via Outlook. Each email attaches that
-   group's generated workbook if one exists. Every run is logged to
+   single row) to send for real via Outlook. Each email attaches that
+   file's generated workbook if one exists. Every run is logged to
    `receivable_run_history.json`, the same way the Outstanding Premium
    module logs to `run_history.json`.
 
 **Email subject/body:**
 ```
-Subject: Premium & Claims Receivable Statement – {Client Name} – {Date}
+Subject: Premium & Claims Receivable Statement – {Company Name} – {Date}
 ```
-The body is a short cover note referencing the attached statement and its
-Premium/Claims Receivable totals.
+The body is a short cover note referencing the attached statement, how
+many clients it covers, and its total Premium/Claims Receivable.
 
-**Filename format:** `{ClientName}_{CompanyName}_Receivable_{DDMMYYYY}.xlsx`,
-with spaces and special characters stripped from each name component for
-filesystem/attachment safety.
+**Filename format:** `{CompanyName}_Receivable_{DDMMYYYY}.xlsx` (or
+`OFC_Receivable_{DDMMYYYY}.xlsx` for the pooled file), with spaces and
+special characters stripped from the name for filesystem/attachment
+safety.
 
 **Column layout flexibility:** the module recognizes two possible source
 layouts automatically — (a) separate "Premium Receivable" and "Claim

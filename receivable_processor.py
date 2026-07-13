@@ -298,36 +298,93 @@ def validate_data(df, require_ref_for_claims_only_rows=True):
 
 _HELPER_COLS = ["_rec_client", "_rec_company", "_rec_premium_amt", "_rec_claims_amt"]
 
+OFC_BUCKET_LABEL = "OFC"
 
-def build_groups(clean_df):
+
+def _is_ofc_company(company_name):
+    """OFC companies are identified purely by their Company name
+    containing the text "OFC" (case-insensitive) - confirmed directly,
+    since nothing in the source data itself flags this any other way
+    (no dedicated column, no fixed name list)."""
+    return "ofc" in str(company_name).strip().lower()
+
+
+def _bucket_series(clean_df):
+    """Map every row's Company to its output bucket: its own exact
+    Company name, or the shared OFC_BUCKET_LABEL if that name contains
+    "OFC". This is the one place that decides bucketing, so every
+    grouping/totals/breakdown function below stays in sync automatically."""
+    return clean_df["_rec_company"].apply(lambda c: OFC_BUCKET_LABEL if _is_ofc_company(c) else c)
+
+
+def build_company_groups(clean_df):
     """
-    Group clean_df by (Client Name, Company) using the internal helper
-    columns added by validate_data(). Returns an ordered dict:
-        {(client_name, company_name): {"premium_rows": df, "claims_rows": df}}
-    Each sub-dataframe keeps every ORIGINAL source column, in original
-    order, with original values untouched - the helper columns are
-    stripped back out before being returned.
+    Group clean_df into one bucket per output workbook. Per spec, that's
+    one file per insurance company, covering every client for that
+    company - NOT one file per (client, company) pair like the module
+    used to produce. Returns an ordered dict:
+        {bucket_label: {"premium_rows": df, "claims_rows": df}}
+
+    Every company whose name contains "OFC" is pooled into a single
+    shared bucket (OFC_BUCKET_LABEL = "OFC") instead of getting its own
+    per-company bucket - i.e. every OFC-named company ends up together in
+    one combined file, rather than each having its own (confirmed: "OFC
+    companies get their own file" means one shared file for the whole OFC
+    set, not one each).
+
+    Each sub-dataframe keeps every ORIGINAL source column (including
+    Client Name and Company - both stay visible on every row, which
+    matters most for the pooled OFC bucket since it mixes rows from
+    several distinct real companies into one workbook) - the helper
+    columns are stripped back out before being returned.
     """
+    df = clean_df.copy()
+    df["_rec_bucket"] = _bucket_series(df)
+
     groups = {}
-    for (client, company), sub in clean_df.groupby(["_rec_client", "_rec_company"], sort=False):
-        premium_rows = sub[sub["_rec_premium_amt"] != 0].drop(columns=_HELPER_COLS)
-        claims_rows = sub[sub["_rec_claims_amt"] != 0].drop(columns=_HELPER_COLS)
-        groups[(client, company)] = {
+    for bucket, sub in df.groupby("_rec_bucket", sort=False):
+        premium_rows = sub[sub["_rec_premium_amt"] != 0].drop(columns=_HELPER_COLS + ["_rec_bucket"])
+        claims_rows = sub[sub["_rec_claims_amt"] != 0].drop(columns=_HELPER_COLS + ["_rec_bucket"])
+        groups[bucket] = {
             "premium_rows": premium_rows.reset_index(drop=True),
             "claims_rows": claims_rows.reset_index(drop=True),
         }
     return groups
 
 
-def group_totals(clean_df, groups):
-    """Return {(client, company): {"premium_total": x, "claims_total": y}}
-    computed straight from the helper amount columns (before they're
-    stripped), so totals are correct even though the output sheets show
-    the original source column names."""
+def company_totals(clean_df, groups):
+    """Return {bucket_label: {"premium_total": x, "claims_total": y,
+    "num_clients": n}} computed straight from the helper amount columns
+    (before they're stripped), so totals are correct even though the
+    output sheets show the original source column names. num_clients
+    counts distinct clients within that bucket - for a normal company
+    that's just its own client count; for the pooled OFC bucket it's the
+    distinct client count across every OFC-named company combined."""
+    df = clean_df.copy()
+    df["_rec_bucket"] = _bucket_series(df)
+
     totals = {}
-    for (client, company), sub in clean_df.groupby(["_rec_client", "_rec_company"], sort=False):
-        totals[(client, company)] = {
+    for bucket, sub in df.groupby("_rec_bucket", sort=False):
+        totals[bucket] = {
             "premium_total": sub["_rec_premium_amt"].sum(),
             "claims_total": sub["_rec_claims_amt"].sum(),
+            "num_clients": int(sub["_rec_client"].nunique()),
         }
     return totals
+
+
+def client_breakdown_for_bucket(clean_df, bucket_label):
+    """Per-client Premium/Claims Receivable totals within one output
+    bucket (a single company, or the pooled OFC set) - this feeds that
+    workbook's own Summary sheet chart, sorted largest Premium Receivable
+    first so the chart reads most-to-least at a glance."""
+    df = clean_df.copy()
+    df["_rec_bucket"] = _bucket_series(df)
+    sub = df[df["_rec_bucket"] == bucket_label]
+    g = (
+        sub.groupby("_rec_client")
+        .agg(premium_total=("_rec_premium_amt", "sum"), claims_total=("_rec_claims_amt", "sum"))
+        .reset_index()
+        .rename(columns={"_rec_client": "Client Name"})
+    )
+    return g.sort_values("premium_total", ascending=False).reset_index(drop=True)
