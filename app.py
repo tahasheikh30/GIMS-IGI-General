@@ -285,19 +285,19 @@ class BalanceApp(tk.Tk):
         for key, label in top_labels_before:
             self.nav_items[key] = self._make_nav_item(sidebar, key, label)
 
-        # Built *after* Coinsurance so we have a stable sibling to anchor
-        # the submenu frame's pack(before=...) against every time it's
-        # toggled - see _build_coinsurance_menu for why this matters.
-        renewal_anchor = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=1)
-        renewal_anchor.pack(fill="x")
+        # Pack Renewal now (it ends up LAST visually, see below) so we have
+        # one stable, permanently-packed sibling to anchor Coinsurance's
+        # header/submenu against via pack(before=renewal_item) - including
+        # every time the submenu is re-packed on toggle. Anchoring to a
+        # separate placeholder frame doesn't work here: once Renewal itself
+        # got inserted before that placeholder, the placeholder was no
+        # longer adjacent to Coinsurance, so re-expanding the submenu
+        # landed it after Renewal instead of back under Coinsurance.
+        # Renewal is never forgotten/re-packed, so it's a safe fixed point.
+        renewal_item = self._make_nav_item(sidebar, "renewal", "Renewal")
+        self.nav_items["renewal"] = renewal_item
 
-        self._build_coinsurance_menu(sidebar, before=renewal_anchor)
-
-        top_labels_after = [
-            ("renewal", "Renewal"),
-        ]
-        for key, label in top_labels_after:
-            self.nav_items[key] = self._make_nav_item(sidebar, key, label, before=renewal_anchor)
+        self._build_coinsurance_menu(sidebar, before=renewal_item)
 
         # Thin divider between the sidebar and content area
         tk.Frame(parent, bg=self.COLOR_BORDER, width=1).pack(side="left", fill="y")
@@ -309,12 +309,15 @@ class BalanceApp(tk.Tk):
         header only expands/collapses it (it isn't itself a page);
         clicking a sub-item navigates like any other nav item.
 
-        `before`: a stable sibling widget (packed once, ahead of any
-        later top-level items like Renewal) that the submenu frame is
-        always re-packed against via pack(before=...). Without this,
-        toggling the submenu with a plain pack_forget()/pack() would drop
-        it to the *end* of the sidebar's packing order - i.e. below
-        Renewal - the first time it's collapsed and re-expanded.
+        `before`: the permanent Renewal nav item widget - a fixed sibling
+        that is packed once and never forgotten/re-packed - which the
+        header and submenu frame are always inserted immediately ahead of
+        via pack(before=...). This has to be a widget that never moves;
+        anchoring to a disposable placeholder instead doesn't work, because
+        once anything else (like Renewal) gets inserted before that
+        placeholder too, the placeholder is no longer adjacent to
+        Coinsurance, and the next toggle drops the submenu after Renewal
+        rather than back under Coinsurance where it belongs.
         """
         header = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, cursor="hand2")
         header.pack(fill="x", before=before)
@@ -573,37 +576,108 @@ class BalanceApp(tk.Tk):
         # --- Section 2: File selection ---
         s2 = self._loss_section_card(body, "2", "Input Files", PAD_X)
         ttk.Label(s2, text="Accepts .xlsx and .pdf. A single multi-client PDF (covering a client range) can populate an entire group automatically.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
 
         file_container = ttk.Frame(s2)
-        file_container.pack(fill="x")
+        file_container.pack(fill="both", expand=True)
         file_container.columnconfigure(0, weight=1)
+        file_container.rowconfigure(0, weight=1)
 
+        # ---- Individual mode: single-file picker card ----
         self.loss_individual_frame = ttk.Frame(file_container)
-        self.loss_individual_frame.grid(row=0, column=0, sticky="ew")
+        self.loss_individual_frame.grid(row=0, column=0, sticky="nsew")
+
+        indiv_card = tk.Frame(self.loss_individual_frame, bg=self.COLOR_PANEL_ALT,
+                               highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        indiv_card.pack(fill="both", expand=True)
+        indiv_inner = tk.Frame(indiv_card, bg=self.COLOR_PANEL_ALT)
+        indiv_inner.pack(fill="x", padx=16, pady=14)
+
+        self.loss_individual_icon = tk.Label(indiv_inner, text="\u25A4", font=("Segoe UI", 20),
+                                              bg=self.COLOR_PANEL_ALT, fg=self.COLOR_BORDER, width=2)
+        self.loss_individual_icon.pack(side="left", padx=(0, 14))
+
+        indiv_text_col = tk.Frame(indiv_inner, bg=self.COLOR_PANEL_ALT)
+        indiv_text_col.pack(side="left", fill="x", expand=True)
+
         self.loss_individual_file_var = tk.StringVar()
-        ttk.Entry(self.loss_individual_frame, textvariable=self.loss_individual_file_var, font=("Segoe UI", 10))\
-            .pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ttk.Button(self.loss_individual_frame, text="Browse...", command=self._browse_loss_individual_file, width=14)\
-            .pack(side="left")
+        self.loss_individual_name_var = tk.StringVar(value="No file selected")
+        tk.Label(indiv_text_col, textvariable=self.loss_individual_name_var, font=("Segoe UI", 10, "bold"),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_TEXT, anchor="w", wraplength=420, justify="left")\
+            .pack(fill="x", anchor="w")
+        tk.Label(indiv_text_col, text="Excel (.xlsx) or PDF \u2014 one company", font=("Segoe UI", 8),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED, anchor="w").pack(fill="x", anchor="w")
 
+        indiv_btn_col = tk.Frame(indiv_inner, bg=self.COLOR_PANEL_ALT)
+        indiv_btn_col.pack(side="right", padx=(14, 0))
+        self._make_pill_button(indiv_btn_col, "Browse...", self._browse_loss_individual_file,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+
+        # ---- Group mode: multi-file list card ----
         self.loss_group_frame = ttk.Frame(file_container)
-        self.loss_group_frame.grid(row=0, column=0, sticky="ew")
-        group_top = ttk.Frame(self.loss_group_frame)
-        group_top.pack(fill="x", pady=(0, 8))
-        ttk.Button(group_top, text="Add File(s)...", command=self._add_loss_group_files, width=16).pack(side="left", padx=(0, 8))
-        ttk.Button(group_top, text="Remove Selected", command=self._remove_loss_group_file, width=16).pack(side="left")
+        self.loss_group_frame.grid(row=0, column=0, sticky="nsew")
 
-        list_frame = tk.Frame(self.loss_group_frame, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        group_card = tk.Frame(self.loss_group_frame, bg=self.COLOR_PANEL_ALT,
+                               highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        group_card.pack(fill="x")
+
+        self.loss_group_count_var = tk.StringVar(value="No files added yet")
+        count_row = tk.Frame(group_card, bg=self.COLOR_PANEL_ALT)
+        count_row.pack(fill="x", padx=16, pady=(12, 6))
+        tk.Label(count_row, textvariable=self.loss_group_count_var, font=("Segoe UI", 9, "bold"),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED).pack(side="left")
+
+        list_outer = tk.Frame(group_card, bg=self.COLOR_PANEL_ALT)
+        list_outer.pack(fill="x", padx=16, pady=(0, 4))
+
+        list_frame = tk.Frame(list_outer, bg="white", highlightbackground=self.COLOR_BORDER, highlightthickness=1)
         list_frame.pack(fill="x")
         list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
         self.loss_group_listbox = tk.Listbox(list_frame, height=6, font=("Segoe UI", 10), selectmode="extended",
                                               activestyle="none", relief="flat", borderwidth=0,
-                                              selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                              bg="white", selectbackground=self.COLOR_ACCENT, selectforeground="white",
                                               highlightthickness=0, yscrollcommand=list_scroll.set)
         list_scroll.configure(command=self.loss_group_listbox.yview)
         self.loss_group_listbox.pack(side="left", fill="both", expand=True)
         list_scroll.pack(side="right", fill="y")
+
+        # Empty-state placeholder, shown centered over the list until the
+        # first file is added, then hidden - clearer than a bare empty box.
+        # Wrapped across two short lines with a wraplength tied to the
+        # box's actual width (via the <Configure> binding below) so the
+        # text never runs wider than the bordered box it sits inside.
+        empty_state = tk.Frame(list_frame, bg="white")
+        tk.Label(empty_state, text="No files added", font=("Segoe UI", 9, "bold"),
+                 bg="white", fg=self.COLOR_MUTED, justify="center").pack()
+        self.loss_group_empty_sub = tk.Label(
+            empty_state, text="Click Browse below to add Excel or PDF files",
+            font=("Segoe UI", 8), bg="white", fg=self.COLOR_MUTED,
+            justify="center", wraplength=220,
+        )
+        self.loss_group_empty_sub.pack(pady=(2, 0))
+        self.loss_group_empty_label = empty_state
+        self.loss_group_empty_label.place(relx=0.5, rely=0.5, anchor="center")
+
+        def _resize_empty_label(event):
+            # Keep the placeholder text within the box with some breathing
+            # room on either side, instead of a fixed width that can spill
+            # past the border on a narrower window.
+            self.loss_group_empty_sub.configure(wraplength=max(140, event.width - 48))
+        list_frame.bind("<Configure>", _resize_empty_label)
+
+        # Action toolbar lives BELOW the list (not above it) so the natural
+        # reading order is "here are your files, here's what you can do
+        # with them" - and "Browse..." (not a separately-labeled "Add
+        # File(s)...") matches the same action/label used in Individual
+        # mode, since they do exactly the same thing (open a file picker).
+        group_toolbar = tk.Frame(group_card, bg=self.COLOR_PANEL_ALT)
+        group_toolbar.pack(fill="x", padx=16, pady=(6, 14))
+        self._make_pill_button(group_toolbar, "Browse...", self._add_loss_group_files,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+        self._make_pill_button(group_toolbar, "Remove Selected", self._remove_loss_group_file,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left", padx=(8, 0))
+        self._make_pill_button(group_toolbar, "Clear All", self._clear_loss_group_files,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(side="left", padx=(8, 0))
 
         # --- Section 3: Threshold + Calculate ---
         s3 = self._loss_section_card(body, "3", "Threshold & Generate", PAD_X)
@@ -631,6 +705,25 @@ class BalanceApp(tk.Tk):
         self.loss_log.pack(fill="both", expand=True)
 
         self._toggle_loss_mode()  # show the correct file-selection frame initially
+        self._refresh_loss_group_count()  # sync the empty-state placeholder/count label
+
+    def _make_pill_button(self, parent, text, command, bg, fg="white", outline=False):
+        """Small factory for the flat, rounded-look buttons already used
+        elsewhere in the app (Save Signature, Calculate Loss Ratio, etc.)
+        so every action button - across Individual and Group file modes -
+        shares one consistent size/shape instead of each spot picking its
+        own fixed character width."""
+        btn = tk.Button(
+            parent, text=text, command=command,
+            font=("Segoe UI", 9, "bold"), bg=bg, fg=fg,
+            activebackground=self.COLOR_SIDEBAR_ACTIVE if outline else self.COLOR_PRIMARY_DARK,
+            activeforeground=fg,
+            relief="solid" if outline else "flat",
+            borderwidth=1 if outline else 0,
+            highlightbackground=self.COLOR_BORDER,
+            padx=14, pady=7, cursor="hand2",
+        )
+        return btn
 
     def _loss_section_card(self, parent, number, title, pad_x, expand_bottom=False):
         """A numbered section card matching the app's '1. Upload & Filter'
@@ -668,6 +761,8 @@ class BalanceApp(tk.Tk):
         ])
         if path:
             self.loss_individual_file_var.set(path)
+            self.loss_individual_name_var.set(os.path.basename(path))
+            self.loss_individual_icon.configure(fg=self.COLOR_ACCENT)
 
     def _add_loss_group_files(self):
         paths = filedialog.askopenfilenames(filetypes=[
@@ -683,6 +778,7 @@ class BalanceApp(tk.Tk):
                 added += 1
         if added:
             self.status_var.set(f"Added {added} file(s) to the Loss Ratio group ({len(self.loss_group_files)} total).")
+        self._refresh_loss_group_count()
 
     def _remove_loss_group_file(self):
         selected = list(self.loss_group_listbox.curselection())
@@ -693,6 +789,26 @@ class BalanceApp(tk.Tk):
             self.loss_group_listbox.delete(idx)
             del self.loss_group_files[idx]
         self.status_var.set(f"{len(self.loss_group_files)} file(s) remaining in the group.")
+        self._refresh_loss_group_count()
+
+    def _clear_loss_group_files(self):
+        if not self.loss_group_files:
+            return
+        if not messagebox.askyesno("Clear all files", f"Remove all {len(self.loss_group_files)} file(s) from the group list?"):
+            return
+        self.loss_group_listbox.delete(0, "end")
+        self.loss_group_files.clear()
+        self.status_var.set("Cleared all files from the Loss Ratio group.")
+        self._refresh_loss_group_count()
+
+    def _refresh_loss_group_count(self):
+        n = len(self.loss_group_files)
+        if n == 0:
+            self.loss_group_count_var.set("No files added yet")
+            self.loss_group_empty_label.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self.loss_group_count_var.set(f"{n} file{'s' if n != 1 else ''} selected")
+            self.loss_group_empty_label.place_forget()
 
     def _log_loss(self, msg):
         self.loss_log.insert("end", msg + "\n")
