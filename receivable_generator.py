@@ -220,7 +220,19 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     ws.sheet_view.showGridLines = False
 
     n_clients = len(client_breakdown_df)
-    table_header_row = 15
+
+    # Row plan, top to bottom, with a fixed gap after the KPI/pie-chart
+    # band so nothing placed below it can ever collide with the pie chart
+    # regardless of how many client rows the table ends up with:
+    #   rows 2-5   banner
+    #   rows 8-12  KPI cards (+ pie chart floating beside them, columns K+)
+    #   row 23     "Client Breakdown" title
+    #   row 25     table header
+    #   ...        table data + Total row
+    #   +3 rows    bar chart, full width, always BELOW the table so it
+    #              never shares a row range with the pie chart above
+    card_row = 8
+    table_header_row = 25
     first_data_row = table_header_row + 1
     last_data_row = table_header_row + n_clients if n_clients else table_header_row
     total_row = last_data_row + 1
@@ -250,19 +262,18 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     premium_range = f"C{first_data_row}:C{last_data_row}" if n_clients else None
     claims_range = f"D{first_data_row}:D{last_data_row}" if n_clients else None
 
-    card_row = 8
     premium_cell = _write_kpi_card(
         ws, card_row, 2, 2, "Premium Receivable",
         f"=SUM({premium_range})" if premium_range else 0,
         KPI_PREMIUM_FILL, ACCENT_BLUE, sub_text="Owed to IGI by the co-insurer",
     )
     claims_cell = _write_kpi_card(
-        ws, card_row, 5, 2, "Claims Receivable",
+        ws, card_row, 4, 2, "Claims Receivable",
         f"=SUM({claims_range})" if claims_range else 0,
         KPI_CLAIMS_FILL, "D97B29", sub_text="Reimbursable to IGI for claims paid",
     )
     _write_kpi_card(
-        ws, card_row, 8, 2, "Total Receivable",
+        ws, card_row, 7, 2, "Total Receivable",
         f"={premium_cell.coordinate}+{claims_cell.coordinate}",
         KPI_TOTAL_FILL, "5FA8D3", value_font=KPI_VALUE_FONT_WHITE, label_font=KPI_LABEL_FONT_WHITE,
         sub_text=f"Across {num_clients} client{'s' if num_clients != 1 else ''}",
@@ -270,27 +281,27 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
 
     # ---- small labeled data table feeding the pie chart (kept visible & auditable) ----
     pie_src_row = card_row + 1
-    ws.cell(row=pie_src_row, column=11, value="Category").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row, column=12, value="Total").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row + 1, column=11, value="Premium Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row + 1, column=12, value=f"={premium_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row + 1, column=12).number_format = NUM_FORMAT
-    ws.cell(row=pie_src_row + 2, column=11, value="Claims Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row + 2, column=12, value=f"={claims_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
-    ws.cell(row=pie_src_row + 2, column=12).number_format = NUM_FORMAT
+    ws.cell(row=pie_src_row, column=10, value="Category").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row, column=11, value="Total").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=10, value="Premium Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=11, value=f"={premium_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=11).number_format = NUM_FORMAT
+    ws.cell(row=pie_src_row + 2, column=10, value="Claims Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 2, column=11, value=f"={claims_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 2, column=11).number_format = NUM_FORMAT
 
     pie = PieChart()
     pie.title = "Premium vs Claims Share"
     pie.style = 10
-    pie_data = Reference(ws, min_col=12, min_row=pie_src_row, max_row=pie_src_row + 2)
-    pie_cats = Reference(ws, min_col=11, min_row=pie_src_row + 1, max_row=pie_src_row + 2)
+    pie_data = Reference(ws, min_col=11, min_row=pie_src_row, max_row=pie_src_row + 2)
+    pie_cats = Reference(ws, min_col=10, min_row=pie_src_row + 1, max_row=pie_src_row + 2)
     pie.add_data(pie_data, titles_from_data=True)
     pie.set_categories(pie_cats)
     pie.dataLabels = DataLabelList()
     pie.dataLabels.showPercent = True
-    pie.height = 8.5
-    pie.width = 13.5
-    ws.add_chart(pie, "N8")
+    pie.height = 7.5
+    pie.width = 11
+    ws.add_chart(pie, "M8")
 
     # ---- Client Breakdown section title ----
     ws.cell(row=table_header_row - 2, column=2, value="Client Breakdown").font = TABLE_TITLE_FONT
@@ -340,17 +351,35 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
         cats = Reference(ws, min_col=2, min_row=first_data_row, max_row=last_data_row)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
-        chart.width = 28
-        chart.height = 13
-        ws.add_chart(chart, f"F{table_header_row}")
+        chart.width = 22
+        chart.height = 10
+        # Anchored two rows below the Total row (i.e. below the whole
+        # table), not beside it - this guarantees it never shares a row
+        # range with the pie chart above, regardless of how tall either
+        # chart ends up rendering or how many client rows the table has.
+        ws.add_chart(chart, f"B{total_row + 2}")
 
+    # ---- Column widths ----
+    # Cards sit at Premium=B-C, Claims=D-E, Total=G-H (F is the only true
+    # gap column, kept narrow). Column D doubles as the client table's own
+    # "Claims Receivable" column, so it needs real width either way - this
+    # replaces the old layout where column E was hard-coded to width 3 as
+    # a leftover spacer, which happened to be the exact column the Claims
+    # Receivable card started in, collapsing that card and truncating the
+    # table header next to it. Every column below gets enough room for
+    # "PKR 19,850,294" at the KPI font size and for the "Premium
+    # Receivable" / "Claims Receivable" table headers.
     ws.column_dimensions["A"].width = 3
     ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 20
-    ws.column_dimensions["D"].width = 20
-    ws.column_dimensions["E"].width = 3
-    ws.column_dimensions["K"].width = 18
-    ws.column_dimensions["L"].width = 14
+    ws.column_dimensions["C"].width = 19
+    ws.column_dimensions["D"].width = 19
+    ws.column_dimensions["E"].width = 19
+    ws.column_dimensions["F"].width = 4
+    ws.column_dimensions["G"].width = 19
+    ws.column_dimensions["H"].width = 19
+    ws.column_dimensions["I"].width = 3
+    ws.column_dimensions["J"].width = 20
+    ws.column_dimensions["K"].width = 15
 
 
 def build_company_workbook(bucket_label, premium_rows, claims_rows, client_breakdown_df, output_dir,
