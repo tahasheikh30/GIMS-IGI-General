@@ -100,7 +100,7 @@ def load_email_lookup_from_addresses_sheet(filepath, sheet_name="Addresses Co In
 
 
 def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_sheet_name="Addresses Co Insurance",
-                  load_email_lookup=True, require_ref_for_claims_only_rows=True,
+                  load_email_lookup=True,
                   signature=None, dry_run=True, report_date=None, logger=print):
     """
     Full pipeline: load -> validate -> group -> generate workbooks ->
@@ -114,11 +114,6 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
         "Missing email".
     output_dir: configurable folder for generated workbooks (created if
         missing).
-    require_ref_for_claims_only_rows: see receivable_processor.validate_data
-        - defaults to the literal spec (blank Leader Ref Number is always
-        excluded). On a file shaped like the real sample this means Claims
-        Receivable sheets come out mostly empty; set False to keep
-        claims-only rows that just lack a Leader Ref Number.
     logger: callable(str) used for progress/status lines - defaults to
         print, but a GUI can pass in a log-widget-appending function
         instead, same pattern as app.py's self.log().
@@ -143,9 +138,7 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
         return _empty_summary(str(e))
 
     try:
-        clean_df, issues_df, dropped_columns, colmap = rp.validate_data(
-            raw_df, require_ref_for_claims_only_rows=require_ref_for_claims_only_rows
-        )
+        clean_df, issues_df, dropped_columns, colmap = rp.validate_data(raw_df)
     except ValueError as e:
         logger(f"ERROR: {e}")
         return _empty_summary(str(e))
@@ -160,12 +153,6 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
         issue_counts = issues_df["issue"].value_counts()
         for issue_label, count in issue_counts.items():
             logger(f"   {count}x  {issue_label}")
-        if not require_ref_for_claims_only_rows:
-            logger("   (claims-only rows missing a Leader Ref Number were flagged but NOT excluded, per require_ref_for_claims_only_rows=False)")
-        elif "Missing Leader Ref Number" in issue_counts and issue_counts.get("Missing Leader Ref Number", 0) > 0:
-            logger("   NOTE: a large share of missing-Leader-Ref-Number rows are commonly claims-only rows in this "
-                   "export format - if Claims Receivable sheets come out mostly empty, re-run with "
-                   "require_ref_for_claims_only_rows=False.")
 
     groups = rp.build_company_groups(clean_df)
     totals = rp.company_totals(clean_df, groups)

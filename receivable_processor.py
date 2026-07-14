@@ -192,20 +192,24 @@ def _classify_type(value):
     return None
 
 
-def validate_data(df, require_ref_for_claims_only_rows=True):
+def validate_data(df):
     """
     Validate the raw dataframe (as returned by load_raw_data). Returns
     (clean_df, issues_df, dropped_columns, colmap).
 
-    require_ref_for_claims_only_rows: default True, matching the literal
-        spec ("flag any row with a blank ... Leader Ref Number"). Set to
-        False to still FLAG a blank Leader Ref Number on a claims-only row
-        (Premium amount = 0, Claims amount != 0) but not exclude it from
-        the Claims Receivable sheet. On the real sample file, ~460 of 461
-        blank-Leader-Ref-Number rows were exactly the claims-only rows, so
-        leaving this True means Claims Receivable sheets come out almost
-        entirely empty - this switch exists to make that an explicit,
-        visible choice rather than a silent one.
+    Leader Ref Number is the OTHER co-insurance company's own policy
+    reference - it only exists (and is only meaningful) on Premium
+    Receivable rows, where IGI is the follower being billed against a
+    policy the other company leads. On Claims Receivable rows IGI is the
+    primary payer being reimbursed, so there is no such reference to
+    expect from the other side - a blank Leader Ref Number there is
+    normal and correct, not a data problem, and is therefore never
+    flagged or excluded. (Confirmed against the real sample file: all 460
+    claims-only rows had a blank Leader Ref Number, and every single
+    premium-only row had one - this is structural, not messy data.)
+    Leader Ref Number is required only on rows carrying a non-zero
+    Premium Receivable amount (dual mode) or classified as Premium
+    Receivable (single/legacy mode).
 
     clean_df keeps every ORIGINAL column name and ORIGINAL value untouched
     (nothing is renamed or reformatted) - only bad rows are excluded, and
@@ -246,7 +250,6 @@ def validate_data(df, require_ref_for_claims_only_rows=True):
 
     _add_issues(mask_no_client, "Missing Client Name", client_col)
     _add_issues(mask_no_company, "Missing Company", company_col)
-    _add_issues(mask_no_ref, "Missing Leader Ref Number", ref_col)
 
     if mode == "dual":
         premium_col, claims_col = cols["premium_amount"], cols["claims_amount"]
@@ -260,15 +263,15 @@ def validate_data(df, require_ref_for_claims_only_rows=True):
         _add_issues(mask_bad_claims, "Non-numeric Claim Receivable amount", claims_col)
         _add_issues(mask_no_amount & ~(mask_bad_premium | mask_bad_claims), "No Premium or Claims amount on this row", premium_col)
 
-        mask_exclude_no_ref = mask_no_ref
-        if not require_ref_for_claims_only_rows:
-            premium_vals = premium_numeric.fillna(0)
-            claims_vals = claims_numeric.fillna(0)
-            mask_claims_only = (premium_vals == 0) & (claims_vals != 0)
-            # still flagged above (issues_df keeps the record), just not excluded
-            mask_exclude_no_ref = mask_no_ref & ~mask_claims_only
+        # Leader Ref Number is only required (and only flagged/excluded when
+        # missing) on rows carrying a Premium Receivable amount - see the
+        # docstring above for why a blank ref on a Claims-only row is
+        # expected, not an error.
+        mask_premium_row = premium_numeric.fillna(0) != 0
+        mask_no_ref_on_premium = mask_no_ref & mask_premium_row
+        _add_issues(mask_no_ref_on_premium, "Missing Leader Ref Number (Premium Receivable row)", ref_col)
 
-        bad_rows = mask_no_client | mask_no_company | mask_exclude_no_ref | mask_bad_premium | mask_bad_claims | mask_no_amount
+        bad_rows = mask_no_client | mask_no_company | mask_no_ref_on_premium | mask_bad_premium | mask_bad_claims | mask_no_amount
         clean_df = df.loc[~bad_rows].copy()
         clean_df["_rec_premium_amt"] = pd.to_numeric(clean_df[premium_col], errors="coerce").fillna(0)
         clean_df["_rec_claims_amt"] = pd.to_numeric(clean_df[claims_col], errors="coerce").fillna(0)
@@ -282,7 +285,13 @@ def validate_data(df, require_ref_for_claims_only_rows=True):
         _add_issues(mask_bad_type, "Type/Category value did not match Premium or Claims", type_col)
         _add_issues(mask_bad_amount, "Non-numeric Amount", amount_col)
 
-        bad_rows = mask_no_client | mask_no_company | mask_no_ref | mask_bad_type | mask_bad_amount
+        # Same rule as dual mode: Leader Ref Number is only required on
+        # Premium Receivable rows, never on Claims Receivable rows.
+        mask_premium_row = normalized_type == PREMIUM_LABEL
+        mask_no_ref_on_premium = mask_no_ref & mask_premium_row
+        _add_issues(mask_no_ref_on_premium, "Missing Leader Ref Number (Premium Receivable row)", ref_col)
+
+        bad_rows = mask_no_client | mask_no_company | mask_no_ref_on_premium | mask_bad_type | mask_bad_amount
         clean_df = df.loc[~bad_rows].copy()
         norm_type_clean = normalized_type.loc[clean_df.index]
         amt_clean = pd.to_numeric(clean_df[amount_col], errors="coerce").fillna(0)

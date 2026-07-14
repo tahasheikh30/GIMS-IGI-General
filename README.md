@@ -247,14 +247,18 @@ have several differently-named OFC branches/entities in your data, they
 all land in one combined file rather than each getting their own.
 
 Each output workbook has exactly three sheets:
-- **"Summary"** (opens first) — total Premium/Claims Receivable for the
-  whole file, a pie chart showing the Premium-vs-Claims split, and a
-  per-client bar chart comparing Premium and Claims Receivable across
-  every client in that file. Both charts are genuine embedded Excel chart
-  objects (built via openpyxl) fed by a plain data table on the same
-  sheet, not static pictures — you can click into them and adjust like
-  any chart you built by hand, and the underlying numbers are visible
-  right next to them.
+- **"Summary"** (opens first) — a redesigned dashboard-style sheet: a
+  navy title banner naming the company and generation date, three KPI
+  cards (Premium Receivable / Claims Receivable / Total Receivable), a
+  Premium-vs-Claims pie chart, and the full per-client breakdown table
+  with zebra-striped rows, a bold Total row, and a bar chart comparing
+  Premium and Claims Receivable across every client in that file. Every
+  number — the KPI cards, the pie chart's source table, and the Total
+  row — is a live Excel formula referencing the client table on the same
+  sheet, not a hardcoded value, so it all recalculates correctly if you
+  ever edit a number by hand. Both charts are genuine embedded Excel
+  chart objects (built via openpyxl), not static pictures — you can
+  click into them and adjust like any chart you built by hand.
 - **"Premium Receivable"** — every row (across every client in the file)
   with a non-zero Premium Receivable amount
 - **"Claims Receivable"** — every row with a non-zero Claim Receivable
@@ -289,17 +293,16 @@ different real companies too).
   is used in the email greeting instead of the company name.
 - **Output folder** — configurable; created automatically if it doesn't
   exist.
-- **Require Leader Ref Number on claims-only rows** (checked by default,
-  matching the original spec literally: any row with a blank Client Name,
-  Company, or Leader Ref Number is flagged and excluded). **Important —
-  confirmed against a real sample file:** claims transactions in this
-  export format very commonly don't carry a Leader Ref Number the way
-  premium transactions do (in the sample, 460 of 461 blank-Leader-Ref-
-  Number rows were exactly the claims-only rows). With this box checked,
-  Claims Receivable sheets will come out mostly or entirely empty on a
-  file shaped like the sample. Uncheck it to keep a claims-only row even
-  without a Leader Ref Number (it's still flagged in the validation
-  log — just not excluded).
+- **Leader Ref Number** is the *other* co-insurance company's own policy
+  reference, so it's only required (and only checked) on **Premium
+  Receivable** rows — where IGI is the follower being billed against a
+  policy the other company leads. On **Claims Receivable** rows IGI is
+  the primary payer being reimbursed, so there's no such reference to
+  expect from the other side; a blank Leader Ref Number there is normal
+  and is never flagged or excluded. (Confirmed against a real sample
+  file: all 460 claims-only rows had a blank Leader Ref Number, and
+  every single premium-only row had one — this is structural, not messy
+  data.) This is handled automatically now — there's no checkbox for it.
 - **Look up recipient emails from the address-book sheet** — uncheck to
   skip email lookup entirely (every draft will show "Missing email" and
   can still be reviewed/sent manually on tab 3).

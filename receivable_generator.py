@@ -39,6 +39,34 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NUM_FORMAT = "#,##0;(#,##0);-"
 DATE_FORMAT = "DD-MMM-YYYY"
 
+# ---- Summary "dashboard" styling ----
+NAVY = "1F4E78"
+NAVY_DARK = "163A5C"
+ACCENT_BLUE = "2E86AB"
+SLATE_TEXT = "1C2733"
+MUTED_TEXT = "6C7A89"
+CARD_BORDER = "D9E2EC"
+ROW_ALT_FILL = PatternFill("solid", start_color="F4F7FA", end_color="F4F7FA")
+ROW_WHITE_FILL = PatternFill("solid", start_color="FFFFFF", end_color="FFFFFF")
+
+BANNER_FILL = PatternFill("solid", start_color=NAVY, end_color=NAVY)
+BANNER_ACCENT_FILL = PatternFill("solid", start_color=ACCENT_BLUE, end_color=ACCENT_BLUE)
+KPI_PREMIUM_FILL = PatternFill("solid", start_color="EAF2FA", end_color="EAF2FA")
+KPI_CLAIMS_FILL = PatternFill("solid", start_color="FDF3EA", end_color="FDF3EA")
+KPI_TOTAL_FILL = PatternFill("solid", start_color=NAVY, end_color=NAVY)
+KPI_PREMIUM_ACCENT = PatternFill("solid", start_color=ACCENT_BLUE, end_color=ACCENT_BLUE)
+KPI_CLAIMS_ACCENT = PatternFill("solid", start_color="D97B29", end_color="D97B29")
+KPI_BORDER = Border(left=Side(style="thin", color=CARD_BORDER), right=Side(style="thin", color=CARD_BORDER),
+                     top=Side(style="thin", color=CARD_BORDER), bottom=Side(style="thin", color=CARD_BORDER))
+
+KPI_LABEL_FONT = Font(name="Arial", size=9, bold=True, color=MUTED_TEXT)
+KPI_VALUE_FONT = Font(name="Arial", size=18, bold=True, color=SLATE_TEXT)
+KPI_VALUE_FONT_WHITE = Font(name="Arial", size=18, bold=True, color="FFFFFF")
+KPI_LABEL_FONT_WHITE = Font(name="Arial", size=9, bold=True, color="D6E4F0")
+KPI_SUB_FONT = Font(name="Arial", size=8, italic=True, color=MUTED_TEXT)
+TABLE_TITLE_FONT = Font(name="Arial", bold=True, size=11, color=NAVY)
+TOTAL_FONT = Font(name="Arial", bold=True)
+
 PREMIUM_SHEET = "Premium Receivable"
 CLAIMS_SHEET = "Claims Receivable"
 SUMMARY_SHEET = "Summary"
@@ -115,89 +143,204 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
         ws.column_dimensions[get_column_letter(j)].width = width
 
 
+KPI_NUM_FORMAT = '"PKR "#,##0;("PKR "#,##0);"-"'
+
+
+def _apply_outer_border(ws, min_row, max_row, min_col, max_col, color=CARD_BORDER):
+    """Draw a rectangular outer border around a (possibly merged) cell
+    block. Openpyxl gives merged ranges no border of their own, so every
+    boundary cell needs its own Border with only the outward-facing
+    side(s) set."""
+    thin = Side(style="thin", color=color)
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = Border(
+                left=thin if c == min_col else None,
+                right=thin if c == max_col else None,
+                top=thin if r == min_row else None,
+                bottom=thin if r == max_row else None,
+            )
+
+
+def _write_kpi_card(ws, top_row, left_col, col_span, label, value_formula, fill, accent_hex,
+                     value_font=KPI_VALUE_FONT, label_font=KPI_LABEL_FONT, sub_text=None):
+    """A single dashboard KPI card: a thin accent strip, a small caps
+    label, and a large value - occupying `col_span` columns starting at
+    `left_col`, 5 rows tall starting at `top_row`. Returns the cell
+    holding the value (so callers can reference it in later formulas)."""
+    right_col = left_col + col_span - 1
+    accent_fill = PatternFill("solid", start_color=accent_hex, end_color=accent_hex)
+
+    ws.merge_cells(start_row=top_row, start_column=left_col, end_row=top_row, end_column=right_col)
+    ws.cell(row=top_row, column=left_col).fill = accent_fill
+    ws.row_dimensions[top_row].height = 5
+
+    ws.merge_cells(start_row=top_row + 1, start_column=left_col, end_row=top_row + 1, end_column=right_col)
+    lbl_cell = ws.cell(row=top_row + 1, column=left_col, value=label.upper())
+    lbl_cell.font = label_font
+    lbl_cell.fill = fill
+    lbl_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+
+    ws.merge_cells(start_row=top_row + 2, start_column=left_col, end_row=top_row + 3, end_column=right_col)
+    val_cell = ws.cell(row=top_row + 2, column=left_col, value=value_formula)
+    val_cell.font = value_font
+    val_cell.fill = fill
+    val_cell.number_format = KPI_NUM_FORMAT
+    val_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+
+    bottom_row = top_row + 4
+    ws.merge_cells(start_row=bottom_row, start_column=left_col, end_row=bottom_row, end_column=right_col)
+    sub_cell = ws.cell(row=bottom_row, column=left_col, value=sub_text or "")
+    sub_cell.font = KPI_SUB_FONT
+    sub_cell.fill = fill
+    sub_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+
+    for r in (top_row + 1, top_row + 2, top_row + 3, bottom_row):
+        for c in range(left_col, right_col + 1):
+            ws.cell(row=r, column=c).fill = fill
+    _apply_outer_border(ws, top_row, bottom_row, left_col, right_col)
+
+    return val_cell
+
+
 def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, claims_total, num_clients):
     """
-    Third sheet: a short totals block, a small Premium-vs-Claims pie
-    (share of the two totals), and a per-client bar chart built from
-    real embedded openpyxl Excel chart objects (interactive/refreshable
-    in Excel itself - not a static picture) fed by a plain data table
-    also written on this sheet, so the numbers behind every chart are
-    visible and auditable, not hidden inside the chart object.
+    Third sheet, redesigned as a compact one-page dashboard:
+      - a navy title banner naming the company/file and generation date
+      - three KPI cards (Premium Receivable / Claims Receivable / Total
+        Receivable) whose values are live SUM formulas over the
+        per-client table on this same sheet, plus a Premium-vs-Claims
+        pie chart
+      - the full per-client breakdown table with zebra striping and a
+        bold formula-driven Total row, plus a per-client bar chart
+    All numbers stay auditable next to the charts that visualize them,
+    and every total recalculates automatically if a value is edited.
     """
     ws.sheet_view.showGridLines = False
 
-    ws.merge_cells("B2:F2")
-    banner = ws["B2"]
-    banner.value = f"Receivable Summary \u2014 {bucket_label}"
-    banner.font = TITLE_FONT
-    banner.alignment = Alignment(horizontal="left", vertical="center")
+    n_clients = len(client_breakdown_df)
+    table_header_row = 15
+    first_data_row = table_header_row + 1
+    last_data_row = table_header_row + n_clients if n_clients else table_header_row
+    total_row = last_data_row + 1
 
-    ws["B3"] = f"{num_clients} client{'s' if num_clients != 1 else ''} \u2022 generated {date.today().strftime('%d-%b-%Y')}"
-    ws["B3"].font = TOTAL_LABEL_FONT
+    # ---- Title banner (3 stacked navy rows read as one continuous block) ----
+    LAST_BANNER_COL = 12  # column L
+    ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=LAST_BANNER_COL)
+    ws.cell(row=2, column=2, value="PREMIUM & CLAIMS RECEIVABLE STATEMENT").font = KPI_LABEL_FONT_WHITE
+    ws.merge_cells(start_row=3, start_column=2, end_row=3, end_column=LAST_BANNER_COL)
+    ws.cell(row=3, column=2, value=bucket_label).font = Font(name="Arial", bold=True, size=18, color="FFFFFF")
+    ws.merge_cells(start_row=4, start_column=2, end_row=4, end_column=LAST_BANNER_COL)
+    subtitle = f"{num_clients} client{'s' if num_clients != 1 else ''}   \u2022   generated {date.today().strftime('%d-%b-%Y')}"
+    ws.cell(row=4, column=2, value=subtitle).font = Font(name="Arial", size=10, color="D6E4F0")
+    for r in (2, 3, 4):
+        for c in range(2, LAST_BANNER_COL + 1):
+            ws.cell(row=r, column=c).fill = BANNER_FILL
+            ws.cell(row=r, column=c).alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 26
+    ws.row_dimensions[4].height = 18
+    # slim accent strip under the banner
+    ws.merge_cells(start_row=5, start_column=2, end_row=5, end_column=LAST_BANNER_COL)
+    ws.cell(row=5, column=2).fill = BANNER_ACCENT_FILL
+    ws.row_dimensions[5].height = 4
 
-    # ---- small totals table (also the pie chart's data source) ----
-    totals_header_row = 5
-    ws.cell(row=totals_header_row, column=2, value="Category").font = HEADER_FONT
-    ws.cell(row=totals_header_row, column=2).fill = HEADER_FILL
-    ws.cell(row=totals_header_row, column=3, value="Total").font = HEADER_FONT
-    ws.cell(row=totals_header_row, column=3).fill = HEADER_FILL
+    # ---- KPI cards (values reference the per-client table below via formula) ----
+    premium_range = f"C{first_data_row}:C{last_data_row}" if n_clients else None
+    claims_range = f"D{first_data_row}:D{last_data_row}" if n_clients else None
 
-    ws.cell(row=totals_header_row + 1, column=2, value="Premium Receivable").font = BODY_FONT
-    ws.cell(row=totals_header_row + 1, column=3, value=float(premium_total)).number_format = NUM_FORMAT
-    ws.cell(row=totals_header_row + 1, column=3).font = TOTAL_VALUE_FONT
+    card_row = 8
+    premium_cell = _write_kpi_card(
+        ws, card_row, 2, 2, "Premium Receivable",
+        f"=SUM({premium_range})" if premium_range else 0,
+        KPI_PREMIUM_FILL, ACCENT_BLUE, sub_text="Owed to IGI by the co-insurer",
+    )
+    claims_cell = _write_kpi_card(
+        ws, card_row, 5, 2, "Claims Receivable",
+        f"=SUM({claims_range})" if claims_range else 0,
+        KPI_CLAIMS_FILL, "D97B29", sub_text="Reimbursable to IGI for claims paid",
+    )
+    _write_kpi_card(
+        ws, card_row, 8, 2, "Total Receivable",
+        f"={premium_cell.coordinate}+{claims_cell.coordinate}",
+        KPI_TOTAL_FILL, "5FA8D3", value_font=KPI_VALUE_FONT_WHITE, label_font=KPI_LABEL_FONT_WHITE,
+        sub_text=f"Across {num_clients} client{'s' if num_clients != 1 else ''}",
+    )
 
-    ws.cell(row=totals_header_row + 2, column=2, value="Claims Receivable").font = BODY_FONT
-    ws.cell(row=totals_header_row + 2, column=3, value=float(claims_total)).number_format = NUM_FORMAT
-    ws.cell(row=totals_header_row + 2, column=3).font = TOTAL_VALUE_FONT
+    # ---- small labeled data table feeding the pie chart (kept visible & auditable) ----
+    pie_src_row = card_row + 1
+    ws.cell(row=pie_src_row, column=11, value="Category").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row, column=12, value="Total").font = Font(name="Arial", size=8, bold=True, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=11, value="Premium Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=12, value=f"={premium_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 1, column=12).number_format = NUM_FORMAT
+    ws.cell(row=pie_src_row + 2, column=11, value="Claims Receivable").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 2, column=12, value=f"={claims_cell.coordinate}").font = Font(name="Arial", size=8, color=MUTED_TEXT)
+    ws.cell(row=pie_src_row + 2, column=12).number_format = NUM_FORMAT
 
-    for r in (totals_header_row, totals_header_row + 1, totals_header_row + 2):
-        for c in (2, 3):
-            ws.cell(row=r, column=c).border = BORDER
+    pie = PieChart()
+    pie.title = "Premium vs Claims Share"
+    pie.style = 10
+    pie_data = Reference(ws, min_col=12, min_row=pie_src_row, max_row=pie_src_row + 2)
+    pie_cats = Reference(ws, min_col=11, min_row=pie_src_row + 1, max_row=pie_src_row + 2)
+    pie.add_data(pie_data, titles_from_data=True)
+    pie.set_categories(pie_cats)
+    pie.dataLabels = DataLabelList()
+    pie.dataLabels.showPercent = True
+    pie.height = 8.5
+    pie.width = 13.5
+    ws.add_chart(pie, "N8")
 
-    if premium_total or claims_total:
-        pie = PieChart()
-        pie.title = "Premium vs Claims Share"
-        pie_data = Reference(ws, min_col=3, min_row=totals_header_row, max_row=totals_header_row + 2)
-        pie_cats = Reference(ws, min_col=2, min_row=totals_header_row + 1, max_row=totals_header_row + 2)
-        pie.add_data(pie_data, titles_from_data=True)
-        pie.set_categories(pie_cats)
-        pie.dataLabels = DataLabelList()
-        pie.dataLabels.showPercent = True
-        pie.height = 8
-        pie.width = 12
-        ws.add_chart(pie, "E5")
+    # ---- Client Breakdown section title ----
+    ws.cell(row=table_header_row - 2, column=2, value="Client Breakdown").font = TABLE_TITLE_FONT
 
     # ---- per-client breakdown table + bar chart ----
-    table_header_row = 15
-    ws.cell(row=table_header_row, column=2, value="Client Name").font = HEADER_FONT
-    ws.cell(row=table_header_row, column=2).fill = HEADER_FILL
-    ws.cell(row=table_header_row, column=3, value="Premium Receivable").font = HEADER_FONT
-    ws.cell(row=table_header_row, column=3).fill = HEADER_FILL
-    ws.cell(row=table_header_row, column=4, value="Claims Receivable").font = HEADER_FONT
-    ws.cell(row=table_header_row, column=4).fill = HEADER_FILL
+    for j, h in enumerate(["Client Name", "Premium Receivable", "Claims Receivable"], start=2):
+        c = ws.cell(row=table_header_row, column=j, value=h)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
+    ws.row_dimensions[table_header_row].height = 20
 
-    if len(client_breakdown_df) == 0:
-        ws.cell(row=table_header_row + 1, column=2, value="No client data available.").font = EMPTY_FONT
+    if n_clients == 0:
+        ws.cell(row=first_data_row, column=2, value="No client data available.").font = EMPTY_FONT
     else:
-        for i, row in enumerate(client_breakdown_df.itertuples(index=False), start=table_header_row + 1):
-            ws.cell(row=i, column=2, value=str(row[0])).font = BODY_FONT
-            ws.cell(row=i, column=3, value=float(row[1])).number_format = NUM_FORMAT
-            ws.cell(row=i, column=4, value=float(row[2])).number_format = NUM_FORMAT
-            for c in (2, 3, 4):
-                ws.cell(row=i, column=c).border = BORDER
+        for i, row in enumerate(client_breakdown_df.itertuples(index=False), start=first_data_row):
+            stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
+            name_cell = ws.cell(row=i, column=2, value=str(row[0]))
+            name_cell.font = BODY_FONT
+            prem_cell = ws.cell(row=i, column=3, value=float(row[1]))
+            prem_cell.number_format = NUM_FORMAT
+            claim_cell = ws.cell(row=i, column=4, value=float(row[2]))
+            claim_cell.number_format = NUM_FORMAT
+            for cell in (name_cell, prem_cell, claim_cell):
+                cell.border = BORDER
+                cell.fill = stripe
 
-        last_row = table_header_row + len(client_breakdown_df)
+        # Bold formula-driven Total row, so it always reflects the table above
+        total_label = ws.cell(row=total_row, column=2, value="TOTAL")
+        total_premium = ws.cell(row=total_row, column=3, value=f"=SUM(C{first_data_row}:C{last_data_row})")
+        total_claims = ws.cell(row=total_row, column=4, value=f"=SUM(D{first_data_row}:D{last_data_row})")
+        total_premium.number_format = NUM_FORMAT
+        total_claims.number_format = NUM_FORMAT
+        for cell in (total_label, total_premium, total_claims):
+            cell.font = TOTAL_FONT
+            cell.fill = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
+            cell.border = Border(top=Side(style="thin", color=NAVY), left=THIN, right=THIN, bottom=THIN)
+
         chart = BarChart()
         chart.type = "col"
         chart.title = "Premium vs Claims Receivable by Client"
         chart.y_axis.title = "Amount (PKR)"
         chart.x_axis.title = "Client"
         chart.style = 10
-        data = Reference(ws, min_col=3, max_col=4, min_row=table_header_row, max_row=last_row)
-        cats = Reference(ws, min_col=2, min_row=table_header_row + 1, max_row=last_row)
+        chart.gapWidth = 60
+        data = Reference(ws, min_col=3, max_col=4, min_row=table_header_row, max_row=last_data_row)
+        cats = Reference(ws, min_col=2, min_row=first_data_row, max_row=last_data_row)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
-        chart.width = 26
+        chart.width = 28
         chart.height = 13
         ws.add_chart(chart, f"F{table_header_row}")
 
@@ -205,6 +348,9 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 3
+    ws.column_dimensions["K"].width = 18
+    ws.column_dimensions["L"].width = 14
 
 
 def build_company_workbook(bucket_label, premium_rows, claims_rows, client_breakdown_df, output_dir,

@@ -988,10 +988,11 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.receivable_output_dir_var).grid(row=3, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_output_dir).grid(row=3, column=2, **pad)
 
-        self.receivable_require_ref_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(source_box, text="Require Leader Ref Number on claims-only rows (unchecking still "
-                                          "flags these rows, but keeps them in the Claims Receivable sheet)",
-                         variable=self.receivable_require_ref_var).grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
+        ttk.Label(source_box, text="Leader Ref Number is required on Premium Receivable rows only \u2014 it's the other "
+                                    "company's own policy reference, so it's expected to be blank on Claims Receivable "
+                                    "rows and is never flagged there.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=560, justify="left").grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
 
         self.receivable_load_email_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(source_box, text="Look up recipient emails from the address-book sheet",
@@ -1181,14 +1182,11 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Error", "Please select a valid master workbook.")
             return
         sheet_name = self.receivable_sheet_var.get().strip() or "Detail"
-        require_ref = self.receivable_require_ref_var.get()
 
         try:
             self.receivable_raw_df = rvp.load_raw_data(path, sheet_name=sheet_name)
             (self.receivable_clean_df, self.receivable_issues_df,
-             dropped_columns, self.receivable_colmap) = rvp.validate_data(
-                self.receivable_raw_df, require_ref_for_claims_only_rows=require_ref
-            )
+             dropped_columns, self.receivable_colmap) = rvp.validate_data(self.receivable_raw_df)
         except Exception as e:
             messagebox.showerror("Error loading file", str(e))
             return
@@ -1205,11 +1203,6 @@ class BalanceApp(tk.Tk):
             issue_counts = self.receivable_issues_df["issue"].value_counts()
             for issue_label, count in issue_counts.items():
                 self.log_receivable(f"   {count}x  {issue_label}")
-            if not require_ref:
-                self.log_receivable("   (claims-only rows missing a Leader Ref Number were flagged but NOT excluded)")
-            elif issue_counts.get("Missing Leader Ref Number", 0) > 0:
-                self.log_receivable("   NOTE: if Claims Receivable sheets come out mostly empty on tab 2, try "
-                                     "unchecking 'Require Leader Ref Number on claims-only rows' above and reloading.")
         else:
             self.log_receivable("No data issues found.")
 
