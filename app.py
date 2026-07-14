@@ -975,28 +975,30 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.receivable_file_var).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_file).grid(row=0, column=2, **pad)
 
-        ttk.Label(source_box, text="Transaction sheet name", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
-        self.receivable_sheet_var = tk.StringVar(value="Detail")
-        ttk.Entry(source_box, textvariable=self.receivable_sheet_var, width=28).grid(row=1, column=1, sticky="w", **pad)
-
-        ttk.Label(source_box, text="Address-book sheet name", style="Panel.TLabel").grid(row=2, column=0, sticky="w", **pad)
-        self.receivable_addresses_sheet_var = tk.StringVar(value="Addresses Co Insurance")
-        ttk.Entry(source_box, textvariable=self.receivable_addresses_sheet_var, width=28).grid(row=2, column=1, sticky="w", **pad)
-
-        ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
         self.receivable_output_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "receivable_output"))
-        ttk.Entry(source_box, textvariable=self.receivable_output_dir_var).grid(row=3, column=1, sticky="ew", **pad)
-        ttk.Button(source_box, text="Browse...", command=self.browse_receivable_output_dir).grid(row=3, column=2, **pad)
+        ttk.Entry(source_box, textvariable=self.receivable_output_dir_var).grid(row=1, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_receivable_output_dir).grid(row=1, column=2, **pad)
 
         ttk.Label(source_box, text="Leader Ref Number is required on Premium Receivable rows only \u2014 it's the other "
                                     "company's own policy reference, so it's expected to be blank on Claims Receivable "
                                     "rows and is never flagged there.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
-                  wraplength=560, justify="left").grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
+                  wraplength=560, justify="left").grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
 
         self.receivable_load_email_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(source_box, text="Look up recipient emails from the address-book sheet",
-                         variable=self.receivable_load_email_var).grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 6))
+        ttk.Checkbutton(source_box, text="Look up recipient emails from a lookup file",
+                         variable=self.receivable_load_email_var).grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(6, 2))
+
+        ttk.Label(source_box, text="Email Lookup File (.xlsx/.csv, optional)", style="Panel.TLabel").grid(row=4, column=0, sticky="w", **pad)
+        self.receivable_email_lookup_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.receivable_email_lookup_file_var).grid(row=4, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_receivable_email_lookup_file).grid(row=4, column=2, **pad)
+        ttk.Label(source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
+                                    "Rows are matched to the master file's 'Company' field by exact name. "
+                                    "If left blank, drafted emails will be flagged \"missing email\" for manual entry.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=560, justify="left").grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 2))
 
         ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
                    command=self.load_receivable_data).grid(row=6, column=0, sticky="w", padx=10, pady=(10, 4))
@@ -1172,6 +1174,11 @@ class BalanceApp(tk.Tk):
         if path:
             self.receivable_output_dir_var.set(path)
 
+    def browse_receivable_email_lookup_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel/CSV files", "*.xlsx *.xls *.csv")])
+        if path:
+            self.receivable_email_lookup_file_var.set(path)
+
     def log_receivable(self, msg):
         self.receivable_setup_log.insert("end", str(msg) + "\n")
         self.receivable_setup_log.see("end")
@@ -1181,10 +1188,9 @@ class BalanceApp(tk.Tk):
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Please select a valid master workbook.")
             return
-        sheet_name = self.receivable_sheet_var.get().strip() or "Detail"
 
         try:
-            self.receivable_raw_df = rvp.load_raw_data(path, sheet_name=sheet_name)
+            self.receivable_raw_df = rvp.load_raw_data(path)
             (self.receivable_clean_df, self.receivable_issues_df,
              dropped_columns, self.receivable_colmap) = rvp.validate_data(self.receivable_raw_df)
         except Exception as e:
@@ -1298,16 +1304,16 @@ class BalanceApp(tk.Tk):
 
         self.receivable_email_lookup, self.receivable_poc_lookup = {}, {}
         if self.receivable_load_email_var.get():
-            path = self.receivable_file_var.get().strip()
-            addresses_sheet_name = self.receivable_addresses_sheet_var.get().strip() or "Addresses Co Insurance"
-            try:
-                self.receivable_email_lookup, self.receivable_poc_lookup = ra.load_email_lookup_from_addresses_sheet(
-                    path, addresses_sheet_name
-                )
-                self.log_receivable(f"\nLoaded {len(self.receivable_email_lookup)} company email mapping(s) "
-                                     f"from '{addresses_sheet_name}'.")
-            except Exception as e:
-                self.log_receivable(f"\nWARNING: could not load email lookup: {e}")
+            lookup_path = self.receivable_email_lookup_file_var.get().strip()
+            if lookup_path and os.path.exists(lookup_path):
+                try:
+                    self.receivable_email_lookup, self.receivable_poc_lookup = ra.load_email_lookup_from_file(lookup_path)
+                    self.log_receivable(f"\nLoaded {len(self.receivable_email_lookup)} company email mapping(s) "
+                                         f"from '{os.path.basename(lookup_path)}'.")
+                except Exception as e:
+                    self.log_receivable(f"\nWARNING: could not load email lookup: {e}")
+            else:
+                self.log_receivable("\nNo email lookup file selected - all drafts will show 'Missing email'.")
 
         signature = self.receivable_signature_text.get("1.0", "end").strip()
         eg.save_signature(signature)  # shared signature store with Outstanding Premium

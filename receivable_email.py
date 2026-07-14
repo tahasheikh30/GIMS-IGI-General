@@ -12,13 +12,15 @@ matching the one-workbook-per-company change: each email now covers every
 client for that company in a single attached statement, rather than one
 email per individual client.
 
-RECIPIENT LOOKUP (confirmed against the real sample file): the real
-file's own "Addresses Co Insurance" sheet is keyed by Company name, so
-recipient email lookup is by that same bucket_label. For the pooled "OFC"
-bucket, this looks up an address-book row keyed exactly "OFC" - if the
-address book doesn't have one, that draft is flagged "Missing email" for
-manual entry, same as any other unmatched company, rather than guessing
-which of the pooled companies' contacts to use.
+RECIPIENT LOOKUP: the master transaction file has a single data sheet
+and no longer carries its own address book, so recipient emails come
+from a separate lookup file the user browses to (see
+receivable_automation.load_email_lookup_from_file), keyed by Company
+name - recipient email lookup is by that same bucket_label. For the
+pooled "OFC" bucket, this looks up a lookup-file row keyed exactly "OFC"
+- if the lookup file doesn't have one, that draft is flagged "Missing
+email" for manual entry, same as any other unmatched company, rather
+than guessing which of the pooled companies' contacts to use.
 """
 from datetime import date
 

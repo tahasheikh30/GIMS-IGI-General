@@ -4,9 +4,10 @@ Core data processing for Premium & Claims Receivable Email Automation.
 REAL SOURCE FORMAT (confirmed against a real sample, Outstanding_Auto_Email.xlsx,
 a Co-Insurance Outstanding Position export):
 
-- The data sheet ("Detail" in the sample) has a few title/banner rows above
-  the real header row (report title, "As at ..." date line, a blank row),
-  so the header row is auto-detected rather than assumed to be row 1.
+- The master workbook has a single data sheet (no sheet name needs to be
+  specified). That sheet has a few title/banner rows above the real
+  header row (report title, "As at ..." date line, a blank row), so the
+  header row is auto-detected rather than assumed to be row 1.
 - Each transaction row carries its own "Premium Receivable" amount column
   and its own "Claim Receivable" amount column side by side. In the real
   sample exactly one of the two is non-zero per row (641 premium-only
@@ -16,9 +17,9 @@ a Co-Insurance Outstanding Position export):
   automatically ("dual" mode).
 - "Client Name" is the insured. "Company" is the co-insurance company
   group (e.g. "EFU GENERAL INSURANCE COMPANY", "ADAMJEE INSURANCE
-  COMPANY LTD"). This is also the key used in the real address-book sheet
-  ("Addresses Co Insurance"), so it doubles as the email-lookup key - see
-  receivable_automation.load_email_lookup().
+  COMPANY LTD"). This is also the key used in the separate email lookup
+  file the user browses to on tab 1 - see
+  receivable_automation.load_email_lookup_from_file().
 - The real header text is "Leader Ref. No" (note the period), matched via
   the alias list below like every other column.
 
@@ -139,6 +140,11 @@ def load_raw_data(filepath, sheet_name=0):
     Load the master receivable sheet, auto-detecting the real header row
     (title/banner rows above it are skipped) and dropping fully-blank
     spacer rows.
+
+    The master workbook has a single data sheet, so sheet_name defaults
+    to 0 (the first/only sheet) and callers don't need to name it
+    explicitly - it's only exposed as a parameter for the rare case of a
+    differently-shaped file.
     """
     raw = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
     header_row = find_header_row(raw)

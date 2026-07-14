@@ -5,8 +5,7 @@ workflow (data_processor -> report_generator -> email_generator ->
 outlook_sender) but for the Premium/Claims Receivable statements.
 
 Run as a script for a quick end-to-end test:
-    python receivable_automation.py <master_file.xlsx> [--sheet "Detail"]
-        [--addresses-sheet "Addresses Co Insurance"] [--send]
+    python receivable_automation.py <master_file.xlsx> [--email-lookup <lookup_file.xlsx>] [--send]
 
 Or call run_pipeline(...) directly from a GUI (see the "Receivable" tab
 wired into app.py, following the same pattern as the existing Outstanding
@@ -23,65 +22,58 @@ import receivable_run_log as rlog
 import email_generator as eg
 
 
-def load_email_lookup_from_addresses_sheet(filepath, sheet_name="Addresses Co Insurance"):
+def load_email_lookup_from_file(filepath):
     """
-    Load the recipient-email lookup from the real file's own address-book
-    sheet, keyed by Company (the co-insurance partner) - e.g. "ADAMJEE
-    INSURANCE COMPANY LTD" -> its Finance contact email(s). This is a
-    different sheet in the SAME workbook as the transaction data, not a
-    separate lookup file, matching the real sample's layout.
+    Load the recipient-email lookup from a SEPARATE lookup file (.xlsx or
+    .csv) that the user browses to on tab 1 - keyed by Company (the
+    co-insurance partner), e.g. "ADAMJEE INSURANCE COMPANY LTD" -> its
+    Finance contact email(s). This mirrors the Outstanding Premium
+    module's own email-lookup-file pattern (see app.py's load_data /
+    data_processor), just keyed by Company instead of Client, since the
+    master transaction workbook itself only has a single sheet and no
+    longer carries its own address-book sheet.
 
-    Handles two real quirks of that sheet:
-      - The header row isn't row 1 (a blank spacer row sits above it) -
-        reuses the same header auto-detection as the transaction sheet.
-      - The email column itself has no header text in the real sample -
-        detected by scanning for the column with the most "@" values.
+    Expects a plain header row at the top of the file: a name/company
+    column (matched by "company", "client", or "participant" appearing in
+    the header text - falls back to the first column if none match), an
+    "Email" column (matched by "email" in the header text), and an
+    optional POC/contact column (matched by "poc", "contact", "attn",
+    "attention", "recipient name", or "contact person").
 
     A company can have several emails in one cell, comma/semicolon
     separated (e.g. "a@x.com, b@x.com") - these are preserved and passed
     to Outlook as a semicolon-separated To list.
 
     Returns (email_lookup, poc_lookup) - both dicts keyed by normalized
-    (upper/stripped) company name.
+    (upper/stripped) company name, matching receivable_email.py's lookup
+    convention.
     """
-    raw = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
-    # The address-book sheet typically has only one alias-recognizable
-    # header ("Company Name" - things like "Contact Person" or "S. No"
-    # aren't in ALIASES), so use a lower confidence threshold than the
-    # transaction sheet's header detection.
-    header_row = rp.find_header_row(raw, min_score=1)
-    columns = raw.iloc[header_row].tolist()
-    df = raw.iloc[header_row + 1:].reset_index(drop=True)
-    df.columns = columns
-    df = df.dropna(how="all").reset_index(drop=True)
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".csv":
+        df = pd.read_csv(filepath)
+    else:
+        df = pd.read_excel(filepath)
 
-    colmap = rp._map_columns_to_canonical(df.columns)
-    company_col = next((orig for orig, canon in colmap.items() if canon == "Company"), None)
-    if company_col is None:
-        raise ValueError(
-            f"Could not find a Company Name column in sheet '{sheet_name}'. "
-            f"Recognized headers were: {list(colmap.keys())}."
-        )
+    if len(df.columns) == 0:
+        raise ValueError("The email lookup file has no columns.")
 
-    email_col = None
-    for col in df.columns:
-        if col == company_col:
-            continue
-        sample = df[col].dropna().astype(str)
-        if len(sample) and sample.str.contains("@").sum() > 0:
-            email_col = col
-            break
+    name_col = next(
+        (c for c in df.columns if any(k in str(c).lower() for k in ["company", "client", "participant"])),
+        df.columns[0],
+    )
+    email_col = next((c for c in df.columns if "email" in str(c).lower()), None)
     if email_col is None:
-        raise ValueError(f"Could not find an email column (no column contains '@' values) in sheet '{sheet_name}'.")
-
-    poc_col = next((c for c in df.columns
-                     if c not in (company_col, email_col)
-                     and any(k in str(c).lower() for k in ["poc", "contact", "attn", "attention", "recipient name", "contact person"])),
-                    None)
+        raise ValueError("Could not find an 'Email' column in the lookup file.")
+    poc_col = next(
+        (c for c in df.columns
+         if c not in (name_col, email_col)
+         and any(k in str(c).lower() for k in ["poc", "contact", "attn", "attention", "recipient name", "contact person"])),
+        None,
+    )
 
     email_lookup, poc_lookup = {}, {}
     for _, row in df.iterrows():
-        company_raw = row.get(company_col)
+        company_raw = row.get(name_col)
         email_raw = row.get(email_col)
         if pd.isna(company_raw) or pd.isna(email_raw):
             continue
@@ -99,19 +91,19 @@ def load_email_lookup_from_addresses_sheet(filepath, sheet_name="Addresses Co In
     return email_lookup, poc_lookup
 
 
-def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_sheet_name="Addresses Co Insurance",
-                  load_email_lookup=True,
+def run_pipeline(master_filepath, output_dir, load_email_lookup=True, email_lookup_filepath=None,
                   signature=None, dry_run=True, report_date=None, logger=print):
     """
     Full pipeline: load -> validate -> group -> generate workbooks ->
     draft emails -> send (or dry-run) -> log + return a summary.
 
-    master_filepath: the uploaded workbook. Both the transaction sheet
-        (sheet_name) and the address-book sheet (addresses_sheet_name) are
-        read from this SAME file, matching the real sample's layout. Set
-        load_email_lookup=False to skip email lookup entirely (e.g. if a
-        given file has no address-book sheet) - all drafts will then show
-        "Missing email".
+    master_filepath: the uploaded workbook, which has a single data sheet
+        (no sheet name needs to be specified - it's read directly).
+    email_lookup_filepath: optional SEPARATE lookup file (.xlsx or .csv)
+        the user browses to, keyed by Company name -> email(s) (see
+        load_email_lookup_from_file). Set load_email_lookup=False, or
+        leave this unset, to skip email lookup entirely - all drafts will
+        then show "Missing email" for manual entry.
     output_dir: configurable folder for generated workbooks (created if
         missing).
     logger: callable(str) used for progress/status lines - defaults to
@@ -130,9 +122,9 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
         }
     """
     errors = []
-    logger(f"Loading master file: {master_filepath} (sheet: {sheet_name})")
+    logger(f"Loading master file: {master_filepath}")
     try:
-        raw_df = rp.load_raw_data(master_filepath, sheet_name=sheet_name)
+        raw_df = rp.load_raw_data(master_filepath)
     except Exception as e:
         logger(f"ERROR: {e}")
         return _empty_summary(str(e))
@@ -184,14 +176,16 @@ def run_pipeline(master_filepath, output_dir, sheet_name="Detail", addresses_she
             errors.append(msg)
 
     email_lookup, poc_lookup = {}, {}
-    if load_email_lookup:
+    if load_email_lookup and email_lookup_filepath:
         try:
-            email_lookup, poc_lookup = load_email_lookup_from_addresses_sheet(master_filepath, addresses_sheet_name)
-            logger(f"\nLoaded {len(email_lookup)} company email mapping(s) from '{addresses_sheet_name}'.")
+            email_lookup, poc_lookup = load_email_lookup_from_file(email_lookup_filepath)
+            logger(f"\nLoaded {len(email_lookup)} company email mapping(s) from '{os.path.basename(email_lookup_filepath)}'.")
         except Exception as e:
             msg = f"Could not load email lookup: {e}"
             logger(f"WARNING: {msg}")
             errors.append(msg)
+    elif load_email_lookup and not email_lookup_filepath:
+        logger("\nNo email lookup file provided - all drafts will show 'Missing email'.")
 
     if signature is None:
         signature = eg.load_signature()
@@ -262,14 +256,19 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python receivable_automation.py <master_file.xlsx> [--send]")
+        print("Usage: python receivable_automation.py <master_file.xlsx> [--email-lookup <lookup_file.xlsx>] [--send]")
         sys.exit(1)
 
     master_file = sys.argv[1]
     dry_run = "--send" not in sys.argv[2:]
+    email_lookup_filepath = None
+    if "--email-lookup" in sys.argv[2:]:
+        idx = sys.argv.index("--email-lookup")
+        email_lookup_filepath = sys.argv[idx + 1]
 
     summary = run_pipeline(
         master_filepath=master_file,
         output_dir=os.path.join(os.getcwd(), "receivable_output"),
+        email_lookup_filepath=email_lookup_filepath,
         dry_run=dry_run,
     )

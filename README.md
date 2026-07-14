@@ -36,7 +36,7 @@ with the following sections:
 | `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
 | `receivable_generator.py` | Writes each insurance company's three-sheet (Summary w/ charts, Premium Receivable, Claims Receivable) Excel statement, covering every client for that company |
 | `receivable_email.py` | Drafts the statement email per company file and sends via `outlook_sender` |
-| `receivable_automation.py` | `load_email_lookup_from_addresses_sheet()` (used by the GUI) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
+| `receivable_automation.py` | `load_email_lookup_from_file()` (used by the GUI, reads a separate lookup file) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
 
@@ -273,24 +273,31 @@ covers many clients at once (and, for the pooled OFC file, several
 different real companies too).
 
 ### Tab 1 — Upload & Validate
-- **Master workbook** — the same file the co-insurance export already
-  comes in. Both the transaction sheet and the address-book sheet are
-  read from this one file.
-- **Transaction sheet name** — defaults to `Detail` (the real sample's
-  sheet name). The real header row is located automatically even though
-  the source file has a few title/banner rows above it (report title, "As
-  at ..." date, a blank row) — you don't need to trim those first.
-- **Address-book sheet name** — defaults to `Addresses Co Insurance`. This
-  sheet is keyed by **Company Name**, matching the "Company" field on the
-  transaction sheet, so recipient emails are looked up by co-insurance
-  company rather than by client. For the pooled OFC file, the lookup key
-  is literally `OFC` — add a row with that exact name to the address book
-  if you want that file's email to resolve automatically; otherwise it's
-  flagged "Missing email" for manual entry on tab 3, same as any other
-  unmatched company. A company can list several emails in one cell (comma
-  or semicolon separated) — all of them are used as Outlook "To"
-  recipients. If a company's contact-person column is present, that name
-  is used in the email greeting instead of the company name.
+- **Master workbook** — the co-insurance export, a single-sheet `.xlsx`
+  file — there's no sheet name to specify, it's read directly. The real
+  header row is located automatically even though the source file has a
+  few title/banner rows above it (report title, "As at ..." date, a
+  blank row) — you don't need to trim those first.
+- **Look up recipient emails from a lookup file** — uncheck to skip email
+  lookup entirely (every draft will show "Missing email" and can still be
+  reviewed/sent manually on tab 3).
+- **Email Lookup File** — a *separate* `.xlsx` or `.csv` file you browse
+  to (not part of the master workbook), with a Company-name column
+  (matched by "company", "client", or "participant" in the header — falls
+  back to the first column if none match), an **Email** column, and an
+  optional POC/contact-person column. Rows are matched by exact **Company
+  Name**, the same "Company" field used on the transaction data, so
+  recipient emails are looked up by co-insurance company rather than by
+  client. For the pooled OFC file, the lookup key is literally `OFC` —
+  add a row with that exact name if you want that file's email to
+  resolve automatically; otherwise it's flagged "Missing email" for
+  manual entry on tab 3, same as any other unmatched company. A company
+  can list several emails in one cell (comma or semicolon separated) —
+  all of them are used as Outlook "To" recipients. If a company's
+  contact-person column is present, that name is used in the email
+  greeting instead of the company name. Leave this blank to skip email
+  lookup — this mirrors how the Outstanding Premium module's own Email
+  Lookup File works.
 - **Output folder** — configurable; created automatically if it doesn't
   exist.
 - **Leader Ref Number** is the *other* co-insurance company's own policy
@@ -303,9 +310,6 @@ different real companies too).
   file: all 460 claims-only rows had a blank Leader Ref Number, and
   every single premium-only row had one — this is structural, not messy
   data.) This is handled automatically now — there's no checkbox for it.
-- **Look up recipient emails from the address-book sheet** — uncheck to
-  skip email lookup entirely (every draft will show "Missing email" and
-  can still be reviewed/sent manually on tab 3).
 - Click **Load & Validate Data** to load the file — the Activity Log shows
   the detected column layout and a per-issue-type validation count.
 - **Filters** — optional Client filter and/or Company filter (comma-
