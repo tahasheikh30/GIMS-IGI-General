@@ -1538,9 +1538,10 @@ class BalanceApp(tk.Tk):
         filter_box.pack(fill="x", padx=12, pady=8)
         filter_box.columnconfigure(0, weight=1)
         filter_box.columnconfigure(1, weight=1)
+        filter_box.columnconfigure(2, weight=1)
 
         threshold_row = ttk.Frame(filter_box, style="Panel.TFrame")
-        threshold_row.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 10))
+        threshold_row.grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 10))
         ttk.Label(threshold_row, text="Outstanding Balance Threshold (PKR)", style="Panel.TLabel").pack(side="left", padx=(0, 10))
         self.threshold_var = tk.StringVar(value="2000000")
         ttk.Entry(threshold_row, textvariable=self.threshold_var, width=20, font=("Segoe UI", 11, "bold")).pack(side="left")
@@ -1554,7 +1555,7 @@ class BalanceApp(tk.Tk):
         dept_frame = tk.Frame(dept_col, highlightbackground="#D6DCE1", highlightthickness=1)
         dept_frame.pack(fill="both", expand=True)
         dept_scroll = ttk.Scrollbar(dept_frame, orient="vertical")
-        self.dept_listbox = tk.Listbox(dept_frame, selectmode="extended", height=11, width=65,
+        self.dept_listbox = tk.Listbox(dept_frame, selectmode="extended", height=11, width=40,
                                         exportselection=False, font=("Segoe UI", 10),
                                         activestyle="none", relief="flat", borderwidth=0,
                                         selectbackground=self.COLOR_ACCENT, selectforeground="white",
@@ -1572,7 +1573,7 @@ class BalanceApp(tk.Tk):
         agent_frame = tk.Frame(agent_col, highlightbackground="#D6DCE1", highlightthickness=1)
         agent_frame.pack(fill="both", expand=True)
         agent_scroll = ttk.Scrollbar(agent_frame, orient="vertical")
-        self.agent_listbox = tk.Listbox(agent_frame, selectmode="extended", height=11, width=65,
+        self.agent_listbox = tk.Listbox(agent_frame, selectmode="extended", height=11, width=40,
                                          exportselection=False, font=("Segoe UI", 10),
                                          activestyle="none", relief="flat", borderwidth=0,
                                          selectbackground=self.COLOR_ACCENT, selectforeground="white",
@@ -1582,8 +1583,26 @@ class BalanceApp(tk.Tk):
         self.agent_listbox.pack(side="left", fill="both", expand=True)
         agent_scroll.pack(side="right", fill="y")
 
+        branch_col = ttk.Frame(filter_box, style="Panel.TFrame")
+        branch_col.grid(row=1, column=2, sticky="nsew", padx=6, pady=4)
+        ttk.Label(branch_col, text="Branch filter", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(branch_col, text="Ctrl+click to select multiple · none = all", style="Muted.TLabel",
+                  background=self.COLOR_PANEL).pack(anchor="w", pady=(0, 4))
+        branch_frame = tk.Frame(branch_col, highlightbackground="#D6DCE1", highlightthickness=1)
+        branch_frame.pack(fill="both", expand=True)
+        branch_scroll = ttk.Scrollbar(branch_frame, orient="vertical")
+        self.branch_listbox = tk.Listbox(branch_frame, selectmode="extended", height=11, width=40,
+                                          exportselection=False, font=("Segoe UI", 10),
+                                          activestyle="none", relief="flat", borderwidth=0,
+                                          selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                          highlightthickness=0,
+                                          yscrollcommand=branch_scroll.set)
+        branch_scroll.config(command=self.branch_listbox.yview)
+        self.branch_listbox.pack(side="left", fill="both", expand=True)
+        branch_scroll.pack(side="right", fill="y")
+
         company_row = ttk.Frame(filter_box, style="Panel.TFrame")
-        company_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(10, 4))
+        company_row.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(10, 4))
         ttk.Label(company_row, text="Company filter (optional, comma-separated exact names)",
                   style="Panel.TLabel").pack(anchor="w")
         self.company_filter_var = tk.StringVar()
@@ -1613,14 +1632,16 @@ class BalanceApp(tk.Tk):
         tree_frame = ttk.Frame(f)
         tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        columns = ("client", "total", "agent")
+        columns = ("client", "total", "agent", "branch")
         self.results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
         self.results_tree.heading("client", text="Client / Participant")
         self.results_tree.heading("total", text="Grand Total (O/s)")
         self.results_tree.heading("agent", text="Agent(s) / Agency")
-        self.results_tree.column("client", width=420)
-        self.results_tree.column("total", width=160, anchor="e")
-        self.results_tree.column("agent", width=300)
+        self.results_tree.heading("branch", text="Branch(es)")
+        self.results_tree.column("client", width=380)
+        self.results_tree.column("total", width=150, anchor="e")
+        self.results_tree.column("agent", width=220)
+        self.results_tree.column("branch", width=220)
         self.results_tree.tag_configure("oddrow", background="#F4F7FA")
         self.results_tree.tag_configure("evenrow", background="white")
 
@@ -1776,6 +1797,12 @@ class BalanceApp(tk.Tk):
                 self.agent_listbox.insert("end", agent)
                 self.agent_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
 
+        self.branch_listbox.delete(0, "end")
+        if "Branch desc" in self.clean_df.columns:
+            for i, branch in enumerate(sorted(self.clean_df["Branch desc"].dropna().unique())):
+                self.branch_listbox.insert("end", branch)
+                self.branch_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
         self.log(self.setup_log, f"Loaded {len(self.raw_df)} rows, {len(self.clean_df)} valid after cleaning.")
         if dropped_columns:
             self.log(self.setup_log, f"Removed {len(dropped_columns)} completely empty column(s) from the data: {', '.join(dropped_columns)}")
@@ -1838,6 +1865,7 @@ class BalanceApp(tk.Tk):
 
         selected_depts = [self.dept_listbox.get(i) for i in self.dept_listbox.curselection()]
         selected_agents = [self.agent_listbox.get(i) for i in self.agent_listbox.curselection()]
+        selected_branches = [self.branch_listbox.get(i) for i in self.branch_listbox.curselection()]
         company_text = self.company_filter_var.get().strip()
         company_filter = [c.strip() for c in company_text.split(",") if c.strip()] if company_text else None
 
@@ -1845,14 +1873,16 @@ class BalanceApp(tk.Tk):
             self.clean_df, company_filter=company_filter,
             department_filter=selected_depts or None,
             agent_filter=selected_agents or None,
+            branch_filter=selected_branches or None,
         )
         self.qualifying = dp.qualifying_clients(self.filtered_df, self.grand_totals, threshold)
 
         self.results_tree.delete(*self.results_tree.get_children())
         for i, (client, total) in enumerate(self.qualifying.items()):
             agents = ", ".join(dp.client_agents(self.filtered_df, client))
+            branches = ", ".join(dp.client_branches(self.filtered_df, client))
             tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.results_tree.insert("", "end", values=(client, f"{total:,.0f}", agents), tags=(tag,))
+            self.results_tree.insert("", "end", values=(client, f"{total:,.0f}", agents, branches), tags=(tag,))
         self.results_summary_var.set(f"{len(self.qualifying)} client(s) meet/exceed threshold {threshold:,.0f}")
 
         self.log(self.setup_log, f"\nAnalysis complete: {len(self.qualifying)} clients meet/exceed threshold {threshold:,.0f}.")

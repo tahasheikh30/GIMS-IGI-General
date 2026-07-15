@@ -8,6 +8,7 @@ import numpy as np
 
 REQUIRED_COLS = ["Client/Participant", "Department", "O/s"]
 DEFAULT_DATE_COL_FOR_YEAR = "Issue Date"  # alternative: "Comm.  Date"
+BRANCH_COL = "Branch desc"  # optional column - branch filter is skipped if not present in the source file
 
 
 def load_raw_data(filepath, sheet_name=0):
@@ -74,12 +75,14 @@ def validate_data(df, date_col_for_year=DEFAULT_DATE_COL_FOR_YEAR):
     return clean_df, issues_df, dropped_columns
 
 
-def build_pivot(clean_df, company_filter=None, department_filter=None, agent_filter=None):
+def build_pivot(clean_df, company_filter=None, department_filter=None, agent_filter=None, branch_filter=None):
     """
     Build a client x department x year pivot (sum of O/s).
     agent_filter: optional list of Agent Name values to restrict to
         (e.g. show only clients serviced by a given agency, then check
         which of those clients individually exceed the threshold).
+    branch_filter: optional list of Branch desc values to restrict to
+        (same pattern as department_filter/agent_filter).
     Returns the filtered raw dataframe plus a summary series with grand
     totals per client (for threshold filtering).
     """
@@ -91,6 +94,8 @@ def build_pivot(clean_df, company_filter=None, department_filter=None, agent_fil
         df = df[df["Department"].isin(department_filter)]
     if agent_filter and "Agent Name" in df.columns:
         df = df[df["Agent Name"].isin(agent_filter)]
+    if branch_filter and BRANCH_COL in df.columns:
+        df = df[df[BRANCH_COL].isin(branch_filter)]
 
     # Grand total per client (across all departments/years) - used for threshold check
     grand_totals = df.groupby("Client/Participant")["O/s"].sum().rename("Grand Total")
@@ -104,6 +109,14 @@ def client_agents(df, client_name):
         return []
     sub = df[df["Client/Participant"] == client_name]
     return sorted(sub["Agent Name"].dropna().unique().tolist())
+
+
+def client_branches(df, client_name):
+    """Return the distinct branch(es) associated with a client in df."""
+    if BRANCH_COL not in df.columns:
+        return []
+    sub = df[df["Client/Participant"] == client_name]
+    return sorted(sub[BRANCH_COL].dropna().unique().tolist())
 
 
 def get_client_raw_rows(clean_df, client_name):
