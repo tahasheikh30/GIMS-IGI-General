@@ -264,11 +264,11 @@ class BalanceApp(tk.Tk):
             tk.Label(pill, image=self.logo_company_img, bg="white").pack(padx=12, pady=6)
 
     def _build_sidebar(self, parent):
-        """Persistent left sidebar. Outstanding Premium, Loss Ratio, and
-        Renewal are flat top-level sections; Coinsurance is a collapsible
-        parent with three sub-items. The active section (top-level or
-        sub-item) is shown with a left accent bar, bold text, and a
-        tinted background."""
+        """Persistent left sidebar. Every section now lives under one of
+        two collapsible parent menus: 'General Operations' (Outstanding
+        Premium, Loss Ratio, Renewal) and 'Coinsurance' (its existing
+        three sub-items). The active section is shown with a left accent
+        bar, bold text, and a tinted background, same as before."""
         sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=240)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
@@ -279,46 +279,54 @@ class BalanceApp(tk.Tk):
 
         self.nav_items = {}
 
-        top_labels_before = [
-            ("outstanding_premium", "Outstanding Premium"),
-            ("loss_ratio", "Loss Ratio"),
-        ]
-        for key, label in top_labels_before:
-            self.nav_items[key] = self._make_nav_item(sidebar, key, label)
+        # Permanent trailing anchor, packed once and never re-packed. Every
+        # collapsible menu block below is always inserted immediately ahead
+        # of the next fixed sibling (either this anchor, or the header of
+        # the following menu), so collapsing/expanding one section can
+        # never reorder the others.
+        bottom_anchor = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=1)
+        bottom_anchor.pack(fill="x")
 
-        # Pack Renewal now (it ends up LAST visually, see below) so we have
-        # one stable, permanently-packed sibling to anchor Coinsurance's
-        # header/submenu against via pack(before=renewal_item) - including
-        # every time the submenu is re-packed on toggle. Anchoring to a
-        # separate placeholder frame doesn't work here: once Renewal itself
-        # got inserted before that placeholder, the placeholder was no
-        # longer adjacent to Coinsurance, so re-expanding the submenu
-        # landed it after Renewal instead of back under Coinsurance.
-        # Renewal is never forgotten/re-packed, so it's a safe fixed point.
-        renewal_item = self._make_nav_item(sidebar, "renewal", "Renewal")
-        self.nav_items["renewal"] = renewal_item
+        coinsurance_header = self._build_collapsible_menu(
+            sidebar, "Coinsurance", "\u2295",
+            [
+                ("coinsurance_pc_email", "Premium/Claims Email Automation"),
+                ("coinsurance_premium_register", "Premium Register"),
+                ("coinsurance_claims_register", "Claims Register"),
+            ],
+            before=bottom_anchor,
+        )
 
-        self._build_coinsurance_menu(sidebar, before=renewal_item)
+        self._build_collapsible_menu(
+            sidebar, "General Operations", "\u2699",
+            [
+                ("outstanding_premium", "Outstanding Premium"),
+                ("loss_ratio", "Loss Ratio"),
+                ("renewal", "Renewal"),
+            ],
+            before=coinsurance_header,
+        )
 
         # Thin divider between the sidebar and content area
         tk.Frame(parent, bg=self.COLOR_BORDER, width=1).pack(side="left", fill="y")
 
-    def _build_coinsurance_menu(self, sidebar, before):
-        """Collapsible 'Coinsurance' parent item with three sub-items,
-        shown inside a subtly tinted block with a left indent guide so the
-        hierarchy (parent -> sub-items) is visually obvious. Clicking the
-        header only expands/collapses it (it isn't itself a page);
-        clicking a sub-item navigates like any other nav item.
+    def _build_collapsible_menu(self, sidebar, label_text, icon_char, sub_items, before):
+        """Generic collapsible parent menu (e.g. 'General Operations' or
+        'Coinsurance'), shown inside a subtly tinted block with a left
+        indent guide so its sub-items read as nested under the parent.
+        Clicking the header only expands/collapses it (it isn't itself a
+        page); clicking a sub-item navigates like any other nav item.
 
-        `before`: the permanent Renewal nav item widget - a fixed sibling
-        that is packed once and never forgotten/re-packed - which the
-        header and submenu frame are always inserted immediately ahead of
-        via pack(before=...). This has to be a widget that never moves;
-        anchoring to a disposable placeholder instead doesn't work, because
-        once anything else (like Renewal) gets inserted before that
-        placeholder too, the placeholder is no longer adjacent to
-        Coinsurance, and the next toggle drops the submenu after Renewal
-        rather than back under Coinsurance where it belongs.
+        `before`: a permanent fixed sibling widget, packed once and never
+        forgotten/re-packed, that this menu's header and submenu are
+        always inserted immediately ahead of via pack(before=...). This
+        has to be a widget that never moves, otherwise re-expanding a
+        submenu after collapsing it could land it in the wrong place
+        relative to the other sidebar sections.
+
+        Returns the header frame widget, so an earlier-built menu can use
+        it as its own `before` anchor and keep menus stacked in the order
+        they were built.
         """
         header = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, cursor="hand2")
         header.pack(fill="x", before=before)
@@ -329,53 +337,50 @@ class BalanceApp(tk.Tk):
         header_inner = tk.Frame(header, bg=self.COLOR_SIDEBAR)
         header_inner.pack(side="left", fill="both", expand=True, padx=(14, 12), pady=14)
 
-        icon_label = tk.Label(header_inner, text="\u2295", font=("Segoe UI", 10), width=2,
+        icon_label = tk.Label(header_inner, text=icon_char, font=("Segoe UI", 10), width=2,
                                bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
         icon_label.pack(side="left")
 
-        header_label = tk.Label(header_inner, text="Coinsurance", font=("Segoe UI", 11),
+        header_label = tk.Label(header_inner, text=label_text, font=("Segoe UI", 11),
                                  bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
         header_label.pack(side="left", fill="both", expand=True)
 
-        self.coinsurance_caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 9),
-                                           bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED)
-        self.coinsurance_caret.pack(side="right")
+        caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 9),
+                          bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED)
+        caret.pack(side="right")
 
         # Tinted wrapper block for the sub-items, with a thin vertical
         # indent guide on the left so the sub-items read as nested under
-        # "Coinsurance" rather than as flat, unrelated rows.
+        # the parent rather than as flat, unrelated rows.
         submenu_block = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
         submenu_block.pack(fill="x", before=before)
         guide = tk.Frame(submenu_block, bg=self.COLOR_BORDER, width=1)
         guide.place(x=28, y=0, relheight=1.0)
 
-        self.coinsurance_submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
-        self.coinsurance_submenu_frame.pack(fill="x")  # starts expanded
+        submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
+        submenu_frame.pack(fill="x")  # starts expanded
 
-        sub_labels = [
-            ("coinsurance_pc_email", "Premium/Claims Email Automation"),
-            ("coinsurance_premium_register", "Premium Register"),
-            ("coinsurance_claims_register", "Claims Register"),
-        ]
-        for key, label in sub_labels:
+        for key, label in sub_items:
             self.nav_items[key] = self._make_nav_item(
-                self.coinsurance_submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
+                submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
             )
 
-        def toggle_coinsurance(event=None):
+        def toggle_menu(event=None):
             if submenu_block.winfo_ismapped():
                 submenu_block.pack_forget()
-                self.coinsurance_caret.configure(text="\u25B8")
+                caret.configure(text="\u25B8")
             else:
                 submenu_block.pack(fill="x", before=before)
-                self.coinsurance_caret.configure(text="\u25BE")
+                caret.configure(text="\u25BE")
 
-        for w in (header, header_accent, header_inner, icon_label, self.coinsurance_caret, header_label):
-            w.bind("<Button-1>", toggle_coinsurance)
-            w.bind("<Enter>", lambda e: self._hover_coinsurance_header(header, header_accent, header_inner, icon_label, header_label, True))
-            w.bind("<Leave>", lambda e: self._hover_coinsurance_header(header, header_accent, header_inner, icon_label, header_label, False))
+        for w in (header, header_accent, header_inner, icon_label, caret, header_label):
+            w.bind("<Button-1>", toggle_menu)
+            w.bind("<Enter>", lambda e: self._hover_menu_header(header, header_accent, header_inner, icon_label, header_label, True))
+            w.bind("<Leave>", lambda e: self._hover_menu_header(header, header_accent, header_inner, icon_label, header_label, False))
 
-    def _hover_coinsurance_header(self, header, header_accent, header_inner, icon_label, header_label, entering):
+        return header
+
+    def _hover_menu_header(self, header, header_accent, header_inner, icon_label, header_label, entering):
         bg = self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR
         for w in (header, header_inner, icon_label, header_label):
             w.configure(bg=bg)
