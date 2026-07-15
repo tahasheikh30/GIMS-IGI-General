@@ -26,6 +26,13 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.marker import DataPoint
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.axis import ChartLines
+from openpyxl.chart.title import Title
+from openpyxl.chart.text import RichText, Text
+from openpyxl.drawing.line import LineProperties
+from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -43,6 +50,7 @@ DATE_FORMAT = "DD-MMM-YYYY"
 NAVY = "1F4E78"
 NAVY_DARK = "163A5C"
 ACCENT_BLUE = "2E86AB"
+CLAIMS_ORANGE = "D97B29"
 SLATE_TEXT = "1C2733"
 MUTED_TEXT = "6C7A89"
 CARD_BORDER = "D9E2EC"
@@ -144,6 +152,37 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
 
 
 KPI_NUM_FORMAT = '"PKR "#,##0;("PKR "#,##0);"-"'
+
+
+def _chart_title(text, color=NAVY, size=1400, bold=True):
+    """Build a styled openpyxl chart Title in the dashboard's own navy
+    Arial branding. The plain string API (chart.title = "text") always
+    renders in Excel's generic default chart-title style (a small grey
+    Calibri caption), so a title has to be built manually as rich text to
+    actually match the rest of the sheet."""
+    cp = CharacterProperties(sz=size, b=bold, solidFill=color, latin=DrawFont(typeface="Arial"))
+    run = RegularTextRun(t=text, rPr=cp)
+    para = Paragraph(pPr=ParagraphProperties(defRPr=cp), r=[run])
+    return Title(tx=Text(rich=RichText(p=[para])))
+
+
+def _chart_text(size=900, color=MUTED_TEXT, bold=False):
+    """Reusable small Arial text-properties block for axis labels,
+    legends, and data labels, so every element on a chart reads in the
+    same clean type as the rest of the dashboard instead of Excel's
+    generic default chart font."""
+    cp = CharacterProperties(sz=size, b=bold, solidFill=color, latin=DrawFont(typeface="Arial"))
+    return RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp))])
+
+
+def _style_chart_frame(chart):
+    """Give a chart the same card look as the KPI tiles: a white plot
+    area on a thin light border, so it reads as a built-in piece of the
+    dashboard rather than a bare chart floating loose on the sheet."""
+    chart.graphical_properties = GraphicalProperties(
+        solidFill="FFFFFF",
+        ln=LineProperties(solidFill=CARD_BORDER, w=9525),
+    )
 
 
 def _apply_outer_border(ws, min_row, max_row, min_col, max_col, color=CARD_BORDER):
@@ -270,7 +309,7 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     claims_cell = _write_kpi_card(
         ws, card_row, 4, 2, "Claims Receivable",
         f"=SUM({claims_range})" if claims_range else 0,
-        KPI_CLAIMS_FILL, "D97B29", sub_text="Reimbursable to IGI for claims paid",
+        KPI_CLAIMS_FILL, CLAIMS_ORANGE, sub_text="Reimbursable to IGI for claims paid",
     )
     _write_kpi_card(
         ws, card_row, 7, 2, "Total Receivable",
@@ -291,16 +330,36 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     ws.cell(row=pie_src_row + 2, column=11).number_format = NUM_FORMAT
 
     pie = PieChart()
-    pie.title = "Premium vs Claims Share"
-    pie.style = 10
+    pie.title = _chart_title("Premium vs Claims Share", size=1300)
     pie_data = Reference(ws, min_col=11, min_row=pie_src_row, max_row=pie_src_row + 2)
     pie_cats = Reference(ws, min_col=10, min_row=pie_src_row + 1, max_row=pie_src_row + 2)
     pie.add_data(pie_data, titles_from_data=True)
     pie.set_categories(pie_cats)
+
+    # Slice colors matched to the KPI cards above (blue = Premium, orange
+    # = Claims) with a thin white separator, instead of Excel's default
+    # generic theme palette - ties the pie directly back to the cards.
+    premium_slice = DataPoint(idx=0)
+    premium_slice.graphicalProperties = GraphicalProperties(solidFill=ACCENT_BLUE, ln=LineProperties(solidFill="FFFFFF", w=19050))
+    claims_slice = DataPoint(idx=1)
+    claims_slice.graphicalProperties = GraphicalProperties(solidFill=CLAIMS_ORANGE, ln=LineProperties(solidFill="FFFFFF", w=19050))
+    pie.series[0].data_points = [premium_slice, claims_slice]
+
     pie.dataLabels = DataLabelList()
     pie.dataLabels.showPercent = True
-    pie.height = 7.5
-    pie.width = 11
+    pie.dataLabels.showCatName = False
+    pie.dataLabels.showVal = False
+    pie.dataLabels.numFmt = "0.0%"
+    pie.dataLabels.dLblPos = "outEnd"
+    pie.dataLabels.txPr = _chart_text(size=1000, color=SLATE_TEXT, bold=True)
+
+    pie.legend.position = "b"
+    pie.legend.overlay = False
+    pie.legend.txPr = _chart_text(size=900, color=SLATE_TEXT)
+
+    _style_chart_frame(pie)
+    pie.height = 8.6
+    pie.width = 12.6
     ws.add_chart(pie, "M8")
 
     # ---- Client Breakdown section title ----
@@ -340,19 +399,59 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
             cell.fill = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
             cell.border = Border(top=Side(style="thin", color=NAVY), left=THIN, right=THIN, bottom=THIN)
 
+        # Horizontal bars, not vertical columns: client/company names are
+        # long text labels that would otherwise get rotated or truncated
+        # under a vertical column chart. Capped to the top clients (the
+        # table above is already sorted largest Premium Receivable first)
+        # so the chart stays legible instead of a wall of illegible bars
+        # when a company file covers dozens of clients - the full list
+        # still lives in the table itself, just above the chart.
+        MAX_CHART_CLIENTS = 12
+        chart_rows_shown = min(n_clients, MAX_CHART_CLIENTS)
+        chart_last_row = first_data_row + chart_rows_shown - 1
+
+        chart_title_text = "Premium vs Claims Receivable by Client"
+        if n_clients > MAX_CHART_CLIENTS:
+            chart_title_text += f"  (Top {MAX_CHART_CLIENTS} of {n_clients})"
+
         chart = BarChart()
-        chart.type = "col"
-        chart.title = "Premium vs Claims Receivable by Client"
-        chart.y_axis.title = "Amount (PKR)"
-        chart.x_axis.title = "Client"
-        chart.style = 10
+        chart.type = "bar"
+        chart.title = _chart_title(chart_title_text, size=1200)
+        chart.y_axis.title = _chart_title("Amount (PKR)", color=MUTED_TEXT, size=900, bold=False)
         chart.gapWidth = 60
-        data = Reference(ws, min_col=3, max_col=4, min_row=table_header_row, max_row=last_data_row)
-        cats = Reference(ws, min_col=2, min_row=first_data_row, max_row=last_data_row)
+        chart.overlap = -10
+
+        data = Reference(ws, min_col=3, max_col=4, min_row=table_header_row, max_row=chart_last_row)
+        cats = Reference(ws, min_col=2, min_row=first_data_row, max_row=chart_last_row)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+
+        # Series colors matched to the KPI cards / pie slices above, with
+        # no bar border, instead of Excel's default generic theme colors.
+        chart.series[0].graphicalProperties = GraphicalProperties(solidFill=ACCENT_BLUE, ln=LineProperties(noFill=True))
+        chart.series[1].graphicalProperties = GraphicalProperties(solidFill=CLAIMS_ORANGE, ln=LineProperties(noFill=True))
+
+        chart.legend.position = "t"
+        chart.legend.overlay = False
+        chart.legend.txPr = _chart_text(size=900, color=SLATE_TEXT)
+
+        chart.x_axis.txPr = _chart_text(size=900, color=SLATE_TEXT)    # client name labels
+        chart.y_axis.txPr = _chart_text(size=850, color=MUTED_TEXT)    # amount axis labels
+        chart.y_axis.number_format = "#,##0"
+        chart.y_axis.majorGridlines = ChartLines(spPr=GraphicalProperties(ln=LineProperties(solidFill=CARD_BORDER, w=9525)))
+        chart.x_axis.majorGridlines = None
+        chart.x_axis.delete = False
+        chart.y_axis.delete = False
+
+        # Excel's own default for a horizontal bar chart plots the FIRST
+        # category at the bottom - reversing this makes the largest
+        # client (row 1, since the table is sorted descending) appear at
+        # the top, matching the table above it instead of reading upside-down.
+        chart.x_axis.scaling.orientation = "maxMin"
+
+        _style_chart_frame(chart)
         chart.width = 22
-        chart.height = 10
+        chart.height = max(8, min(15, 2.2 + 0.85 * chart_rows_shown))
         # Anchored two rows below the Total row (i.e. below the whole
         # table), not beside it - this guarantees it never shares a row
         # range with the pie chart above, regardless of how tall either
