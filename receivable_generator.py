@@ -380,13 +380,21 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
             stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
             name_cell = ws.cell(row=i, column=2, value=str(row[0]))
             name_cell.font = BODY_FONT
+            # Wrap rather than clip - even at the wider column B, a handful
+            # of client names run long enough to still overflow a single
+            # line, so this lets those wrap onto a second line instead of
+            # being cut off.
+            name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
             prem_cell = ws.cell(row=i, column=3, value=float(row[1]))
             prem_cell.number_format = NUM_FORMAT
+            prem_cell.alignment = Alignment(horizontal="right", vertical="center", indent=1)
             claim_cell = ws.cell(row=i, column=4, value=float(row[2]))
             claim_cell.number_format = NUM_FORMAT
+            claim_cell.alignment = Alignment(horizontal="right", vertical="center", indent=1)
             for cell in (name_cell, prem_cell, claim_cell):
                 cell.border = BORDER
                 cell.fill = stripe
+            ws.row_dimensions[i].height = 26
 
         # Bold formula-driven Total row, so it always reflects the table above
         total_label = ws.cell(row=total_row, column=2, value="TOTAL")
@@ -399,13 +407,19 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
             cell.fill = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
             cell.border = Border(top=Side(style="thin", color=NAVY), left=THIN, right=THIN, bottom=THIN)
 
-        # Horizontal bars, not vertical columns: client/company names are
-        # long text labels that would otherwise get rotated or truncated
-        # under a vertical column chart. Capped to the top clients (the
-        # table above is already sorted largest Premium Receivable first)
-        # so the chart stays legible instead of a wall of illegible bars
-        # when a company file covers dozens of clients - the full list
-        # still lives in the table itself, just above the chart.
+        # Switched from a horizontal "bar" chart to a vertical "column"
+        # chart. The horizontal version needed its category axis order
+        # reversed (largest client on top, to match the table), and that
+        # reversal is what dragged the value-axis numbers up to the top of
+        # the plot area in real Excel, overlapping the title, no matter how
+        # explicitly axPos/tickLblPos/crosses were pinned back down - a
+        # known rendering quirk with reversed category axes on bar-
+        # direction charts. A column chart needs no such reversal at all:
+        # the source rows are already sorted largest-first, so the first
+        # (leftmost) column is naturally the largest, reading left-to-right
+        # like a normal Pareto-style chart, and the value axis has always
+        # sat at the bottom by default for a column chart - nothing to
+        # fight with Excel over.
         MAX_CHART_CLIENTS = 12
         chart_rows_shown = min(n_clients, MAX_CHART_CLIENTS)
         chart_last_row = first_data_row + chart_rows_shown - 1
@@ -415,10 +429,9 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
             chart_title_text += f"  (Top {MAX_CHART_CLIENTS} of {n_clients})"
 
         chart = BarChart()
-        chart.type = "bar"
+        chart.type = "col"
         chart.title = _chart_title(chart_title_text, size=1200)
-        chart.y_axis.title = _chart_title("Amount (PKR)", color=MUTED_TEXT, size=900, bold=False)
-        chart.gapWidth = 60
+        chart.gapWidth = 40
         chart.overlap = -10
 
         data = Reference(ws, min_col=3, max_col=4, min_row=table_header_row, max_row=chart_last_row)
@@ -431,27 +444,39 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
         chart.series[0].graphicalProperties = GraphicalProperties(solidFill=ACCENT_BLUE, ln=LineProperties(noFill=True))
         chart.series[1].graphicalProperties = GraphicalProperties(solidFill=CLAIMS_ORANGE, ln=LineProperties(noFill=True))
 
-        chart.legend.position = "t"
+        chart.legend.position = "b"
         chart.legend.overlay = False
         chart.legend.txPr = _chart_text(size=900, color=SLATE_TEXT)
 
-        chart.x_axis.txPr = _chart_text(size=900, color=SLATE_TEXT)    # client name labels
+        # Client names are long, so the category labels are rotated -45
+        # degrees along the bottom rather than left horizontal (which
+        # would either overlap each other or force the labels to auto-
+        # rotate unpredictably) - "rot" is in 60,000ths of a degree.
+        name_label_props = _chart_text(size=850, color=SLATE_TEXT)
+        name_label_props.bodyPr.rot = -2700000
+        name_label_props.bodyPr.vert = "horz"
+        chart.x_axis.txPr = name_label_props
         chart.y_axis.txPr = _chart_text(size=850, color=MUTED_TEXT)    # amount axis labels
         chart.y_axis.number_format = "#,##0"
         chart.y_axis.majorGridlines = ChartLines(spPr=GraphicalProperties(ln=LineProperties(solidFill=CARD_BORDER, w=9525)))
         chart.x_axis.majorGridlines = None
         chart.x_axis.delete = False
         chart.y_axis.delete = False
-
-        # Excel's own default for a horizontal bar chart plots the FIRST
-        # category at the bottom - reversing this makes the largest
-        # client (row 1, since the table is sorted descending) appear at
-        # the top, matching the table above it instead of reading upside-down.
-        chart.x_axis.scaling.orientation = "maxMin"
+        chart.x_axis.lblAlgn = "r"
+        chart.x_axis.lblOffset = 100
+        # openpyxl always defaults both axes' axPos to "l" regardless of
+        # chart type - correct for a bar chart's category axis, but wrong
+        # here: for a column chart the category axis (client names) needs
+        # to sit at the bottom and the value axis (amounts) at the left.
+        chart.x_axis.axPos = "b"
+        chart.y_axis.axPos = "l"
 
         _style_chart_frame(chart)
-        chart.width = 22
-        chart.height = max(8, min(15, 2.2 + 0.85 * chart_rows_shown))
+        # Width scales with how many client columns are shown (not a fixed
+        # value) so the rotated name labels underneath have breathing room
+        # and don't crowd into each other as more clients are added.
+        chart.width = max(20, min(34, 1.7 * chart_rows_shown + 6))
+        chart.height = 13
         # Anchored two rows below the Total row (i.e. below the whole
         # table), not beside it - this guarantees it never shares a row
         # range with the pie chart above, regardless of how tall either
@@ -468,10 +493,18 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     # table header next to it. Every column below gets enough room for
     # "PKR 19,850,294" at the KPI font size and for the "Premium
     # Receivable" / "Claims Receivable" table headers.
+    # Widened from the original 30/19/19/19 - at those widths, both the
+    # "Premium Receivable"/"Claims Receivable" table headers (right-
+    # aligned, ~19-20 characters) and longer client names ("SINDH
+    # NOORIABAD POWER COMPANY PHASE II (PVT.) LIMITED", etc.) were being
+    # visually clipped since the text overflowed into a neighboring cell
+    # that already had its own content. Client Name also gets wrap_text
+    # (below) so a long name wraps onto a second line within the wider
+    # column instead of being cut off outright.
     ws.column_dimensions["A"].width = 3
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 19
-    ws.column_dimensions["D"].width = 19
+    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions["C"].width = 23
+    ws.column_dimensions["D"].width = 23
     ws.column_dimensions["E"].width = 19
     ws.column_dimensions["F"].width = 4
     ws.column_dimensions["G"].width = 19
