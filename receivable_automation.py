@@ -135,6 +135,9 @@ def run_pipeline(master_filepath, output_dir, load_email_lookup=True, email_look
         logger(f"ERROR: {e}")
         return _empty_summary(str(e))
 
+    source_sheet = raw_df.attrs.get("source_sheet")
+    if source_sheet is not None:
+        logger(f"Auto-detected data sheet: '{source_sheet}' (out of every sheet in the workbook).")
     logger(f"Detected layout: {colmap['mode']} mode "
            f"({'Premium Receivable + Claim Receivable amount columns' if colmap['mode'] == 'dual' else 'Type/Category + single Amount column'}).")
     logger(f"Loaded {len(raw_df)} rows, {len(clean_df)} valid after validation.")

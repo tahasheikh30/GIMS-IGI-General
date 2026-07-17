@@ -1,13 +1,51 @@
 """
 Core data processing for Premium & Claims Receivable Email Automation.
 
-REAL SOURCE FORMAT (confirmed against a real sample, Outstanding_Auto_Email.xlsx,
-a Co-Insurance Outstanding Position export):
+REAL SOURCE FORMAT - two variants confirmed so far:
 
-- The master workbook has a single data sheet (no sheet name needs to be
-  specified). That sheet has a few title/banner rows above the real
-  header row (report title, "As at ..." date line, a blank row), so the
-  header row is auto-detected rather than assumed to be row 1.
+(1) Outstanding_Auto_Email.xlsx (the original sample this module was built
+    against) - a single-sheet workbook whose one sheet carries a plain
+    "Company" column already grouped to the correct co-insurance company
+    name.
+
+(2) A real production master export (e.g. "Co_Insurance_<date>.xlsx") -
+    a MULTI-SHEET workbook. The actual transaction data lives on a sheet
+    conventionally named "Detail"; the workbook also carries unrelated
+    tabs alongside it - e.g. "List" (a raw-branch-name -> company lookup
+    table), "Ageing", "PIVOT", and/or monthly snapshot tabs ("June-26",
+    "May-26", ...). Reading sheet index 0 blindly (the old behavior)
+    picks whichever of these happens to be first - typically NOT the
+    transaction sheet - and header detection then fails outright, since
+    none of that sheet's columns match anything in ALIASES. To handle
+    this robustly (rather than hardcoding the sheet name "Detail", which
+    isn't guaranteed to be stable across exports), load_raw_data() scans
+    every sheet in the workbook and picks whichever one has the
+    highest-scoring header row - see _pick_best_sheet().
+
+    On this real "Detail" sheet, there is no column literally called
+    "Company" - the properly-grouped company name instead lives in a
+    column called "BOD" (already cleanly normalized down to ~27 real
+    companies, vs. 500+ raw spelling variants in the sheet's own
+    "Insurance Company" column - see below), and it already carries the
+    literal value "OFC (OTHER FOLLOWER COMPANIES)" for every row that
+    belongs in the pooled OFC bucket - so it lines up perfectly with the
+    existing OFC substring-detection logic once mapped to the "Company"
+    canonical name (see ALIASES).
+
+    IMPORTANT: this sheet ALSO has a separate "Insurance Company" column,
+    which looks superficially similar but is NOT the same thing - it's
+    the raw, un-normalized branch/sub-entity name as originally entered
+    per policy (e.g. "ACE INSURANCE", "AGI Faisalabad Branch", "(old
+    code) MASJID-E-KHIZRA SERVICE STATION"), with 500+ distinct spellings
+    for what is really only ~27 actual companies, and it does NOT reliably
+    contain the substring "OFC" for rows that should be pooled there.
+    Grouping on it directly would silently explode into hundreds of wrong
+    per-branch output files and break OFC pooling. For that reason
+    "Insurance Company" is intentionally left OUT of ALIASES - if a
+    future export drops the clean "BOD"/"Company" column entirely,
+    load_raw_data() should fail loudly (as it already does) rather than
+    silently group at the wrong granularity.
+
 - Each transaction row carries its own "Premium Receivable" amount column
   and its own "Claim Receivable" amount column side by side. In the real
   sample exactly one of the two is non-zero per row (641 premium-only
@@ -54,7 +92,11 @@ ALIASES = {
     ],
     "Code": ["code", "client code", "account code"],
     "Client Name": ["client name", "client", "insured", "insured name"],
-    "Company": ["company", "company name", "group company"],
+    # "bod" (Business/Book-of-Business) is the real production export's
+    # own name for the already-normalized company-grouping column - see
+    # the module docstring for why this is mapped here but the sheet's
+    # separate, un-normalized "Insurance Company" column deliberately is not.
+    "Company": ["company", "company name", "group company", "bod"],
     # Dual-amount-column mode (confirmed real format)
     "Premium Receivable Amount": [
         "premium receivable", "premium receivable amount", "premium amount",
@@ -103,7 +145,7 @@ def _map_columns_to_canonical(columns):
     return mapping
 
 
-def find_header_row(raw_df, max_scan=25, min_score=3):
+def find_header_row(raw_df, max_scan=25, min_score=3, return_score=False):
     """
     Scan the first `max_scan` rows of a header=None read for the row that
     looks most like a real header (most cells matching a known alias).
@@ -113,7 +155,11 @@ def find_header_row(raw_df, max_scan=25, min_score=3):
         Row 2: "As at May 31, 2026 (2020-2026)"
         Row 3: (mostly blank)
         Row 4: Br. Code | Branch Name | ... | Client Name | ... <- real header
-    Raises ValueError if nothing scores highly enough to be confident.
+    return_score: if True, return (row_or_None, score) instead of raising
+        on a bad match - used by _pick_best_sheet() to compare candidate
+        sheets against each other rather than failing on the first one
+        that doesn't look right. If False (default, used everywhere else),
+        raises ValueError if nothing scores highly enough to be confident.
     """
     best_row, best_score = None, 0
     for i in range(min(max_scan, len(raw_df))):
@@ -126,32 +172,90 @@ def find_header_row(raw_df, max_scan=25, min_score=3):
         if score > best_score:
             best_score, best_row = score, i
     if best_row is None or best_score < min_score:
+        if return_score:
+            return None, best_score
         raise ValueError(
             "Could not auto-detect the header row in this file (no row in the "
             f"first {max_scan} rows matched at least {min_score} known column names). "
             "If this file uses different headers than expected, add them to ALIASES "
             "in receivable_processor.py."
         )
+    if return_score:
+        return best_row, best_score
     return best_row
 
 
-def load_raw_data(filepath, sheet_name=0):
+def _pick_best_sheet(filepath, max_scan=25, min_score=3):
+    """
+    Scan EVERY sheet in the workbook and return (sheet_name, header_row)
+    for whichever one has the highest-scoring header row - i.e. whichever
+    sheet actually looks like the real transaction data, rather than
+    assuming it's sheet index 0. Real master exports are often multi-sheet
+    workbooks that bundle the real data (conventionally on a sheet named
+    "Detail") alongside unrelated reference/lookup tabs ("List",
+    "Ageing"), a "PIVOT" tab, and/or monthly snapshot tabs - blindly
+    reading the first sheet can silently pick one of those instead and
+    then fail with a confusing "could not detect header row" error on a
+    sheet that was never meant to hold the transaction data.
+
+    Only the first `max_scan` rows of each sheet are read for this scan
+    (not the whole sheet), so this stays fast even when the winning sheet
+    itself has hundreds of thousands of rows.
+    """
+    xls = pd.ExcelFile(filepath)
+    best = None  # (score, sheet_name, header_row)
+    for sn in xls.sheet_names:
+        preview = pd.read_excel(xls, sheet_name=sn, header=None, nrows=max_scan)
+        header_row, score = find_header_row(preview, max_scan=max_scan, min_score=min_score, return_score=True)
+        if header_row is None:
+            continue
+        if best is None or score > best[0]:
+            best = (score, sn, header_row)
+    if best is None:
+        raise ValueError(
+            "Could not auto-detect the header row in any sheet of this workbook "
+            f"(no sheet had a row in its first {max_scan} rows matching at least "
+            f"{min_score} known column names). If this file uses different headers "
+            "than expected, add them to ALIASES in receivable_processor.py."
+        )
+    _, sheet_name, header_row = best
+    return sheet_name, header_row
+
+
+def load_raw_data(filepath, sheet_name=None):
     """
     Load the master receivable sheet, auto-detecting the real header row
     (title/banner rows above it are skipped) and dropping fully-blank
     spacer rows.
 
-    The master workbook has a single data sheet, so sheet_name defaults
-    to 0 (the first/only sheet) and callers don't need to name it
-    explicitly - it's only exposed as a parameter for the rare case of a
-    differently-shaped file.
+    sheet_name: leave as None (the default - used by the GUI and by
+        run_pipeline()) to scan every sheet in the workbook and
+        automatically use whichever one actually looks like the real
+        transaction data (see _pick_best_sheet) - this handles both a
+        single-sheet file (the original sample) and a real multi-sheet
+        master export (transaction data on a "Detail"-style sheet,
+        alongside unrelated reference/pivot/monthly tabs) without the
+        caller needing to know or specify which sheet to use. Pass an
+        explicit sheet name/index to skip that scan and read one sheet
+        directly instead (e.g. for scripted/test use against a file
+        that's known to be single-sheet).
+
+    The dataframe's .attrs["source_sheet"] is set to the sheet actually
+    read, so callers (e.g. app.py / receivable_automation.py) can log
+    which sheet was auto-selected for transparency.
     """
+    if sheet_name is None:
+        sheet_name, header_row = _pick_best_sheet(filepath)
+    else:
+        preview = pd.read_excel(filepath, sheet_name=sheet_name, header=None, nrows=25)
+        header_row = find_header_row(preview)
+
     raw = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
-    header_row = find_header_row(raw)
     columns = raw.iloc[header_row].tolist()
     data = raw.iloc[header_row + 1:].reset_index(drop=True)
     data.columns = columns
     data = data.dropna(how="all").reset_index(drop=True)
+    data.attrs["source_sheet"] = sheet_name
     return data
 
 

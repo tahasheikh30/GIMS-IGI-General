@@ -1203,6 +1203,9 @@ class BalanceApp(tk.Tk):
             return
 
         self.receivable_setup_log.delete("1.0", "end")
+        source_sheet = self.receivable_raw_df.attrs.get("source_sheet")
+        if source_sheet is not None:
+            self.log_receivable(f"Auto-detected data sheet: '{source_sheet}' (out of every sheet in the workbook).")
         mode = self.receivable_colmap["mode"]
         self.log_receivable(f"Detected layout: {mode} mode "
                              f"({'Premium Receivable + Claim Receivable amount columns' if mode == 'dual' else 'Type/Category + single Amount column'}).")
