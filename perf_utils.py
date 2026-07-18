@@ -248,6 +248,34 @@ class RowProgress:
 #     on, so it can never slow down or otherwise affect the actual work.
 # ---------------------------------------------------------------------------
 
+def _resolve_bg_color(widget):
+    """
+    Best-effort background color lookup that works for BOTH plain tk
+    widgets (which support cget("bg")) and themed ttk widgets (which do
+    NOT - ttk.Frame, ttk.Label, etc. raise _tkinter.TclError on
+    cget("bg")/cget("background") entirely, since their background comes
+    from the active ttk theme/style instead of a per-widget option).
+    Returns None if no color could be determined either way, in which
+    case the caller should simply omit the bg kwarg and let Tk use
+    whatever the platform default is - never raises.
+    """
+    for option in ("bg", "background"):
+        try:
+            return widget.cget(option)
+        except Exception:
+            pass
+    try:
+        from tkinter import ttk
+        style = ttk.Style()
+        style_name = widget.cget("style") or widget.winfo_class()
+        color = style.lookup(style_name, "background")
+        if color:
+            return color
+    except Exception:
+        pass
+    return None
+
+
 class ProgressBarPanel:
     """
     A small determinate/indeterminate progress bar + status label, meant
@@ -273,21 +301,27 @@ class ProgressBarPanel:
         import tkinter as tk
         from tkinter import ttk
 
-        self.frame = tk.Frame(parent, bg=parent.cget("bg") if hasattr(parent, "cget") else None)
-        try:
-            self.frame.configure(bg=parent["bg"])
-        except Exception:
-            pass
+        bg = _resolve_bg_color(parent)
+
+        # A plain tk.Frame (not ttk.Frame) is used deliberately here even
+        # when the parent is a themed ttk widget: it's the only frame type
+        # that reliably accepts an explicit bg color on every Tk build,
+        # which keeps this panel's background matched to whatever it's
+        # dropped into (a themed ttk page vs. a hand-styled tk.Frame card
+        # elsewhere in the app) without needing the caller to tell it which
+        # kind of parent it has.
+        frame_kwargs = {"bg": bg} if bg else {}
+        self.frame = tk.Frame(parent, **frame_kwargs)
 
         self.bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
                                     length=width, maximum=100, value=0)
         self.bar.pack(side="left", padx=(0, 10), pady=2)
 
         self.status_var = tk.StringVar(value="")
+        label_kwargs = {"bg": bg} if bg else {}
         self.status_label = tk.Label(self.frame, textvariable=self.status_var,
                                       font=("Segoe UI", 9), anchor="w",
-                                      bg=self.frame.cget("bg") if hasattr(self.frame, "cget") else None,
-                                      fg="#5B6B79")
+                                      fg="#5B6B79", **label_kwargs)
         self.status_label.pack(side="left", fill="x", expand=True)
 
         self._indeterminate = False
