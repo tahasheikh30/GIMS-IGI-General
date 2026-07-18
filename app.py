@@ -32,6 +32,7 @@ import receivable_run_log as rvlog
 import run_log
 import premium_register_processor as prp
 import premium_register_generator as prg
+import perf_utils
 
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -1100,58 +1101,82 @@ class BalanceApp(tk.Tk):
         self._log_premreg(f"Leader file:   {os.path.basename(self.premreg_leader_file)}")
         self._log_premreg(f"Register file: {os.path.basename(self.premreg_register_file)}\n")
         self.status_var.set("Matching policy numbers...")
-        self.update_idletasks()
 
-        try:
-            self._log_premreg("Loading leader file...")
-            leader_df, nums_col = prp.load_leader_file(self.premreg_leader_file)
-            self._log_premreg(f"  {len(leader_df)} row(s) loaded. Policy-number column detected as '{nums_col}'.")
+        leader_file = self.premreg_leader_file
+        register_file = self.premreg_register_file
 
-            self._log_premreg("Loading IGI Premium Register...")
-            register_df, leader_ref_col, igi_policy_col = prp.load_register_file(self.premreg_register_file)
-            self._log_premreg(f"  {len(register_df)} row(s) loaded. Leader Ref column='{leader_ref_col}', "
-                               f"IGI Policy Number column='{igi_policy_col}'.")
+        def worker(report):
+            report("Loading leader file...")
+            leader_df, nums_col = prp.load_leader_file(leader_file)
+            report(f"  {len(leader_df):,} row(s) loaded. Policy-number column detected as '{nums_col}'.")
 
-            self._log_premreg("\nMatching...")
+            report("Loading IGI Premium Register...")
+            register_df, leader_ref_col, igi_policy_col = prp.load_register_file(register_file)
+            report(f"  {len(register_df):,} row(s) loaded. Leader Ref column='{leader_ref_col}', "
+                   f"IGI Policy Number column='{igi_policy_col}'.")
+
+            report(f"\nMatching {len(leader_df):,} leader row(s) against {len(register_df):,} register row(s)...")
             result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col)
-        except Exception as e:
-            self._log_premreg(f"\nERROR: {e}")
-            messagebox.showerror("Matching failed", str(e))
+            return result
+
+        def on_done(result):
+            self.premreg_result_df = result
+            matched = int((result["Match Status"] == "Matched").sum())
+            total = len(result)
+            pct = (matched / total) if total else 0
+            self._log_premreg(f"\nMatched {matched} of {total} ({pct:.1%}).")
+            if matched < total:
+                self._log_premreg(f"{total - matched} row(s) unmatched - these will be highlighted red in the output for manual entry.")
+
+            self.premreg_summary_var.set(f"Matched {matched} / {total} ({pct:.1%})")
+            self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
+
+            default_name = prg.build_output_filename(leader_file)
+            output_path = filedialog.asksaveasfilename(
+                title="Save Premium Register Match Results As",
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+                initialfile=default_name,
+            )
+            if not output_path:
+                self._log_premreg("\nSave cancelled - results were not written to a file (still available above).")
+                return
+            self._save_premreg_output(result, output_path, leader_file, matched, total, pct)
+
+        def on_error(exc):
+            self._log_premreg(f"\nERROR: {exc}")
+            messagebox.showerror("Matching failed", str(exc))
             self.status_var.set("Premium Register matching failed.")
-            return
 
-        self.premreg_result_df = result
-        matched = int((result["Match Status"] == "Matched").sum())
-        total = len(result)
-        pct = (matched / total) if total else 0
-        self._log_premreg(f"\nMatched {matched} of {total} ({pct:.1%}).")
-        if matched < total:
-            self._log_premreg(f"{total - matched} row(s) unmatched - these will be highlighted red in the output for manual entry.")
-
-        self.premreg_summary_var.set(f"Matched {matched} / {total} ({pct:.1%})")
-        self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
-
-        default_name = prg.build_output_filename(self.premreg_leader_file)
-        output_path = filedialog.asksaveasfilename(
-            title="Save Premium Register Match Results As",
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")],
-            initialfile=default_name,
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_premreg(msg),
+            on_done=on_done, on_error=on_error,
         )
-        if not output_path:
-            self._log_premreg("\nSave cancelled - results were not written to a file (still available above).")
-            return
 
-        try:
-            prg.build_match_output(result, output_path, leader_source_filename=self.premreg_leader_file)
-        except Exception as e:
-            self._log_premreg(f"\nERROR writing output file: {e}")
-            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{e}")
-            return
+    def _save_premreg_output(self, result, output_path, leader_file, matched, total, pct):
+        """Writing the highlighted output workbook is itself a per-row
+        openpyxl write (see premium_register_generator.build_match_output)
+        - kept on a second background pass so a huge match result doesn't
+        freeze the save step either."""
+        def worker(report):
+            report(f"Writing {len(result):,} row(s) to {os.path.basename(output_path)}...")
+            prg.build_match_output(result, output_path, leader_source_filename=leader_file)
 
-        self._log_premreg(f"\nSaved: {output_path}")
-        self.status_var.set(f"Premium Register saved: {os.path.basename(output_path)}")
-        messagebox.showinfo("Done", f"Matched {matched} of {total} ({pct:.1%}).\n\nSaved to:\n{output_path}")
+        def on_done(_):
+            self._log_premreg(f"\nSaved: {output_path}")
+            self.status_var.set(f"Premium Register saved: {os.path.basename(output_path)}")
+            messagebox.showinfo("Done", f"Matched {matched} of {total} ({pct:.1%}).\n\nSaved to:\n{output_path}")
+
+        def on_error(exc):
+            self._log_premreg(f"\nERROR writing output file: {exc}")
+            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{exc}")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_premreg(msg),
+            on_done=on_done, on_error=on_error,
+        )
 
     # ---------- Coinsurance > Premium/Claims Email Automation module ----------
     def _build_receivable_page(self, parent):
@@ -1426,33 +1451,48 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Error", "Please select a valid master workbook.")
             return
 
-        try:
-            self.receivable_raw_df = rvp.load_raw_data(path)
-            (self.receivable_clean_df, self.receivable_issues_df,
-             dropped_columns, self.receivable_colmap) = rvp.validate_data(self.receivable_raw_df)
-        except Exception as e:
-            messagebox.showerror("Error loading file", str(e))
-            return
-
         self.receivable_setup_log.delete("1.0", "end")
-        source_sheet = self.receivable_raw_df.attrs.get("source_sheet")
-        if source_sheet is not None:
-            self.log_receivable(f"Auto-detected data sheet: '{source_sheet}' (out of every sheet in the workbook).")
-        mode = self.receivable_colmap["mode"]
-        self.log_receivable(f"Detected layout: {mode} mode "
-                             f"({'Premium Receivable + Claim Receivable amount columns' if mode == 'dual' else 'Type/Category + single Amount column'}).")
-        self.log_receivable(f"Loaded {len(self.receivable_raw_df)} rows, {len(self.receivable_clean_df)} valid after validation.")
-        if dropped_columns:
-            self.log_receivable(f"Removed {len(dropped_columns)} completely empty column(s): {', '.join(dropped_columns)}")
-        if len(self.receivable_issues_df) > 0:
-            self.log_receivable(f"{len(self.receivable_issues_df)} row(s) flagged with issues:")
-            issue_counts = self.receivable_issues_df["issue"].value_counts()
-            for issue_label, count in issue_counts.items():
-                self.log_receivable(f"   {count}x  {issue_label}")
-        else:
-            self.log_receivable("No data issues found.")
+        self.status_var.set("Loading receivable data...")
 
-        self.status_var.set("Receivable data loaded. Set filters and click Analyze / Build Groups.")
+        def worker(report):
+            report(f"Reading {os.path.basename(path)}...")
+            raw_df = rvp.load_raw_data(path, report=report)
+            report(f"Loaded {len(raw_df):,} rows. Validating...")
+            clean_df, issues_df, dropped_columns, colmap = rvp.validate_data(raw_df)
+            return raw_df, clean_df, issues_df, dropped_columns, colmap
+
+        def on_done(result):
+            (self.receivable_raw_df, self.receivable_clean_df, self.receivable_issues_df,
+             dropped_columns, self.receivable_colmap) = result
+
+            source_sheet = self.receivable_raw_df.attrs.get("source_sheet")
+            if source_sheet is not None:
+                self.log_receivable(f"Auto-detected data sheet: '{source_sheet}' (out of every sheet in the workbook).")
+            mode = self.receivable_colmap["mode"]
+            self.log_receivable(f"Detected layout: {mode} mode "
+                                 f"({'Premium Receivable + Claim Receivable amount columns' if mode == 'dual' else 'Type/Category + single Amount column'}).")
+            self.log_receivable(f"Loaded {len(self.receivable_raw_df)} rows, {len(self.receivable_clean_df)} valid after validation.")
+            if dropped_columns:
+                self.log_receivable(f"Removed {len(dropped_columns)} completely empty column(s): {', '.join(dropped_columns)}")
+            if len(self.receivable_issues_df) > 0:
+                self.log_receivable(f"{len(self.receivable_issues_df)} row(s) flagged with issues:")
+                issue_counts = self.receivable_issues_df["issue"].value_counts()
+                for issue_label, count in issue_counts.items():
+                    self.log_receivable(f"   {count}x  {issue_label}")
+            else:
+                self.log_receivable("No data issues found.")
+
+            self.status_var.set("Receivable data loaded. Set filters and click Analyze / Build Groups.")
+
+        def on_error(exc):
+            messagebox.showerror("Error loading file", str(exc))
+            self.status_var.set("Load failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log_receivable(msg),
+            on_done=on_done, on_error=on_error,
+        )
 
     def analyze_receivable(self):
         if self.receivable_clean_df is None:
@@ -1508,27 +1548,47 @@ class BalanceApp(tk.Tk):
             premium_amount_col = claims_amount_col = colmap["amount"]
 
         source_df = getattr(self, "receivable_filtered_df", self.receivable_clean_df)
+        groups = self.receivable_groups
+        self.status_var.set(f"Generating {len(groups)} Receivable workbook(s)...")
 
-        self.receivable_filename_lookup = {}
-        generated = []
-        errors = []
-        for bucket_label, g in self.receivable_groups.items():
-            try:
-                breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
-                fp = rvg.build_company_workbook(
-                    bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
-                    premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
-                )
-                generated.append(fp)
-                self.receivable_filename_lookup[bucket_label] = os.path.basename(fp)
-            except Exception as e:
-                errors.append(f"{bucket_label}: {e}")
+        def worker(report):
+            filename_lookup = {}
+            generated = []
+            errors = []
+            for i, (bucket_label, g) in enumerate(groups.items(), start=1):
+                n_rows = len(g["premium_rows"]) + len(g["claims_rows"])
+                report(f"[{i}/{len(groups)}] {bucket_label} ({n_rows:,} row(s))")
+                try:
+                    breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
+                    fp = rvg.build_company_workbook(
+                        bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
+                        premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
+                        report=report,
+                    )
+                    generated.append(fp)
+                    filename_lookup[bucket_label] = os.path.basename(fp)
+                except Exception as e:
+                    errors.append(f"{bucket_label}: {e}")
+            return generated, filename_lookup, errors
 
-        msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
-        if errors:
-            msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
-        messagebox.showinfo("Done", msg)
-        self.status_var.set(f"Generated {len(generated)} Receivable workbook(s).")
+        def on_done(result):
+            generated, filename_lookup, errors = result
+            self.receivable_filename_lookup = filename_lookup
+            msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
+            if errors:
+                msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
+            messagebox.showinfo("Done", msg)
+            self.status_var.set(f"Generated {len(generated)} Receivable workbook(s).")
+
+        def on_error(exc):
+            messagebox.showerror("Report generation failed", str(exc))
+            self.status_var.set("Report generation failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log_receivable(msg),
+            on_done=on_done, on_error=on_error,
+        )
 
     def open_receivable_output_folder(self):
         output_dir = self.receivable_output_dir_var.get().strip()
@@ -2017,81 +2077,100 @@ class BalanceApp(tk.Tk):
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Please select a valid balance data file.")
             return
-        try:
-            self.raw_df = dp.load_raw_data(path, sheet_name=self.sheet_name_var.get())
-            self.clean_df, self.issues_df, dropped_columns = dp.validate_data(
-                self.raw_df, date_col_for_year=self.date_col_var.get()
-            )
-        except Exception as e:
-            messagebox.showerror("Error loading file", str(e))
-            return
 
-        self.dept_listbox.delete(0, "end")
-        for i, dept in enumerate(sorted(self.clean_df["Department"].dropna().unique())):
-            self.dept_listbox.insert("end", dept)
-            self.dept_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
-
-        self.agent_listbox.delete(0, "end")
-        if "Agent Name" in self.clean_df.columns:
-            for i, agent in enumerate(sorted(self.clean_df["Agent Name"].dropna().unique())):
-                self.agent_listbox.insert("end", agent)
-                self.agent_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
-
-        self.branch_listbox.delete(0, "end")
-        if "Branch desc" in self.clean_df.columns:
-            for i, branch in enumerate(sorted(self.clean_df["Branch desc"].dropna().unique())):
-                self.branch_listbox.insert("end", branch)
-                self.branch_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
-
-        self.log(self.setup_log, f"Loaded {len(self.raw_df)} rows, {len(self.clean_df)} valid after cleaning.")
-        if dropped_columns:
-            self.log(self.setup_log, f"Removed {len(dropped_columns)} completely empty column(s) from the data: {', '.join(dropped_columns)}")
-        if len(self.issues_df) > 0:
-            self.log(self.setup_log, f"{len(self.issues_df)} rows flagged with issues (missing client/department, non-numeric balance):")
-            for _, r in self.issues_df.head(20).iterrows():
-                self.log(self.setup_log, f"   Row {r['row']}: {r['issue']} (value: {r['value']})")
-            if len(self.issues_df) > 20:
-                self.log(self.setup_log, f"   ...and {len(self.issues_df) - 20} more.")
-        else:
-            self.log(self.setup_log, "No data issues found.")
+        self.setup_log.delete("1.0", "end")
+        self.status_var.set("Loading data...")
 
         email_path = self.email_file_var.get().strip()
-        self.email_lookup = {}
-        self.poc_lookup = {}
-        if email_path and os.path.exists(email_path):
-            try:
-                if email_path.lower().endswith(".csv"):
-                    edf = pd.read_csv(email_path)
-                else:
-                    edf = pd.read_excel(email_path)
-                name_col = next((c for c in edf.columns if "client" in c.lower() or "participant" in c.lower() or "company" in c.lower()), edf.columns[0])
-                email_col = next((c for c in edf.columns if "email" in c.lower()), None)
-                if email_col is None:
-                    raise ValueError("Could not find an 'Email' column in the lookup file.")
-                self.email_lookup = dict(zip(edf[name_col].astype(str).str.strip(), edf[email_col].astype(str).str.strip()))
+        sheet_name = self.sheet_name_var.get()
+        date_col = self.date_col_var.get()
+
+        def worker(report):
+            report(f"Reading {os.path.basename(path)}...")
+            raw_df = dp.load_raw_data(path, sheet_name=sheet_name, report=report)
+            report(f"Loaded {len(raw_df):,} rows. Validating...")
+            clean_df, issues_df, dropped_columns = dp.validate_data(raw_df, date_col_for_year=date_col)
+
+            email_lookup, poc_lookup, email_warning = {}, {}, None
+            if email_path and os.path.exists(email_path):
+                try:
+                    if email_path.lower().endswith(".csv"):
+                        edf = pd.read_csv(email_path)
+                    else:
+                        edf = pd.read_excel(email_path)
+                    name_col = next((c for c in edf.columns if "client" in c.lower() or "participant" in c.lower() or "company" in c.lower()), edf.columns[0])
+                    email_col = next((c for c in edf.columns if "email" in c.lower()), None)
+                    if email_col is None:
+                        raise ValueError("Could not find an 'Email' column in the lookup file.")
+                    email_lookup = dict(zip(edf[name_col].astype(str).str.strip(), edf[email_col].astype(str).str.strip()))
+
+                    poc_col = next((c for c in edf.columns
+                                     if c != email_col and c != name_col
+                                     and any(k in c.lower() for k in ["poc", "contact", "attn", "attention", "recipient name", "contact person"])),
+                                    None)
+                    if poc_col:
+                        for client_raw, poc_raw in zip(edf[name_col], edf[poc_col]):
+                            if pd.isna(client_raw) or pd.isna(poc_raw):
+                                continue
+                            client_name = str(client_raw).strip()
+                            poc_name = str(poc_raw).strip()
+                            if client_name and poc_name:
+                                poc_lookup[client_name] = poc_name
+                except Exception as e:
+                    email_warning = str(e)
+
+            return raw_df, clean_df, issues_df, dropped_columns, email_lookup, poc_lookup, email_warning
+
+        def on_done(result):
+            self.raw_df, self.clean_df, self.issues_df, dropped_columns, self.email_lookup, self.poc_lookup, email_warning = result
+
+            self.dept_listbox.delete(0, "end")
+            for i, dept in enumerate(sorted(self.clean_df["Department"].dropna().unique())):
+                self.dept_listbox.insert("end", dept)
+                self.dept_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            self.agent_listbox.delete(0, "end")
+            if "Agent Name" in self.clean_df.columns:
+                for i, agent in enumerate(sorted(self.clean_df["Agent Name"].dropna().unique())):
+                    self.agent_listbox.insert("end", agent)
+                    self.agent_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            self.branch_listbox.delete(0, "end")
+            if "Branch desc" in self.clean_df.columns:
+                for i, branch in enumerate(sorted(self.clean_df["Branch desc"].dropna().unique())):
+                    self.branch_listbox.insert("end", branch)
+                    self.branch_listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            self.log(self.setup_log, f"Loaded {len(self.raw_df)} rows, {len(self.clean_df)} valid after cleaning.")
+            if dropped_columns:
+                self.log(self.setup_log, f"Removed {len(dropped_columns)} completely empty column(s) from the data: {', '.join(dropped_columns)}")
+            if len(self.issues_df) > 0:
+                self.log(self.setup_log, f"{len(self.issues_df)} rows flagged with issues (missing client/department, non-numeric balance):")
+                for _, r in self.issues_df.head(20).iterrows():
+                    self.log(self.setup_log, f"   Row {r['row']}: {r['issue']} (value: {r['value']})")
+                if len(self.issues_df) > 20:
+                    self.log(self.setup_log, f"   ...and {len(self.issues_df) - 20} more.")
+            else:
+                self.log(self.setup_log, "No data issues found.")
+
+            if self.email_lookup:
                 self.log(self.setup_log, f"Loaded {len(self.email_lookup)} client-email mappings from lookup file.")
+                if self.poc_lookup:
+                    self.log(self.setup_log, f"{len(self.poc_lookup)} client(s) will be greeted by contact name.")
+            if email_warning:
+                self.log(self.setup_log, f"Warning: could not load email lookup file: {email_warning}")
 
-                # Optional POC / contact-person column: if present, the email
-                # greeting addresses this person by name instead of the company.
-                poc_col = next((c for c in edf.columns
-                                 if c != email_col and c != name_col
-                                 and any(k in c.lower() for k in ["poc", "contact", "attn", "attention", "recipient name", "contact person"])),
-                                None)
-                if poc_col:
-                    poc_lookup = {}
-                    for client_raw, poc_raw in zip(edf[name_col], edf[poc_col]):
-                        if pd.isna(client_raw) or pd.isna(poc_raw):
-                            continue
-                        client_name = str(client_raw).strip()
-                        poc_name = str(poc_raw).strip()
-                        if client_name and poc_name:
-                            poc_lookup[client_name] = poc_name
-                    self.poc_lookup = poc_lookup
-                    self.log(self.setup_log, f"Found POC column '{poc_col}' - {len(self.poc_lookup)} client(s) will be greeted by contact name.")
-            except Exception as e:
-                self.log(self.setup_log, f"Warning: could not load email lookup file: {e}")
+            self.status_var.set("Data loaded. Set threshold/filters and click Analyze.")
 
-        self.status_var.set("Data loaded. Set threshold/filters and click Analyze.")
+        def on_error(exc):
+            messagebox.showerror("Error loading file", str(exc))
+            self.status_var.set("Load failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log(self.setup_log, msg),
+            on_done=on_done, on_error=on_error,
+        )
 
     def analyze(self):
         if self.clean_df is None:
@@ -2134,52 +2213,82 @@ class BalanceApp(tk.Tk):
             return
         os.makedirs(self.output_dir, exist_ok=True)
 
-        use_native = pivot_native.EXCEL_AVAILABLE
-        excel_app = None
-        generated = []
-        native_failures = []
+        clients = list(self.qualifying.index)
+        filtered_df = self.filtered_df
+        output_dir = self.output_dir
+        self.status_var.set(f"Generating {len(clients)} report(s)...")
 
-        self.status_var.set("Generating reports..." + (" (building native PivotTables in Excel)" if use_native else ""))
-        self.update_idletasks()
+        def worker(report):
+            # win32com requires COM to be initialized on whichever thread
+            # actually calls it - the main thread gets this for free from
+            # Tkinter's own message loop, a plain background thread does
+            # not, so it's done explicitly here and torn down in finally.
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                com_initialized = True
+            except ImportError:
+                com_initialized = False
 
-        try:
-            if use_native:
-                try:
-                    excel_app = pivot_native.start_excel()
-                except Exception as e:
-                    use_native = False
-                    self.log(self.setup_log, f"Could not start Excel for native PivotTables ({e}) - using static formatted tables instead.")
-
-            for client in self.qualifying.index:
-                raw_rows = dp.get_client_raw_rows(self.filtered_df, client)
-                fp = None
+            use_native = pivot_native.EXCEL_AVAILABLE
+            excel_app = None
+            generated = []
+            native_failures = []
+            try:
                 if use_native:
                     try:
-                        fp = rg.write_raw_only_workbook(client, raw_rows, self.output_dir)
-                        pivot_native.add_native_pivot_table(fp, client_name=client, excel_app=excel_app)
+                        excel_app = pivot_native.start_excel()
                     except Exception as e:
-                        native_failures.append(client)
-                        pivot_df = dp.client_pivot_table(self.filtered_df, client)
-                        fp = rg.write_client_report(client, pivot_df, self.output_dir, raw_df=raw_rows)
-                else:
-                    pivot_df = dp.client_pivot_table(self.filtered_df, client)
-                    fp = rg.write_client_report(client, pivot_df, self.output_dir, raw_df=raw_rows)
-                generated.append(fp)
-        finally:
-            pivot_native.stop_excel(excel_app)
+                        use_native = False
+                        report(f"Could not start Excel for native PivotTables ({e}) - using static formatted tables instead.")
 
-        msg = f"Generated {len(generated)} report(s) in:\n{self.output_dir}"
-        if not pivot_native.EXCEL_AVAILABLE:
-            msg += ("\n\nMicrosoft Excel/pywin32 wasn't detected on this machine, so reports use a "
-                    "static formatted table instead of an interactive native PivotTable. Install "
-                    "Excel (and pywin32) for real, drillable PivotTables.")
-        elif native_failures:
-            msg += (f"\n\n{len(native_failures)} report(s) fell back to a static table after an Excel "
-                    f"error: {', '.join(native_failures[:5])}" + (", ..." if len(native_failures) > 5 else ""))
-        else:
-            msg += "\n\nEach report contains a genuine, interactive Excel PivotTable (with the field list, filters, and drill-down) built from that client's Raw Data sheet."
-        messagebox.showinfo("Done", msg)
-        self.status_var.set(f"Generated {len(generated)} report(s).")
+                for i, client in enumerate(clients, start=1):
+                    raw_rows = dp.get_client_raw_rows(filtered_df, client)
+                    report(f"[{i}/{len(clients)}] {client} ({len(raw_rows):,} row(s))")
+                    fp = None
+                    if use_native:
+                        try:
+                            fp = rg.write_raw_only_workbook(client, raw_rows, output_dir, report=report)
+                            pivot_native.add_native_pivot_table(fp, client_name=client, excel_app=excel_app)
+                        except Exception:
+                            native_failures.append(client)
+                            pivot_df = dp.client_pivot_table(filtered_df, client)
+                            fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
+                    else:
+                        pivot_df = dp.client_pivot_table(filtered_df, client)
+                        fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
+                    generated.append(fp)
+            finally:
+                pivot_native.stop_excel(excel_app)
+                if com_initialized:
+                    pythoncom.CoUninitialize()
+
+            return generated, use_native, native_failures
+
+        def on_done(result):
+            generated, use_native, native_failures = result
+            msg = f"Generated {len(generated)} report(s) in:\n{self.output_dir}"
+            if not pivot_native.EXCEL_AVAILABLE:
+                msg += ("\n\nMicrosoft Excel/pywin32 wasn't detected on this machine, so reports use a "
+                        "static formatted table instead of an interactive native PivotTable. Install "
+                        "Excel (and pywin32) for real, drillable PivotTables.")
+            elif native_failures:
+                msg += (f"\n\n{len(native_failures)} report(s) fell back to a static table after an Excel "
+                        f"error: {', '.join(native_failures[:5])}" + (", ..." if len(native_failures) > 5 else ""))
+            else:
+                msg += "\n\nEach report contains a genuine, interactive Excel PivotTable (with the field list, filters, and drill-down) built from that client's Raw Data sheet."
+            messagebox.showinfo("Done", msg)
+            self.status_var.set(f"Generated {len(generated)} report(s).")
+
+        def on_error(exc):
+            messagebox.showerror("Report generation failed", str(exc))
+            self.status_var.set("Report generation failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log(self.setup_log, msg),
+            on_done=on_done, on_error=on_error,
+        )
 
     def open_output_folder(self):
         if os.path.exists(self.output_dir):

@@ -34,6 +34,22 @@ from openpyxl.chart.text import RichText, Text
 from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
+try:
+    from perf_utils import style_budget_ok, ThrottledReporter
+except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
+    def style_budget_ok(n_rows):
+        return True
+
+    class ThrottledReporter:
+        def __init__(self, *a, **k):
+            pass
+
+        def maybe(self, *a, **k):
+            pass
+
+        def final(self, *a, **k):
+            pass
+
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
 BODY_FONT = Font(name="Arial")
@@ -119,7 +135,26 @@ def build_output_filename(bucket_label, run_date=None):
     return f"{safe_filename_part(bucket_label)}_Receivable_{date_str}.xlsx"
 
 
-def _write_sheet(ws, df, amount_col, drop_cols=None):
+def _prepare_for_excel(df, date_cols):
+    """
+    Vectorized, one-pass cleanup of the whole dataframe before writing
+    (see the matching helper in report_generator.py for the full
+    rationale) - replaces a per-cell isna()/hasattr() chain that used to
+    run once per cell with a handful of whole-column pandas operations,
+    which stays fast even at hundreds of thousands of rows.
+    """
+    out = {}
+    for col in df.columns:
+        s = df[col]
+        if col in date_cols:
+            out[col] = s.dt.date.astype(object).where(s.notna(), None)
+        else:
+            s = s.astype(object)
+            out[col] = s.where(pd.notna(s), None)
+    return pd.DataFrame(out, columns=df.columns)
+
+
+def _write_sheet(ws, df, amount_col, drop_cols=None, report=None):
     """
     amount_col: name of this sheet's own amount column (e.g. "Premium
         Receivable" or "Claim Receivable") - gets the accounting number
@@ -127,6 +162,8 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
     drop_cols: columns to omit from this sheet (typically the OTHER
         category's amount column, so the Premium Receivable sheet doesn't
         also show a redundant all-zero Claim Receivable column).
+    report: optional callable(str) for progress on large files (see
+        perf_utils.run_in_background) - safe to leave as None.
     """
     drop_cols = [c for c in (drop_cols or []) if c in df.columns]
     columns = [c for c in df.columns if c not in drop_cols]
@@ -144,20 +181,14 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
         ws.cell(row=2, column=1, value="No records in this category.").font = EMPTY_FONT
         return
 
+    n_rows = len(df)
+    apply_style = style_budget_ok(n_rows)
     date_cols = {col for col in columns if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col])}
+    clean_df = _prepare_for_excel(df[columns], date_cols)
+    reporter = ThrottledReporter(report, min_rows=25000) if report else None
 
-    for i, (_, row) in enumerate(df.iterrows(), start=2):
-        for j, col in enumerate(columns, start=1):
-            val = row[col]
-            is_date_col = col in date_cols
-            if pd.isna(val):
-                val = None
-            elif is_date_col and hasattr(val, "date"):
-                val = val.date()
-            elif hasattr(val, "to_pydatetime"):
-                val = val.to_pydatetime()
-            elif hasattr(val, "item"):
-                val = val.item()
+    for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
+        for j, (col, val) in enumerate(zip(columns, row), start=1):
             cell = ws.cell(row=i, column=j, value=val)
             # IMPORTANT: only style a cell that actually has a value. In
             # openpyxl, calling ws.cell(value=None) alone writes nothing
@@ -167,23 +198,35 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
             # same still-valueless cell, openpyxl is forced to
             # materialize it - and it gets written out as an empty
             # numeric cell (<c t="n"> with no <v>), which is invalid
-            # per the OOXML schema. Real production data (unlike the
-            # small hand-built sample this module was first tested
-            # against) is full of genuinely blank cells - Base No., Base
-            # date, etc. - so this was silently producing corrupted
-            # workbooks that Excel then has to "repair" (dropping the
-            # broken content) every time the file is opened. Skipping
-            # styling on blank cells keeps every written cell valid;
-            # the only visible cost is that a blank cell in the middle
-            # of a data row won't carry the thin grid border its
-            # neighbors have.
-            if val is not None:
+            # per the OOXML schema. Real production data is full of
+            # genuinely blank cells (Base No., Base date, etc.), so this
+            # matters even though small hand-built test data never
+            # triggers it. Skipping styling on blank cells keeps every
+            # written cell valid; the only visible cost is that a blank
+            # cell in the middle of a data row won't carry the thin grid
+            # border its neighbors have.
+            if val is None:
+                continue
+            # Number format is never cosmetic (an unformatted amount or
+            # date serial is unreadable/misleading), so it's always kept.
+            if col == amount_col:
+                cell.number_format = NUM_FORMAT
+            elif col in date_cols:
+                cell.number_format = DATE_FORMAT
+            # Font + border ARE purely cosmetic and are the dominant cost
+            # on a huge sheet (millions of style objects), so they're
+            # skipped past the row-count budget.
+            if apply_style:
                 cell.font = BODY_FONT
                 cell.border = BORDER
-                if col == amount_col:
-                    cell.number_format = NUM_FORMAT
-                elif is_date_col:
-                    cell.number_format = DATE_FORMAT
+        if reporter:
+            reporter.maybe(i - 1, total=n_rows, label="rows written")
+
+    if reporter:
+        reporter.final(n_rows, label="rows written")
+    if not apply_style and report:
+        report(f"  Note: {n_rows:,} rows exceeds the styling budget - per-cell font/border "
+               f"was skipped for speed (values and number formats are unaffected).")
 
     for j, col in enumerate(columns, start=1):
         width = max(14, min(30, len(str(col)) + 4))
@@ -602,7 +645,7 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
 
 
 def build_company_workbook(bucket_label, premium_rows, claims_rows, client_breakdown_df, output_dir,
-                            premium_amount_col, claims_amount_col, run_date=None):
+                            premium_amount_col, claims_amount_col, run_date=None, report=None):
     """
     Write a single insurance-company workbook covering every client for
     that company, with exactly three sheets:
@@ -631,11 +674,11 @@ def build_company_workbook(bucket_label, premium_rows, claims_rows, client_break
 
     ws_premium = wb.create_sheet(PREMIUM_SHEET)
     premium_drop = [claims_amount_col] if claims_amount_col != premium_amount_col else []
-    _write_sheet(ws_premium, premium_rows, amount_col=premium_amount_col, drop_cols=premium_drop)
+    _write_sheet(ws_premium, premium_rows, amount_col=premium_amount_col, drop_cols=premium_drop, report=report)
 
     ws_claims = wb.create_sheet(CLAIMS_SHEET)
     claims_drop = [premium_amount_col] if claims_amount_col != premium_amount_col else []
-    _write_sheet(ws_claims, claims_rows, amount_col=claims_amount_col, drop_cols=claims_drop)
+    _write_sheet(ws_claims, claims_rows, amount_col=claims_amount_col, drop_cols=claims_drop, report=report)
 
     ws_summary = wb.create_sheet(SUMMARY_SHEET)
     premium_total = pd.to_numeric(premium_rows[premium_amount_col], errors="coerce").fillna(0).sum() if len(premium_rows) else 0.0

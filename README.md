@@ -32,6 +32,7 @@ with two collapsible menus, each expanding to its own set of sections:
 | `assets/gims_logo_cropped.png` | GIMS logo shown top-left in the header |
 | `assets/company_logo_cropped.png` | Company logo shown top-right in the header |
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
+| `perf_utils.py` | Background-thread runner for Tkinter, a fast streaming Excel reader, and the write-side style budget used by the generators below - keeps the app responsive on huge (500k+ row) source files. See `PERFORMANCE_NOTES.md`. |
 | `report_generator.py` | Writes each client's raw transaction data into its own Excel file |
 | `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
 | `email_generator.py` | Fills the email template per client; template stored in `templates.json` |

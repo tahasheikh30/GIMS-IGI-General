@@ -2,6 +2,20 @@
 Generates one Excel file per qualifying client, showing the
 Department x Year outstanding-balance breakdown, styled to match
 a standard pivot-table look.
+
+PERFORMANCE NOTE: _write_raw_data_into() is the path most likely to see
+a huge dataframe in practice (a client's own raw transaction rows, which
+on a full production export can run into the hundreds of thousands of
+rows). It's been rewritten to, first, convert the NaN/date handling once,
+vectorized, over whole columns instead of per-cell in a Python loop,
+second, iterate with itertuples() instead of iterrows() (meaningfully
+faster for large frames), and third, skip per-cell font/border past
+perf_utils.STYLE_ROW_THRESHOLD rows. Values and number formats are
+always written correctly either way, only the cosmetic per-cell
+font/border is skipped on very large sheets, since applying an openpyxl
+style object to millions of individual cells is the dominant cost once
+you're past roughly 50,000 rows, well before the pandas iteration itself
+becomes the bottleneck.
 """
 import os
 import re
@@ -9,6 +23,22 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+try:
+    from perf_utils import style_budget_ok, ThrottledReporter
+except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
+    def style_budget_ok(n_rows):
+        return True
+
+    class ThrottledReporter:
+        def __init__(self, *a, **k):
+            pass
+
+        def maybe(self, *a, **k):
+            pass
+
+        def final(self, *a, **k):
+            pass
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -31,11 +61,42 @@ def _write_raw_data_sheet(wb, raw_df):
     _write_raw_data_into(ws, raw_df)
 
 
-def _write_raw_data_into(ws, raw_df):
+def _prepare_for_excel(raw_df, date_cols):
+    """
+    One-time, vectorized cleanup of the whole dataframe before writing,
+    replacing what used to be a per-cell isna()/hasattr() chain executed
+    once for every single cell. All of this runs as pandas C-level
+    column operations, so it stays fast even at a million rows:
+      - datetime columns: NaT -> None, else stripped down to a plain
+        date object (no "00:00:00" time component)
+      - every other column: NaN -> None so openpyxl never sees a NaN
+        float, and any numpy scalar dtype is converted to a plain Python
+        object via astype(object), which openpyxl can always write
+    Returns a NEW dataframe of plain Python objects, safe to iterate with
+    itertuples() and hand straight to ws.cell(value=...).
+    """
+    out = {}
+    for col in raw_df.columns:
+        s = raw_df[col]
+        if col in date_cols:
+            out[col] = s.dt.date.astype(object).where(s.notna(), None)
+        else:
+            s = s.astype(object)
+            out[col] = s.where(pd.notna(s), None)
+    return pd.DataFrame(out, columns=raw_df.columns)
+
+
+def _write_raw_data_into(ws, raw_df, report=None):
     """Write raw_df into an already-created worksheet, starting at A1 with
     no other content on the sheet - shared by both the fallback 'Raw Data'
-    sheet and the clean single-sheet workbook used as native pivot source."""
+    sheet and the clean single-sheet workbook used as native pivot source.
+
+    report: optional callable(str) for progress lines on very large
+    frames (see perf_utils.run_in_background) - safe to leave as None for
+    normal, small-file use."""
     columns = list(raw_df.columns)
+    n_rows = len(raw_df)
+    apply_style = style_budget_ok(n_rows)
 
     # Columns that are genuinely datetime-typed get a clean date-only format
     # (no "00:00:00" time component cluttering every cell).
@@ -47,19 +108,11 @@ def _write_raw_data_into(ws, raw_df):
         c.fill = HEADER_FILL
         c.alignment = Alignment(horizontal="center")
 
-    for i, (_, row) in enumerate(raw_df.iterrows(), start=2):
-        for j, col in enumerate(columns, start=1):
-            val = row[col]
-            is_date_col = col in date_cols
-            # openpyxl can't write pandas Timestamp/NaT or numpy types directly in all cases
-            if pd.isna(val):
-                val = None
-            elif is_date_col and hasattr(val, "date"):
-                val = val.date()  # strip the time component entirely
-            elif hasattr(val, "to_pydatetime"):
-                val = val.to_pydatetime()
-            elif hasattr(val, "item"):  # numpy scalar -> native python
-                val = val.item()
+    clean_df = _prepare_for_excel(raw_df, date_cols)
+    reporter = ThrottledReporter(report, min_rows=25000) if report else None
+
+    for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
+        for j, (col, val) in enumerate(zip(columns, row), start=1):
             cell = ws.cell(row=i, column=j, value=val)
             # Only style a cell that actually has a value - see the matching
             # comment in receivable_generator.py's _write_sheet(). Setting
@@ -69,10 +122,23 @@ def _write_raw_data_into(ws, raw_df):
             # Real transaction data routinely has blank cells, so this
             # matters in production even though the original small test
             # data never happened to trigger it.
-            if val is not None:
+            if val is not None and apply_style:
                 cell.font = BODY_FONT
-                if is_date_col:
+                if col in date_cols:
                     cell.number_format = "DD-MMM-YYYY"
+            elif val is not None and col in date_cols:
+                # Number format is not cosmetic (a raw date serial without
+                # it is unreadable), so it's kept even past the style
+                # budget - only the per-cell Font object is skipped.
+                cell.number_format = "DD-MMM-YYYY"
+        if reporter:
+            reporter.maybe(i - 1, total=n_rows, label="rows written")
+
+    if reporter:
+        reporter.final(n_rows, label="rows written")
+    if not apply_style and report:
+        report(f"  Note: {n_rows:,} rows exceeds the styling budget - per-cell font formatting "
+               f"was skipped for speed (values and number formats are unaffected).")
 
     for j, col in enumerate(columns, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(14, min(30, len(str(col)) + 4))
@@ -80,7 +146,7 @@ def _write_raw_data_into(ws, raw_df):
     ws.freeze_panes = "A2"
 
 
-def write_raw_only_workbook(client_name, raw_df, output_dir):
+def write_raw_only_workbook(client_name, raw_df, output_dir, report=None):
     """
     Write just the client's raw transaction rows to a clean single-sheet
     workbook (header at row 1, nothing else on the sheet) - used as the
@@ -89,19 +155,22 @@ def write_raw_only_workbook(client_name, raw_df, output_dir):
     free of any extra header rows/text matters: Excel's PivotTable source
     range detection works most reliably against a plain rectangular table
     starting at A1.
+
+    report: optional callable(str) for progress on large clients - see
+    perf_utils.run_in_background.
     """
     os.makedirs(output_dir, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Raw Data"
-    _write_raw_data_into(ws, raw_df)
+    _write_raw_data_into(ws, raw_df, report=report)
     filename = f"{safe_filename(client_name)}_OutstandingBalance_Report.xlsx"
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
 
 
-def write_client_report(client_name, pivot_df, output_dir, extra_info=None, raw_df=None):
+def write_client_report(client_name, pivot_df, output_dir, extra_info=None, raw_df=None, report=None):
     """
     Write a single client's Department x Year pivot to its own Excel file.
     extra_info: optional dict of {label: value} shown above the table
@@ -161,7 +230,8 @@ def write_client_report(client_name, pivot_df, output_dir, extra_info=None, raw_
         ws.column_dimensions[get_column_letter(j)].width = 16
 
     if raw_df is not None and len(raw_df) > 0:
-        _write_raw_data_sheet(wb, raw_df)
+        ws_raw = wb.create_sheet("Raw Data")
+        _write_raw_data_into(ws_raw, raw_df, report=report)
 
     filename = f"{safe_filename(client_name)}_OutstandingBalance_Report.xlsx"
     filepath = os.path.join(output_dir, filename)

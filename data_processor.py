@@ -6,13 +6,44 @@ per-client / per-department / per-year aggregates.
 import pandas as pd
 import numpy as np
 
+try:
+    from perf_utils import fast_read_excel_rows, rows_to_dataframe, estimate_row_count
+    _PERF_AVAILABLE = True
+except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
+    _PERF_AVAILABLE = False
+
 REQUIRED_COLS = ["Client/Participant", "Department", "O/s"]
 DEFAULT_DATE_COL_FOR_YEAR = "Issue Date"  # alternative: "Comm.  Date"
 BRANCH_COL = "Branch desc"  # optional column - branch filter is skipped if not present in the source file
 
+# Above this row count, switch from pandas' own read_excel() to
+# openpyxl's read_only streaming reader (perf_utils.fast_read_excel_rows)
+# - on a real ~1,000,000-row export this cuts both load time and peak
+# memory substantially, since read_only mode never builds openpyxl's
+# full in-memory cell object graph before pandas gets to see it.
+FAST_READ_ROW_THRESHOLD = 100000
 
-def load_raw_data(filepath, sheet_name=0):
-    """Load the raw transaction sheet (e.g. 'Sheet1')."""
+
+def load_raw_data(filepath, sheet_name=0, report=None):
+    """
+    Load the raw transaction sheet (e.g. 'Sheet1').
+    report: optional callable(str) for progress on huge files (see
+        perf_utils.run_in_background) - safe to leave as None.
+    Automatically switches to a streaming openpyxl reader for files above
+    FAST_READ_ROW_THRESHOLD rows; small/normal files are unaffected and
+    still go through the same pd.read_excel() path as before.
+    """
+    if _PERF_AVAILABLE:
+        est_rows = estimate_row_count(filepath, sheet_name if isinstance(sheet_name, str) else None)
+        if est_rows and est_rows > FAST_READ_ROW_THRESHOLD:
+            if report:
+                report(f"Large file detected (~{est_rows:,} rows) - using the fast streaming reader.")
+            resolved_sheet = sheet_name if isinstance(sheet_name, str) else 0
+            rows, n_rows = fast_read_excel_rows(filepath, resolved_sheet, report=report)
+            if not rows:
+                return pd.DataFrame()
+            df = rows_to_dataframe(rows, header_row_index=0)
+            return df
     df = pd.read_excel(filepath, sheet_name=sheet_name)
     return df
 

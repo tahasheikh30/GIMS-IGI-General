@@ -80,6 +80,19 @@ import os
 import re
 import pandas as pd
 
+try:
+    from perf_utils import fast_read_excel_rows, estimate_row_count
+    _PERF_AVAILABLE = True
+except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
+    _PERF_AVAILABLE = False
+
+# Above this row count, the final full-sheet read switches from
+# pandas' own read_excel() to openpyxl's read_only streaming reader -
+# the header-row SCAN above (_pick_best_sheet / find_header_row) already
+# only reads a small nrows=25 preview per sheet and stays fast regardless
+# of file size, so only the full read needs this treatment.
+FAST_READ_ROW_THRESHOLD = 100000
+
 # ---------------------------------------------------------------------------
 # Column alias matching
 # ---------------------------------------------------------------------------
@@ -222,7 +235,7 @@ def _pick_best_sheet(filepath, max_scan=25, min_score=3):
     return sheet_name, header_row
 
 
-def load_raw_data(filepath, sheet_name=None):
+def load_raw_data(filepath, sheet_name=None, report=None):
     """
     Load the master receivable sheet, auto-detecting the real header row
     (title/banner rows above it are skipped) and dropping fully-blank
@@ -240,9 +253,17 @@ def load_raw_data(filepath, sheet_name=None):
         directly instead (e.g. for scripted/test use against a file
         that's known to be single-sheet).
 
+    report: optional callable(str) for progress on huge files (see
+        perf_utils.run_in_background) - safe to leave as None.
+
     The dataframe's .attrs["source_sheet"] is set to the sheet actually
     read, so callers (e.g. app.py / receivable_automation.py) can log
     which sheet was auto-selected for transparency.
+
+    Above FAST_READ_ROW_THRESHOLD rows, the full read switches to
+    openpyxl's read_only streaming reader instead of pd.read_excel() -
+    the header-row scan above always stays a cheap 25-row preview either
+    way, so file size only changes how the FULL sheet is pulled in.
     """
     if sheet_name is None:
         sheet_name, header_row = _pick_best_sheet(filepath)
@@ -250,10 +271,19 @@ def load_raw_data(filepath, sheet_name=None):
         preview = pd.read_excel(filepath, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview)
 
-    raw = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
-    columns = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].reset_index(drop=True)
-    data.columns = columns
+    est_rows = estimate_row_count(filepath, sheet_name) if _PERF_AVAILABLE else 0
+    if _PERF_AVAILABLE and est_rows and est_rows > FAST_READ_ROW_THRESHOLD:
+        if report:
+            report(f"Large file detected (~{est_rows:,} rows) - using the fast streaming reader.")
+        rows, _n = fast_read_excel_rows(filepath, sheet_name, report=report)
+        columns = list(rows[header_row])
+        data = pd.DataFrame(rows[header_row + 1:], columns=columns)
+    else:
+        raw = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
+        columns = raw.iloc[header_row].tolist()
+        data = raw.iloc[header_row + 1:].reset_index(drop=True)
+        data.columns = columns
+
     data = data.dropna(how="all").reset_index(drop=True)
     data.attrs["source_sheet"] = sheet_name
     return data
