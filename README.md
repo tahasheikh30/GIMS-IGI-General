@@ -18,7 +18,10 @@ with two collapsible menus, each expanding to its own set of sections:
     drafts/sends the notification emails through your own Outlook account.
     Structured as the same three-tab workflow as Outstanding Premium
     (Upload & Validate → Client + Company Groups → Review & Send Emails).
-  - **Premium Register** — placeholder, reserved for a future module.
+  - **Premium Register** — fully built: matches a co-insurance leader's own
+    policy numbers against IGI's Premium Register using fuzzy digit-run
+    matching, pulls in the matched IGI Policy Number, and flags any
+    unmatched rows (highlighted red) for manual entry.
   - **Claims Register** — placeholder, reserved for a future module.
 
 ## What's included
@@ -41,6 +44,8 @@ with two collapsible menus, each expanding to its own set of sections:
 | `receivable_automation.py` | `load_email_lookup_from_file()` (used by the GUI, reads a separate lookup file) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
+| `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls`), and fuzzy-matches policy numbers between them |
+| `premium_register_generator.py` | Writes the matched-output Excel file, with unmatched rows highlighted for manual entry |
 
 ## Requirements
 
@@ -75,9 +80,8 @@ Register**, **Claims Register**). Both menus start expanded, and each can
 be collapsed independently without affecting the other. The active section
 is highlighted with an accent bar and bold text. All the functionality
 below (Steps 1–3) lives inside **Outstanding Premium**, under General
-Operations — click it in the sidebar if it isn't already selected. Premium
-Register, Claims Register, and Renewal are placeholders reserved for
-future modules.
+Operations — click it in the sidebar if it isn't already selected. Claims
+Register and Renewal are placeholders reserved for future modules.
 
 ### Step 1 — Upload & Filter
 1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
@@ -370,8 +374,87 @@ works on Windows with Outlook installed and signed in — this could only be
 verified here in dry-run mode. Please test a dry run first, then send to
 yourself before using it on real recipients.
 
-**Premium Register and Claims Register**, the other two items under the
-Coinsurance menu, are placeholders reserved for future modules.
+**Claims Register**, the remaining item under the Coinsurance menu, is a
+placeholder reserved for a future module.
+
+## Coinsurance > Premium Register module
+
+Click **Coinsurance** in the sidebar to expand it, then click
+**Premium Register**. This is a single-page workflow (no multi-tab
+notebook, since there's no grouping/email step) with three numbered
+cards: Input Files, Run Matching, and Processing Log.
+
+**What it does:** matches every policy in a co-insurance **leader's** own
+file (their own policy number, e.g. in a column called `NUMS`) against
+IGI's own **Premium Register** (which records the leader's policy number
+back to us in a column such as `Leader#`, alongside our own `Doc Ref #` /
+IGI Policy Number), and pulls in the matched IGI Policy Number wherever a
+confident match is found. Rows that can't be matched confidently are
+flagged so they can be entered into the Premium Register manually,
+instead of guessing — a wrong policy number would be worse than none,
+since someone would act on it.
+
+**Matching is fuzzy, not exact string equality**, since the leader's own
+policy-number format essentially never matches our `Leader#` column
+character-for-character (e.g. `1/114591/25585/11006` vs. our own
+`2691025585/12/2023`). In practice the two numbers reliably share at
+least one distinctive digit run — the policy/endorsement's own numeric
+core — even when everything else around it (separators, prefixes,
+date-like suffixes) differs. Matching works in two stages:
+1. **Blocking** — every register row is indexed by its own digit-run
+   substrings, so a leader value only needs to be compared against a
+   small set of real candidates rather than the entire register (fast
+   even against a ~24k-row register).
+2. **Scoring** — among those candidates, whichever register row shares
+   the longest *complete* digit run (the query's own policy number as a
+   whole token, not a fragment) with the query wins; a generic
+   digits-only similarity ratio is used only as a tiebreaker. A row with
+   no candidates, or whose best candidate doesn't clear the acceptance
+   threshold, is left **Not Matched** rather than forced onto a poor guess.
+
+1. **Input Files**
+   - **Leader's Policy File** — the co-insurance leader's own file
+     (`.xlsx` or `.xls`). Only the policy-number column is identified
+     (matched via an alias list, e.g. `NUMS`, `Policy No`, `Leader Ref
+     No`) — every other column is left exactly as-is and carried through
+     to the output untouched.
+   - A leader's file is very often a **multi-sheet settlement workbook**
+     (e.g. a `Summary` tab, a `Premium Payable` tab, `Claim Rec`/`Prem
+     Rec` tabs, and one or more dated snapshot tabs) rather than one
+     plain sheet — and more than one of those tabs can independently
+     contain a `POLICY NO.`-style column, so column content alone isn't
+     always enough to reliably pick the right one. The right sheet is
+     found **by its own name first** (matched loosely — ignoring spacing
+     and punctuation, so `"Premium Payable"`, `"PremPayable"`, and
+     `"Prem. Payable - AIC"` are all recognized the same way), and only
+     falls back to scanning every sheet's column content if no sheet
+     name is a clear match.
+   - **IGI Premium Register** — our own register (`.xlsx` or `.xls`).
+     The `Leader Ref Number` column (e.g. `Leader#`) and `IGI Policy
+     Number` column (e.g. `Doc Ref #`) are identified the same way. A
+     Crystal Reports export quirk — some register cells carry the
+     column's own caption baked into the value (e.g. `"Leader Ref. No.
+     PL-0720-200501-F01-000053"`) — is automatically stripped.
+   - Both files' real header row is auto-detected even if there are
+     banner/title rows above it, and column-header punctuation (e.g.
+     `"POLICY NO."` vs `"Policy No"`) doesn't need to match exactly —
+     trailing periods are ignored automatically, since real exports from
+     different companies punctuate the same header inconsistently.
+   - Legacy `.xls` files are read via the `xlrd` package if installed;
+     otherwise the app falls back to converting the file with a local
+     LibreOffice install, if one is present on the machine.
+2. **Run Matching** — click **Run Matching**. The Processing Log shows
+   how many rows were loaded from each file and which columns were
+   detected, then the match count and percentage. A **Save As** dialog
+   then lets you choose where to write the output `.xlsx`
+   (default filename: `{LeaderFileName}_PolicyMatched_{DDMMYYYY}.xlsx`).
+3. **Output** — every original column from the leader's file, plus four
+   new columns: `IGI Policy Number`, `Matched Leader Ref (Register)`,
+   `Match Score`, and `Match Status`. Any row with `Match Status` =
+   "Not Matched" has its **entire row highlighted light red**, so it's
+   immediately visible which rows still need to be entered into the
+   Premium Register by hand. A small note below the table summarizes the
+   overall match rate.
 
 ## Customizing the email template
 

@@ -30,6 +30,8 @@ import receivable_email as rve
 import receivable_automation as ra
 import receivable_run_log as rvlog
 import run_log
+import premium_register_processor as prp
+import premium_register_generator as prg
 
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -100,6 +102,10 @@ class BalanceApp(tk.Tk):
         self.receivable_email_lookup = {}
         self.receivable_poc_lookup = {}
         self.receivable_drafts = []
+
+        self.premreg_leader_file = ""
+        self.premreg_register_file = ""
+        self.premreg_result_df = None
 
         self._load_logos()
         self._setup_style()
@@ -485,9 +491,10 @@ class BalanceApp(tk.Tk):
         self.nav_pages["coinsurance_pc_email"] = pc_email_page
         self._build_receivable_page(pc_email_page)
 
-        premium_register_page = self._build_placeholder_page(container, "Premium Register")
+        premium_register_page = ttk.Frame(container)
         premium_register_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["coinsurance_premium_register"] = premium_register_page
+        self._build_premium_register_page(premium_register_page)
 
         claims_register_page = self._build_placeholder_page(container, "Claims Register")
         claims_register_page.grid(row=0, column=0, sticky="nsew")
@@ -920,6 +927,231 @@ class BalanceApp(tk.Tk):
         self._log_loss(f"\nSaved: {output_path}")
         self.status_var.set(f"Loss Ratio report saved: {os.path.basename(output_path)}")
         messagebox.showinfo("Done", f"Loss Ratio report generated successfully:\n{output_path}")
+
+    # ---------- Coinsurance > Premium Register module ----------
+    def _build_premium_register_page(self, parent):
+        """Premium Register (Coinsurance) - matches a co-insurance leader's
+        own policy numbers against IGI's Premium Register and pulls in the
+        matched IGI Policy Number, flagging unmatched rows for manual
+        entry. Single-page workflow (no multi-tab notebook needed, since
+        there's no grouping/email step) - same scrollable numbered-card
+        pattern as the Loss Ratio page."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        PAD_X = 20
+
+        # --- Page header ---
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Premium Register", font=("Segoe UI Semibold", 17, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Match a co-insurance leader's own policy numbers against IGI's Premium "
+                                "Register, and pull in the matched IGI Policy Number automatically.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+
+        info_badge = tk.Frame(header, bg=self.COLOR_SIDEBAR_ACTIVE)
+        info_badge.pack(anchor="w")
+        tk.Label(info_badge, text="Fuzzy digit-run matching \u2014 unmatched rows are flagged red for manual entry, not guessed",
+                 bg=self.COLOR_SIDEBAR_ACTIVE, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
+                 padx=14, pady=8).pack()
+
+        # --- Section 1: Input files ---
+        s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
+        ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
+                            "the file has banner/title rows above it. If a file has several sheets (e.g. a "
+                            "co-insurance leader's own settlement workbook, with separate tabs for Premium "
+                            "Payable, Claim Rec, Prem Rec, monthly snapshots, etc.), the right sheet is found "
+                            "automatically \u2014 by its name first (e.g. \"Premium Payable\", regardless of exact "
+                            "spacing/punctuation), falling back to whichever sheet's own columns look like a "
+                            "policy-number file if no sheet name is a clear match. Column naming (e.g. \"NUMS\" "
+                            "vs \"Policy No.\" vs \"Leader#\") varies by company and is matched via alias lists "
+                            "in premium_register_processor.py.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760,
+                  justify="left").pack(anchor="w", pady=(0, 12))
+
+        leader_row = self._premreg_file_row(
+            s1, "Leader's Policy File",
+            "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched against our Leader Ref Number. Auto-detects the \"Premium Payable\" sheet if the file has multiple tabs.",
+        )
+        self.premreg_leader_icon, self.premreg_leader_name_var = leader_row[0], leader_row[1]
+        self._make_pill_button(leader_row[2], "Browse...", self._browse_premreg_leader_file,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+
+        register_row = self._premreg_file_row(
+            s1, "IGI Premium Register",
+            "Our own register \u2014 carries the leader's reference (Leader#) alongside our IGI Policy Number (Doc Ref #).",
+        )
+        self.premreg_register_icon, self.premreg_register_name_var = register_row[0], register_row[1]
+        self._make_pill_button(register_row[2], "Browse...", self._browse_premreg_register_file,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+
+        # --- Section 2: Run matching ---
+        s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
+        ttk.Label(s2, text="Every original column from the leader's file is preserved, plus the matched "
+                            "IGI Policy Number, the matched register reference, a match score, and a "
+                            "Matched/Not Matched status.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
+        run_btn = tk.Button(
+            s2, text="Run Matching", command=self._run_premium_register_match,
+            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
+            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
+            relief="flat", padx=18, pady=9, cursor="hand2", borderwidth=0,
+        )
+        run_btn.pack(anchor="w")
+        self.premreg_summary_var = tk.StringVar(value="")
+        ttk.Label(s2, textvariable=self.premreg_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 0))
+
+        # --- Section 3: Log ---
+        s3 = self._loss_section_card(body, "3", "Processing Log", PAD_X, expand_bottom=True)
+        self.premreg_log = scrolledtext.ScrolledText(s3, height=10, font=("Consolas", 9),
+                                                       relief="solid", borderwidth=1)
+        self.premreg_log.pack(fill="both", expand=True)
+
+    def _premreg_file_row(self, parent, title, subtitle):
+        """One file-picker card, matching the Loss Ratio Individual-mode
+        card style. Returns (icon_label, name_var, button_holder_frame)."""
+        card = tk.Frame(parent, bg=self.COLOR_PANEL_ALT,
+                         highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        card.pack(fill="x", pady=(0, 10))
+        inner = tk.Frame(card, bg=self.COLOR_PANEL_ALT)
+        inner.pack(fill="x", padx=16, pady=14)
+
+        icon = tk.Label(inner, text="\u25A4", font=("Segoe UI", 20),
+                         bg=self.COLOR_PANEL_ALT, fg=self.COLOR_BORDER, width=2)
+        icon.pack(side="left", padx=(0, 14))
+
+        text_col = tk.Frame(inner, bg=self.COLOR_PANEL_ALT)
+        text_col.pack(side="left", fill="x", expand=True)
+        tk.Label(text_col, text=title, font=("Segoe UI", 10, "bold"),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_TEXT, anchor="w").pack(fill="x", anchor="w")
+        name_var = tk.StringVar(value="No file selected")
+        tk.Label(text_col, textvariable=name_var, font=("Segoe UI", 9),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED, anchor="w",
+                 wraplength=420, justify="left").pack(fill="x", anchor="w")
+        tk.Label(text_col, text=subtitle, font=("Segoe UI", 8),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED, anchor="w",
+                 wraplength=420, justify="left").pack(fill="x", anchor="w", pady=(2, 0))
+
+        btn_col = tk.Frame(inner, bg=self.COLOR_PANEL_ALT)
+        btn_col.pack(side="right", padx=(14, 0))
+        return icon, name_var, btn_col
+
+    def _browse_premreg_leader_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.premreg_leader_file = path
+            self.premreg_leader_name_var.set(os.path.basename(path))
+            self.premreg_leader_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _browse_premreg_register_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.premreg_register_file = path
+            self.premreg_register_name_var.set(os.path.basename(path))
+            self.premreg_register_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _log_premreg(self, msg):
+        self.premreg_log.insert("end", str(msg) + "\n")
+        self.premreg_log.see("end")
+
+    def _run_premium_register_match(self):
+        if not self.premreg_leader_file:
+            messagebox.showerror("No leader file selected", "Browse to the leader's policy file first.")
+            return
+        if not self.premreg_register_file:
+            messagebox.showerror("No register file selected", "Browse to IGI's Premium Register file first.")
+            return
+        if not os.path.exists(self.premreg_leader_file):
+            messagebox.showerror("File not found", f"Could not find:\n{self.premreg_leader_file}")
+            return
+        if not os.path.exists(self.premreg_register_file):
+            messagebox.showerror("File not found", f"Could not find:\n{self.premreg_register_file}")
+            return
+
+        self.premreg_log.delete("1.0", "end")
+        self.premreg_summary_var.set("")
+        self._log_premreg(f"Leader file:   {os.path.basename(self.premreg_leader_file)}")
+        self._log_premreg(f"Register file: {os.path.basename(self.premreg_register_file)}\n")
+        self.status_var.set("Matching policy numbers...")
+        self.update_idletasks()
+
+        try:
+            self._log_premreg("Loading leader file...")
+            leader_df, nums_col = prp.load_leader_file(self.premreg_leader_file)
+            self._log_premreg(f"  {len(leader_df)} row(s) loaded. Policy-number column detected as '{nums_col}'.")
+
+            self._log_premreg("Loading IGI Premium Register...")
+            register_df, leader_ref_col, igi_policy_col = prp.load_register_file(self.premreg_register_file)
+            self._log_premreg(f"  {len(register_df)} row(s) loaded. Leader Ref column='{leader_ref_col}', "
+                               f"IGI Policy Number column='{igi_policy_col}'.")
+
+            self._log_premreg("\nMatching...")
+            result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col)
+        except Exception as e:
+            self._log_premreg(f"\nERROR: {e}")
+            messagebox.showerror("Matching failed", str(e))
+            self.status_var.set("Premium Register matching failed.")
+            return
+
+        self.premreg_result_df = result
+        matched = int((result["Match Status"] == "Matched").sum())
+        total = len(result)
+        pct = (matched / total) if total else 0
+        self._log_premreg(f"\nMatched {matched} of {total} ({pct:.1%}).")
+        if matched < total:
+            self._log_premreg(f"{total - matched} row(s) unmatched - these will be highlighted red in the output for manual entry.")
+
+        self.premreg_summary_var.set(f"Matched {matched} / {total} ({pct:.1%})")
+        self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
+
+        default_name = prg.build_output_filename(self.premreg_leader_file)
+        output_path = filedialog.asksaveasfilename(
+            title="Save Premium Register Match Results As",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=default_name,
+        )
+        if not output_path:
+            self._log_premreg("\nSave cancelled - results were not written to a file (still available above).")
+            return
+
+        try:
+            prg.build_match_output(result, output_path, leader_source_filename=self.premreg_leader_file)
+        except Exception as e:
+            self._log_premreg(f"\nERROR writing output file: {e}")
+            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{e}")
+            return
+
+        self._log_premreg(f"\nSaved: {output_path}")
+        self.status_var.set(f"Premium Register saved: {os.path.basename(output_path)}")
+        messagebox.showinfo("Done", f"Matched {matched} of {total} ({pct:.1%}).\n\nSaved to:\n{output_path}")
 
     # ---------- Coinsurance > Premium/Claims Email Automation module ----------
     def _build_receivable_page(self, parent):

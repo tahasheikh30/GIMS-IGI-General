@@ -3,3 +3,4 @@ openpyxl>=3.1
 pdfplumber>=0.11
 pywin32>=305 ; sys_platform == "win32"
 Pillow>=10.0
+xlrd>=2.0.1  # optional: only needed to read legacy .xls Premium Register files directly (falls back to a local LibreOffice conversion if not installed)
