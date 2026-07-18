@@ -61,9 +61,18 @@ def _write_raw_data_into(ws, raw_df):
             elif hasattr(val, "item"):  # numpy scalar -> native python
                 val = val.item()
             cell = ws.cell(row=i, column=j, value=val)
-            cell.font = BODY_FONT
-            if is_date_col and val is not None:
-                cell.number_format = "DD-MMM-YYYY"
+            # Only style a cell that actually has a value - see the matching
+            # comment in receivable_generator.py's _write_sheet(). Setting
+            # .font on a still-valueless cell forces openpyxl to write it out
+            # as an invalid empty numeric cell (<c t="n"> with no <v>),
+            # which Excel then "repairs" (silently drops) on every open.
+            # Real transaction data routinely has blank cells, so this
+            # matters in production even though the original small test
+            # data never happened to trigger it.
+            if val is not None:
+                cell.font = BODY_FONT
+                if is_date_col:
+                    cell.number_format = "DD-MMM-YYYY"
 
     for j, col in enumerate(columns, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(14, min(30, len(str(col)) + 4))

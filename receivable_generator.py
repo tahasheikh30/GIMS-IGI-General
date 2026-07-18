@@ -46,6 +46,26 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NUM_FORMAT = "#,##0;(#,##0);-"
 DATE_FORMAT = "DD-MMM-YYYY"
 
+
+def _write_text_safe(cell):
+    """
+    Guard against a real, confirmed data-quality issue in the source
+    export: a handful of rows have junk placeholder text in columns like
+    "Leader Ref. No" (e.g. "=../-", "====-=-") instead of a real
+    reference number. openpyxl auto-detects ANY string value starting
+    with "=" as a live Excel formula - and since that junk text isn't
+    valid formula syntax, Excel then flags the whole workbook as
+    containing "unreadable content" and silently strips it on open
+    (the repair prompt). None of these pass-through data cells are ever
+    meant to hold a real formula, so force the cell back to plain text
+    whenever openpyxl auto-classified it as one - this preserves the
+    original text exactly (no stray leading apostrophe) with zero
+    functional loss.
+    """
+    if cell.data_type == "f":
+        cell.data_type = "s"
+    return cell
+
 # ---- Summary "dashboard" styling ----
 NAVY = "1F4E78"
 NAVY_DARK = "163A5C"
@@ -139,12 +159,31 @@ def _write_sheet(ws, df, amount_col, drop_cols=None):
             elif hasattr(val, "item"):
                 val = val.item()
             cell = ws.cell(row=i, column=j, value=val)
-            cell.font = BODY_FONT
-            cell.border = BORDER
-            if col == amount_col and val is not None:
-                cell.number_format = NUM_FORMAT
-            elif is_date_col and val is not None:
-                cell.number_format = DATE_FORMAT
+            # IMPORTANT: only style a cell that actually has a value. In
+            # openpyxl, calling ws.cell(value=None) alone writes nothing
+            # to the sheet - the cell simply doesn't exist in the saved
+            # file, which is correct and harmless. But if ANY other
+            # attribute (font, border, fill, ...) is then set on that
+            # same still-valueless cell, openpyxl is forced to
+            # materialize it - and it gets written out as an empty
+            # numeric cell (<c t="n"> with no <v>), which is invalid
+            # per the OOXML schema. Real production data (unlike the
+            # small hand-built sample this module was first tested
+            # against) is full of genuinely blank cells - Base No., Base
+            # date, etc. - so this was silently producing corrupted
+            # workbooks that Excel then has to "repair" (dropping the
+            # broken content) every time the file is opened. Skipping
+            # styling on blank cells keeps every written cell valid;
+            # the only visible cost is that a blank cell in the middle
+            # of a data row won't carry the thin grid border its
+            # neighbors have.
+            if val is not None:
+                cell.font = BODY_FONT
+                cell.border = BORDER
+                if col == amount_col:
+                    cell.number_format = NUM_FORMAT
+                elif is_date_col:
+                    cell.number_format = DATE_FORMAT
 
     for j, col in enumerate(columns, start=1):
         width = max(14, min(30, len(str(col)) + 4))
@@ -185,21 +224,62 @@ def _style_chart_frame(chart):
     )
 
 
-def _apply_outer_border(ws, min_row, max_row, min_col, max_col, color=CARD_BORDER):
-    """Draw a rectangular outer border around a (possibly merged) cell
-    block. Openpyxl gives merged ranges no border of their own, so every
-    boundary cell needs its own Border with only the outward-facing
-    side(s) set."""
+def _apply_outer_border(ws, anchor_rows, top_row, bottom_row, col, color=CARD_BORDER):
+    """Draw an outer border around a block made of several stacked
+    single-column merges (e.g. a KPI card: an accent-strip row, a label
+    row, a 2-row value merge, and a subtitle row, each merged across the
+    same `col`:right_col span). `anchor_rows` lists the row of each
+    merge's own top-left anchor cell (e.g. the value merge spanning
+    top_row+2:top_row+3 has only ONE anchor, at top_row+2 - top_row+3
+    itself has no cell of its own to style).
+
+    Deliberately only ever touches the anchor cell of each merge - see
+    _blank_styled_cell's docstring for why touching any other cell in a
+    merged range is unsafe."""
     thin = Side(style="thin", color=color)
-    for r in range(min_row, max_row + 1):
-        for c in range(min_col, max_col + 1):
-            cell = ws.cell(row=r, column=c)
-            cell.border = Border(
-                left=thin if c == min_col else None,
-                right=thin if c == max_col else None,
-                top=thin if r == min_row else None,
-                bottom=thin if r == max_row else None,
-            )
+    for r in anchor_rows:
+        cell = _blank_styled_cell(ws, r, col)
+        existing = cell.border
+        cell.border = Border(
+            left=thin, right=thin,
+            top=thin if r == top_row else existing.top,
+            bottom=thin if r == bottom_row else existing.bottom,
+        )
+
+
+def _blank_styled_cell(ws, row, column):
+    """
+    Return the cell at (row, column), giving it a single invisible space
+    as its value if it doesn't already have a real one.
+
+    IMPORTANT: only ever call this on a merge's own top-left ANCHOR cell
+    (or a cell that isn't part of any merge at all) - never on one of the
+    other cells absorbed into a merged range. Once a range is merged,
+    openpyxl turns every cell in it other than the anchor into a
+    read-only MergedCell proxy whose .value can never be set (assigning
+    to it raises AttributeError), so there is no way to give those cells
+    real content. Fortunately there's also no need to: in Excel, a
+    merged block's fill/border/alignment are entirely driven by its
+    anchor cell - the merged block renders as a single visual cell, so
+    styling only the anchor is both sufficient and correct.
+
+    The underlying problem this works around: openpyxl only actually
+    WRITES a cell that nobody has ever assigned a real value to if some
+    other attribute (fill, border, font, alignment...) is then set on it
+    too - and when it does, it serializes that cell as an empty numeric
+    cell (<c t="n"> with no <v>), which is invalid per the OOXML spec.
+    That's exactly what makes Excel show its "we found a problem with
+    some content" repair prompt every time the file is opened - it
+    silently strips those cells back out on load. A single space
+    character is visually indistinguishable from genuinely blank against
+    any fill color, so using it as a placeholder on the (always real,
+    always settable) anchor cell keeps it validly serializable without
+    changing how the sheet looks.
+    """
+    cell = ws.cell(row=row, column=column)
+    if cell.value is None:
+        cell.value = " "
+    return cell
 
 
 def _write_kpi_card(ws, top_row, left_col, col_span, label, value_formula, fill, accent_hex,
@@ -207,12 +287,22 @@ def _write_kpi_card(ws, top_row, left_col, col_span, label, value_formula, fill,
     """A single dashboard KPI card: a thin accent strip, a small caps
     label, and a large value - occupying `col_span` columns starting at
     `left_col`, 5 rows tall starting at `top_row`. Returns the cell
-    holding the value (so callers can reference it in later formulas)."""
+    holding the value (so callers can reference it in later formulas).
+
+    Each row-tier is its own single-row (or, for the value, 2-row)
+    merge spanning left_col:right_col - so within any given tier, only
+    left_col ever holds a real, stylable cell; right_col is always
+    absorbed into that same merge. Every fill/alignment/border call
+    below is therefore applied to left_col only - see
+    _blank_styled_cell's docstring for why this is both necessary
+    (touching a merged-away cell either crashes or corrupts the file)
+    and sufficient (Excel renders a merged block's styling from its
+    anchor alone)."""
     right_col = left_col + col_span - 1
     accent_fill = PatternFill("solid", start_color=accent_hex, end_color=accent_hex)
 
     ws.merge_cells(start_row=top_row, start_column=left_col, end_row=top_row, end_column=right_col)
-    ws.cell(row=top_row, column=left_col).fill = accent_fill
+    _blank_styled_cell(ws, top_row, left_col).fill = accent_fill
     ws.row_dimensions[top_row].height = 5
 
     ws.merge_cells(start_row=top_row + 1, start_column=left_col, end_row=top_row + 1, end_column=right_col)
@@ -230,15 +320,12 @@ def _write_kpi_card(ws, top_row, left_col, col_span, label, value_formula, fill,
 
     bottom_row = top_row + 4
     ws.merge_cells(start_row=bottom_row, start_column=left_col, end_row=bottom_row, end_column=right_col)
-    sub_cell = ws.cell(row=bottom_row, column=left_col, value=sub_text or "")
+    sub_cell = ws.cell(row=bottom_row, column=left_col, value=sub_text or " ")
     sub_cell.font = KPI_SUB_FONT
     sub_cell.fill = fill
     sub_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
-    for r in (top_row + 1, top_row + 2, top_row + 3, bottom_row):
-        for c in range(left_col, right_col + 1):
-            ws.cell(row=r, column=c).fill = fill
-    _apply_outer_border(ws, top_row, bottom_row, left_col, right_col)
+    _apply_outer_border(ws, [top_row, top_row + 1, top_row + 2, bottom_row], top_row, bottom_row, left_col)
 
     return val_cell
 
@@ -286,15 +373,15 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     subtitle = f"{num_clients} client{'s' if num_clients != 1 else ''}   \u2022   generated {date.today().strftime('%d-%b-%Y')}"
     ws.cell(row=4, column=2, value=subtitle).font = Font(name="Arial", size=10, color="D6E4F0")
     for r in (2, 3, 4):
-        for c in range(2, LAST_BANNER_COL + 1):
-            ws.cell(row=r, column=c).fill = BANNER_FILL
-            ws.cell(row=r, column=c).alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        cell = ws.cell(row=r, column=2)
+        cell.fill = BANNER_FILL
+        cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
     ws.row_dimensions[2].height = 18
     ws.row_dimensions[3].height = 26
     ws.row_dimensions[4].height = 18
     # slim accent strip under the banner
     ws.merge_cells(start_row=5, start_column=2, end_row=5, end_column=LAST_BANNER_COL)
-    ws.cell(row=5, column=2).fill = BANNER_ACCENT_FILL
+    _blank_styled_cell(ws, 5, 2).fill = BANNER_ACCENT_FILL
     ws.row_dimensions[5].height = 4
 
     # ---- KPI cards (values reference the per-client table below via formula) ----
