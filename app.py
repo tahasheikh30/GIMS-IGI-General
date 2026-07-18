@@ -1025,6 +1025,9 @@ class BalanceApp(tk.Tk):
         ttk.Label(s2, textvariable=self.premreg_summary_var, foreground=self.COLOR_SUCCESS,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 0))
 
+        self.premreg_progress = perf_utils.ProgressBarPanel(s2)
+        self.premreg_progress.frame.pack(fill="x", pady=(10, 0))
+
         # --- Section 3: Log ---
         s3 = self._loss_section_card(body, "3", "Processing Log", PAD_X, expand_bottom=True)
         self.premreg_log = scrolledtext.ScrolledText(s3, height=10, font=("Consolas", 9),
@@ -1101,6 +1104,7 @@ class BalanceApp(tk.Tk):
         self._log_premreg(f"Leader file:   {os.path.basename(self.premreg_leader_file)}")
         self._log_premreg(f"Register file: {os.path.basename(self.premreg_register_file)}\n")
         self.status_var.set("Matching policy numbers...")
+        self.premreg_progress.start(total=None, text="Loading files...")
 
         leader_file = self.premreg_leader_file
         register_file = self.premreg_register_file
@@ -1116,7 +1120,8 @@ class BalanceApp(tk.Tk):
                    f"IGI Policy Number column='{igi_policy_col}'.")
 
             report(f"\nMatching {len(leader_df):,} leader row(s) against {len(register_df):,} register row(s)...")
-            result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col)
+            report.progress(0, len(leader_df), text=f"Matching 0 / {len(leader_df):,} leader row(s)")
+            result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col, report=report)
             return result
 
         def on_done(result):
@@ -1129,6 +1134,7 @@ class BalanceApp(tk.Tk):
                 self._log_premreg(f"{total - matched} row(s) unmatched - these will be highlighted red in the output for manual entry.")
 
             self.premreg_summary_var.set(f"Matched {matched} / {total} ({pct:.1%})")
+            self.premreg_progress.finish(f"Matched {matched} / {total} ({pct:.1%}).")
             self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
 
             default_name = prg.build_output_filename(leader_file)
@@ -1144,6 +1150,7 @@ class BalanceApp(tk.Tk):
             self._save_premreg_output(result, output_path, leader_file, matched, total, pct)
 
         def on_error(exc):
+            self.premreg_progress.finish("Matching failed - see the Processing Log for details.")
             self._log_premreg(f"\nERROR: {exc}")
             messagebox.showerror("Matching failed", str(exc))
             self.status_var.set("Premium Register matching failed.")
@@ -1151,6 +1158,7 @@ class BalanceApp(tk.Tk):
         perf_utils.run_in_background(
             self, worker,
             on_progress=lambda msg: self._log_premreg(msg),
+            on_progress_value=self.premreg_progress.update,
             on_done=on_done, on_error=on_error,
         )
 
@@ -1159,22 +1167,27 @@ class BalanceApp(tk.Tk):
         openpyxl write (see premium_register_generator.build_match_output)
         - kept on a second background pass so a huge match result doesn't
         freeze the save step either."""
+        self.premreg_progress.start(total=len(result), text=f"Writing 0 / {len(result):,} row(s)")
+
         def worker(report):
             report(f"Writing {len(result):,} row(s) to {os.path.basename(output_path)}...")
-            prg.build_match_output(result, output_path, leader_source_filename=leader_file)
+            prg.build_match_output(result, output_path, leader_source_filename=leader_file, report=report)
 
         def on_done(_):
+            self.premreg_progress.finish(f"Saved: {os.path.basename(output_path)}")
             self._log_premreg(f"\nSaved: {output_path}")
             self.status_var.set(f"Premium Register saved: {os.path.basename(output_path)}")
             messagebox.showinfo("Done", f"Matched {matched} of {total} ({pct:.1%}).\n\nSaved to:\n{output_path}")
 
         def on_error(exc):
+            self.premreg_progress.finish("Save failed - see the Processing Log for details.")
             self._log_premreg(f"\nERROR writing output file: {exc}")
             messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{exc}")
 
         perf_utils.run_in_background(
             self, worker,
             on_progress=lambda msg: self._log_premreg(msg),
+            on_progress_value=self.premreg_progress.update,
             on_done=on_done, on_error=on_error,
         )
 
@@ -1305,6 +1318,9 @@ class BalanceApp(tk.Tk):
                                   "company); every company with \"OFC\" in its name is pooled into a single shared \"OFC\" file.",
                           style="Muted.TLabel", font=("Segoe UI", 9))
         hint.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self.receivable_reports_progress = perf_utils.ProgressBarPanel(f)
+        self.receivable_reports_progress.frame.pack(fill="x", padx=12, pady=(0, 8))
 
         tree_frame = ttk.Frame(f)
         tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -1550,6 +1566,7 @@ class BalanceApp(tk.Tk):
         source_df = getattr(self, "receivable_filtered_df", self.receivable_clean_df)
         groups = self.receivable_groups
         self.status_var.set(f"Generating {len(groups)} Receivable workbook(s)...")
+        self.receivable_reports_progress.start(total=len(groups), text=f"0 / {len(groups)} workbook(s) generated")
 
         def worker(report):
             filename_lookup = {}
@@ -1558,6 +1575,7 @@ class BalanceApp(tk.Tk):
             for i, (bucket_label, g) in enumerate(groups.items(), start=1):
                 n_rows = len(g["premium_rows"]) + len(g["claims_rows"])
                 report(f"[{i}/{len(groups)}] {bucket_label} ({n_rows:,} row(s))")
+                report.progress(i - 1, len(groups), text=f"Generating: {bucket_label} ({i}/{len(groups)})")
                 try:
                     breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
                     fp = rvg.build_company_workbook(
@@ -1569,11 +1587,13 @@ class BalanceApp(tk.Tk):
                     filename_lookup[bucket_label] = os.path.basename(fp)
                 except Exception as e:
                     errors.append(f"{bucket_label}: {e}")
+                report.progress(i, len(groups), text=f"{i} / {len(groups)} workbook(s) generated")
             return generated, filename_lookup, errors
 
         def on_done(result):
             generated, filename_lookup, errors = result
             self.receivable_filename_lookup = filename_lookup
+            self.receivable_reports_progress.finish(f"Done: {len(generated)} / {len(groups)} workbook(s) generated.")
             msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
             if errors:
                 msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
@@ -1581,11 +1601,13 @@ class BalanceApp(tk.Tk):
             self.status_var.set(f"Generated {len(generated)} Receivable workbook(s).")
 
         def on_error(exc):
+            self.receivable_reports_progress.finish("Failed - see the Activity Log for details.")
             messagebox.showerror("Report generation failed", str(exc))
             self.status_var.set("Report generation failed.")
 
         perf_utils.run_in_background(
             self, worker,
+            on_progress_value=self.receivable_reports_progress.update,
             on_progress=lambda msg: self.log_receivable(msg),
             on_done=on_done, on_error=on_error,
         )
@@ -1929,6 +1951,13 @@ class BalanceApp(tk.Tk):
         self.results_summary_var = tk.StringVar(value="Run Analyze on tab 1 to see qualifying clients here.")
         ttk.Label(top, textvariable=self.results_summary_var, style="Muted.TLabel").pack(side="right")
 
+        # Progress bar for "Generate Excel Reports" - stays packed in place
+        # (never appears/disappears, just resets to empty between runs) and
+        # is driven purely off the background worker thread's own progress
+        # reports, so it never touches or slows down the generation itself.
+        self.reports_progress = perf_utils.ProgressBarPanel(f)
+        self.reports_progress.frame.pack(fill="x", padx=12, pady=(0, 8))
+
         tree_frame = ttk.Frame(f)
         tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
@@ -2217,6 +2246,7 @@ class BalanceApp(tk.Tk):
         filtered_df = self.filtered_df
         output_dir = self.output_dir
         self.status_var.set(f"Generating {len(clients)} report(s)...")
+        self.reports_progress.start(total=len(clients), text=f"0 / {len(clients)} report(s) generated")
 
         def worker(report):
             # win32com requires COM to be initialized on whichever thread
@@ -2245,6 +2275,7 @@ class BalanceApp(tk.Tk):
                 for i, client in enumerate(clients, start=1):
                     raw_rows = dp.get_client_raw_rows(filtered_df, client)
                     report(f"[{i}/{len(clients)}] {client} ({len(raw_rows):,} row(s))")
+                    report.progress(i - 1, len(clients), text=f"Generating: {client} ({i}/{len(clients)})")
                     fp = None
                     if use_native:
                         try:
@@ -2258,6 +2289,7 @@ class BalanceApp(tk.Tk):
                         pivot_df = dp.client_pivot_table(filtered_df, client)
                         fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
                     generated.append(fp)
+                    report.progress(i, len(clients), text=f"{i} / {len(clients)} report(s) generated")
             finally:
                 pivot_native.stop_excel(excel_app)
                 if com_initialized:
@@ -2267,6 +2299,7 @@ class BalanceApp(tk.Tk):
 
         def on_done(result):
             generated, use_native, native_failures = result
+            self.reports_progress.finish(f"Done: {len(generated)} / {len(clients)} report(s) generated.")
             msg = f"Generated {len(generated)} report(s) in:\n{self.output_dir}"
             if not pivot_native.EXCEL_AVAILABLE:
                 msg += ("\n\nMicrosoft Excel/pywin32 wasn't detected on this machine, so reports use a "
@@ -2281,12 +2314,14 @@ class BalanceApp(tk.Tk):
             self.status_var.set(f"Generated {len(generated)} report(s).")
 
         def on_error(exc):
+            self.reports_progress.finish("Failed - see the Activity Log for details.")
             messagebox.showerror("Report generation failed", str(exc))
             self.status_var.set("Report generation failed.")
 
         perf_utils.run_in_background(
             self, worker,
             on_progress=lambda msg: self.log(self.setup_log, msg),
+            on_progress_value=self.reports_progress.update,
             on_done=on_done, on_error=on_error,
         )
 

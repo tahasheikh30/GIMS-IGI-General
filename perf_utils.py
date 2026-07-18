@@ -3,7 +3,7 @@ Performance utilities shared across GIMS modules, added to keep the app
 responsive on huge source files (real production exports have been seen
 up to ~1,000,000 rows) and to speed up both the read and write paths.
 
-Two independent problems are solved here:
+Three independent problems are solved here:
 
 1. THE GUI FREEZES ON BIG FILES
    Every "Load & Validate", "Analyze", and "Generate Reports" button in
@@ -36,6 +36,16 @@ Two independent problems are solved here:
    (values and number formats are always kept - only the cosmetic
    per-cell font/border is skipped past the threshold, and a note is
    logged so this is never a silent behavior change).
+
+3. NO VISUAL FEEDBACK WHILE GENERATING EXCEL FILES
+   ProgressBarPanel is a small ttk.Progressbar + status label meant to
+   sit directly under a "Generate Excel Reports" button. It is driven
+   entirely off the same background thread used to solve problem 1, so
+   it never affects the flow of the application - the worker thread
+   still does the real work at full speed; the progress bar is purely a
+   read-only reflection of how far along it is, updated a few times a
+   second at most (see Reporter.progress below), never something the
+   worker waits on.
 """
 import queue
 import threading
@@ -48,19 +58,43 @@ import openpyxl
 # 1. Background task runner for Tkinter
 # ---------------------------------------------------------------------------
 
-def run_in_background(widget, worker, on_progress=None, on_done=None, on_error=None,
-                       busy_widgets=None, poll_ms=80):
+class Reporter:
+    """
+    Passed into every worker(report) function. Calling it directly,
+    report("some status line"), behaves exactly as before (pushes a text
+    line onto the log). report.progress(current, total, text=None)
+    additionally drives a numeric progress bar via on_progress_value,
+    completely independent of the text log - a worker can call either,
+    both, or neither, and existing worker functions that only ever call
+    report("...") keep working unchanged.
+    """
+    def __init__(self, q):
+        self._q = q
+
+    def __call__(self, msg):
+        self._q.put(("progress", msg))
+
+    def progress(self, current, total=None, text=None):
+        self._q.put(("progress_value", (current, total, text)))
+
+
+def run_in_background(widget, worker, on_progress=None, on_progress_value=None,
+                       on_done=None, on_error=None, busy_widgets=None, poll_ms=80):
     """
     Run `worker(report)` on a background thread so the Tkinter main loop
     never blocks, then marshal progress/result/errors back onto the main
     thread safely.
 
-    worker(report): your long-running function. Call report("some status
-        line") from inside it at reasonable intervals (e.g. every 5,000-
-        50,000 rows) to surface progress. Return whatever result value
-        you want handed to on_done.
-    on_progress(msg): called on the MAIN thread for every report() call.
-        Typical use: append the line to a ScrolledText log.
+    worker(report): your long-running function. report is a Reporter
+        (see above) - call report("some status line") for text progress,
+        and/or report.progress(i, total) to drive a progress bar. Return
+        whatever result value you want handed to on_done.
+    on_progress(msg): called on the MAIN thread for every report("...")
+        call. Typical use: append the line to a ScrolledText log.
+    on_progress_value(current, total, text): called on the MAIN thread
+        for every report.progress(...) call - typical use: update a
+        ProgressBarPanel. total may be None (indeterminate/"busy" mode);
+        text may be None (leave the panel's current label as-is).
     on_done(result): called on the MAIN thread once worker() returns
         normally, with its return value.
     on_error(exc): called on the MAIN thread if worker() raises. If not
@@ -82,8 +116,7 @@ def run_in_background(widget, worker, on_progress=None, on_done=None, on_error=N
             pass
 
     def _worker_wrapper():
-        def report(msg):
-            q.put(("progress", msg))
+        report = Reporter(q)
         try:
             result = worker(report)
             q.put(("done", result))
@@ -97,6 +130,9 @@ def run_in_background(widget, worker, on_progress=None, on_done=None, on_error=N
                 kind, payload = q.get_nowait()
                 if kind == "progress" and on_progress:
                     on_progress(payload)
+                elif kind == "progress_value" and on_progress_value:
+                    current, total, text = payload
+                    on_progress_value(current, total, text)
                 elif kind in ("done", "error"):
                     drained_terminal = (kind, payload)
         except queue.Empty:
@@ -133,6 +169,16 @@ class ThrottledReporter:
     every `min_rows` rows processed) - reporting on literally every row
     of a million-row loop would itself become a bottleneck and would
     flood the log widget with unreadable noise.
+
+    Deliberately text-only (does not also drive a numeric progress bar):
+    the callers that write a single huge sheet are themselves usually
+    called from inside a per-file loop in app.py that already drives the
+    progress bar at file-level granularity (see ProgressBarPanel below).
+    Mixing "row N of this file" and "file i of N files" onto the same
+    bar would make it jump backwards every time a new file starts, so
+    only one of the two scales is allowed to own the bar at a time - the
+    file-level one, since that's what "Generate Excel Reports" naturally
+    means from the user's side.
     """
     def __init__(self, report_fn, min_interval=0.3, min_rows=5000):
         self._report = report_fn
@@ -155,6 +201,152 @@ class ThrottledReporter:
 
     def final(self, row_index, label="rows"):
         self._report(f"  ... {row_index:,} {label} (done)")
+
+
+class RowProgress:
+    """
+    Throttled row-level progress for a SINGLE Excel write that has no
+    outer per-file loop around it (e.g. Premium Register's one output
+    file, or Loss Ratio's one summary workbook) - drives both the text
+    log and, when the wrapped callback is a Reporter, the numeric
+    progress bar directly off row count. Use ThrottledReporter instead
+    when the write sits inside an outer per-file loop that already owns
+    the bar at file-level granularity - see the note on ThrottledReporter
+    above for why the two are kept separate.
+    """
+    def __init__(self, report_fn, total, min_interval=0.3, min_rows=2000, label="rows"):
+        self._report = report_fn
+        self._total = total or 0
+        self._label = label
+        self._min_interval = min_interval
+        self._min_rows = min_rows
+        self._last_time = 0.0
+        self._last_row = 0
+
+    def maybe(self, row_index):
+        now = time.monotonic()
+        if row_index - self._last_row < self._min_rows and now - self._last_time < self._min_interval:
+            return
+        self._last_row = row_index
+        self._last_time = now
+        pct = (row_index / self._total * 100) if self._total else 0
+        self._report(f"  ... {row_index:,} / {self._total:,} {self._label} ({pct:.0f}%)")
+        if hasattr(self._report, "progress"):
+            self._report.progress(row_index, self._total,
+                                   text=f"Writing {self._label}: {row_index:,} / {self._total:,}")
+
+    def final(self):
+        self._report(f"  ... {self._total:,} {self._label} (done)")
+        if hasattr(self._report, "progress") and self._total:
+            self._report.progress(self._total, self._total, text=f"{self._total:,} {self._label} written")
+
+
+# ---------------------------------------------------------------------------
+# 1b. Visual progress bar panel (Tkinter), driven off run_in_background's
+#     on_progress_value channel - purely a read-only reflection of the
+#     background thread's own progress, never something the worker waits
+#     on, so it can never slow down or otherwise affect the actual work.
+# ---------------------------------------------------------------------------
+
+class ProgressBarPanel:
+    """
+    A small determinate/indeterminate progress bar + status label, meant
+    to sit directly under a "Generate Excel Reports"-style button.
+
+    Usage:
+        panel = ProgressBarPanel(parent_frame)
+        panel.frame.pack(fill="x", padx=12, pady=(0, 8))   # once, at build time
+        ...
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=..., on_progress_value=panel.update,
+            on_done=lambda r: panel.finish("Done."),
+            on_error=lambda e: panel.finish("Failed."),
+            busy_widgets=[...],
+        )
+
+    The panel stays permanently packed in its slot (so it never disturbs
+    the surrounding layout by appearing/disappearing) and simply resets
+    to an empty, idle look between runs.
+    """
+    def __init__(self, parent, width=320):
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.frame = tk.Frame(parent, bg=parent.cget("bg") if hasattr(parent, "cget") else None)
+        try:
+            self.frame.configure(bg=parent["bg"])
+        except Exception:
+            pass
+
+        self.bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
+                                    length=width, maximum=100, value=0)
+        self.bar.pack(side="left", padx=(0, 10), pady=2)
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(self.frame, textvariable=self.status_var,
+                                      font=("Segoe UI", 9), anchor="w",
+                                      bg=self.frame.cget("bg") if hasattr(self.frame, "cget") else None,
+                                      fg="#5B6B79")
+        self.status_label.pack(side="left", fill="x", expand=True)
+
+        self._indeterminate = False
+
+    def start(self, total=None, text="Starting..."):
+        """Call once right before the background task starts. total=None
+        switches the bar to indeterminate ("busy stripe") mode, used for
+        operations that don't have a natural item count up front (e.g.
+        fuzzy-matching a whole file in one call)."""
+        if self._indeterminate:
+            self.bar.stop()
+            self._indeterminate = False
+        if total:
+            self.bar.configure(mode="determinate", maximum=max(total, 1), value=0)
+        else:
+            self.bar.configure(mode="indeterminate")
+            self.bar.start(12)
+            self._indeterminate = True
+        self.status_var.set(text)
+
+    def update(self, current, total=None, text=None):
+        """Matches the on_progress_value(current, total, text) signature
+        run_in_background calls directly, so `on_progress_value=panel.update`
+        can be passed straight through with no wrapper lambda needed."""
+        if total:
+            if int(self.bar["maximum"]) != int(total):
+                self.bar.configure(mode="determinate", maximum=max(total, 1))
+            if self._indeterminate:
+                self.bar.stop()
+                self._indeterminate = False
+            self.bar["value"] = current
+        if text:
+            self.status_var.set(text)
+        elif total:
+            pct = (current / total * 100) if total else 0
+            self.status_var.set(f"{current:,} / {total:,}  ({pct:.0f}%)")
+
+    def finish(self, text="Done."):
+        """Call from on_done/on_error. Leaves the bar full (or stopped, if
+        it was indeterminate) with a final status line - it stays visible
+        rather than disappearing, so the user can see the last run's
+        outcome until they start the next one."""
+        if self._indeterminate:
+            self.bar.stop()
+            self._indeterminate = False
+            self.bar.configure(mode="determinate", maximum=100, value=100)
+        else:
+            try:
+                self.bar["value"] = self.bar["maximum"]
+            except Exception:
+                pass
+        self.status_var.set(text)
+
+    def reset(self):
+        if self._indeterminate:
+            self.bar.stop()
+            self._indeterminate = False
+        self.bar.configure(mode="determinate", maximum=100, value=0)
+        self.status_var.set("")
 
 
 # ---------------------------------------------------------------------------

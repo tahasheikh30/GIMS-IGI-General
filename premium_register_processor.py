@@ -552,22 +552,38 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index):
     return {"igi_policy_number": None, "matched_leader_ref": None, "score": round(best_ratio, 3), "status": "Not Matched"}
 
 
-def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col):
+def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col, report=None):
     """
     Match every row of leader_df against register_df. Returns a NEW
     dataframe = leader_df (all original columns, untouched) plus four
     added columns: "IGI Policy Number", "Matched Leader Ref (Register)",
     "Match Score", "Match Status".
+
+    report: optional callable(str) - if it's a perf_utils.Reporter (i.e.
+        came from perf_utils.run_in_background), row-level matching
+        progress is also pushed to the numeric progress bar channel via
+        perf_utils.RowProgress. Safe to leave as None for normal,
+        non-GUI use.
     """
     index = build_match_index(register_df, leader_ref_col)
 
+    try:
+        from perf_utils import RowProgress
+        progress = RowProgress(report, total=len(leader_df), label="leader rows matched") if report else None
+    except ImportError:
+        progress = None
+
     igi_numbers, matched_refs, scores, statuses = [], [], [], []
-    for val in leader_df[nums_col]:
+    for i, val in enumerate(leader_df[nums_col], start=1):
         result = match_one(val, register_df, leader_ref_col, igi_policy_col, index)
         igi_numbers.append(result["igi_policy_number"])
         matched_refs.append(result["matched_leader_ref"])
         scores.append(result["score"])
         statuses.append(result["status"])
+        if progress:
+            progress.maybe(i)
+    if progress:
+        progress.final()
 
     out = leader_df.copy()
     # Some real leader files already ship a blank "IGI Policy Number"
