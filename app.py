@@ -53,27 +53,52 @@ NAV_ICONS = {
 
 
 class BalanceApp(tk.Tk):
-    # Palette
-    COLOR_BG = "#EAF0F6"       # soft blue-grey app background (was flat light grey)
+    # Palette - a refined "deep navy + sapphire + muted gold" scheme,
+    # chosen for a more premium, editorial feel than a generic flat-UI
+    # blue/grey kit: the navy carries authority for chrome (header,
+    # sidebar accents, table headers), sapphire is reserved for
+    # interactive/actionable elements (buttons, links, active states),
+    # and the muted gold is used sparingly as a single "signature" accent
+    # (numbered badges, section rules, focus highlights) rather than
+    # spread across the UI, which is what keeps an accent color reading
+    # as elegant instead of decorative.
+    COLOR_BG = "#F2F4F8"          # soft, cool neutral canvas
     COLOR_PANEL = "#FFFFFF"
-    COLOR_PANEL_ALT = "#F7FAFC"  # subtle tint for nested/alternating panels
-    COLOR_PRIMARY = "#1F4E78"
-    COLOR_PRIMARY_DARK = "#163A5C"
-    COLOR_ACCENT = "#2E86AB"
-    COLOR_SUCCESS = "#2E7D32"
-    COLOR_WARN = "#B45309"
-    COLOR_TEXT = "#1C2733"
-    COLOR_MUTED = "#5B6B79"
-    COLOR_BORDER = "#D3DEE8"
-    COLOR_SIDEBAR = "#F9FBFD"       # sidebar background - close to panel-alt, distinct from main canvas
-    COLOR_SIDEBAR_ACTIVE = "#E4EDF5"  # active nav item background tint
-    COLOR_SIDEBAR_HOVER = "#EEF3F8"   # hover tint, one step lighter than active
-    COLOR_SIDEBAR_SUBBG = "#F2F6FA"   # subtle tint behind the Coinsurance submenu block
-    COLOR_HEADER_BORDER = "#153252"   # hairline shadow strip under the header, elevates it off the page
+    COLOR_PANEL_ALT = "#F7F9FC"   # subtle tint for nested/alternating panels
+    COLOR_PRIMARY = "#11263F"     # deep navy - chrome, headers, emphasis text
+    COLOR_PRIMARY_DARK = "#0A1B2E"
+    COLOR_ACCENT = "#2E6E9E"      # sapphire - primary interactive color
+    COLOR_ACCENT_DARK = "#1F5279"
+    COLOR_ACCENT_SOFT = "#EAF1F8"  # very light sapphire wash for subtle fills
+    COLOR_GOLD = "#B8925A"        # muted gold - the one "signature" accent
+    COLOR_GOLD_SOFT = "#F5EEE2"
+    COLOR_SUCCESS = "#1E8354"
+    COLOR_WARN = "#B4791C"
+    COLOR_DANGER = "#B3402F"
+    COLOR_TEXT = "#16212E"
+    COLOR_MUTED = "#5E6E80"
+    COLOR_BORDER = "#DCE3ED"
+    # The sidebar is deliberately its own dark surface (not a tint of the
+    # light content canvas) - a strong, well-known enterprise pattern
+    # (dark nav rail + light workspace) that gives the app a clear
+    # navigational anchor and reads noticeably more premium than a sidebar
+    # that just blends into the page. Every text/icon color paired with it
+    # below was chosen for contrast against this specific navy, not
+    # reused from the light-surface palette above.
+    COLOR_SIDEBAR = "#0E2138"           # base sidebar navy (deliberately distinct from COLOR_PRIMARY)
+    COLOR_SIDEBAR_SUBBG = "#0A192C"     # recessed panel behind a submenu - reads as "nested"
+    COLOR_SIDEBAR_HOVER = "#17324F"     # hover feedback, one clear step up from base
+    COLOR_SIDEBAR_ACTIVE = "#1E3F60"    # active "pill" background, brightest of the three states
+    COLOR_SIDEBAR_GUIDE = "#25405E"     # faint vertical indent guide under a submenu
+    COLOR_SIDEBAR_TEXT = "#B8C6D9"      # inactive label/icon - muted but comfortably legible on navy
+    COLOR_SIDEBAR_TEXT_DIM = "#7E90A6"  # de-emphasized elements (caret, decorative glyphs)
+    COLOR_SIDEBAR_TEXT_ACTIVE = "#FFFFFF"  # active/hover label - full contrast
+    COLOR_SIDEBAR_DIVIDER = "#081422"   # hairline seam between the sidebar and the content canvas
+    COLOR_HEADER_BORDER = "#0A1B2E"   # hairline shadow strip under the header, elevates it off the page
 
     def __init__(self):
         super().__init__()
-        self.title("GIMS - General Insurance Management System")
+        self.title("GIMS - General Insurance Management Software")
         self.geometry("1300x760")
         self.minsize(1050, 620)
         self.configure(bg=self.COLOR_BG)
@@ -149,9 +174,13 @@ class BalanceApp(tk.Tk):
                 except tk.TclError:
                     continue
 
+        # Typography scale - one family throughout (Segoe UI) with a
+        # deliberate weight/size hierarchy rather than ad-hoc sizes, so
+        # every screen reads with the same rhythm: 17/12/10.5/9 for
+        # page title / section heading / body / caption.
         base_font = ("Segoe UI", 10)
-        heading_font = ("Segoe UI Semibold", 11)
-        title_font = ("Segoe UI Semibold", 16)
+        heading_font = ("Segoe UI Semibold", 12)
+        title_font = ("Segoe UI Semibold", 18)
 
         style.configure(".", font=base_font, background=self.COLOR_BG)
         style.configure("TFrame", background=self.COLOR_BG)
@@ -162,7 +191,7 @@ class BalanceApp(tk.Tk):
         style.configure("Title.TLabel", background=self.COLOR_PRIMARY, foreground="white", font=title_font)
         style.configure("SectionHeader.TLabel", background=self.COLOR_BG, foreground=self.COLOR_PRIMARY, font=heading_font)
 
-        style.configure("TLabelframe", background=self.COLOR_PANEL, bordercolor="#D6DCE1", relief="solid")
+        style.configure("TLabelframe", background=self.COLOR_PANEL, bordercolor=self.COLOR_BORDER, relief="solid", borderwidth=1)
         style.configure("TLabelframe.Label", background=self.COLOR_PANEL, foreground=self.COLOR_PRIMARY, font=heading_font)
 
         current_theme = style.theme_use()
@@ -172,38 +201,47 @@ class BalanceApp(tk.Tk):
         if using_native:
             # Native Windows themes already render clean, readable tabs -
             # forcing custom colors here tends to look worse, not better.
-            style.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(16, 8))
+            style.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(18, 9))
         else:
-            style.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(16, 10))
+            style.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(20, 11))
             style.map("TNotebook.Tab",
-                      background=[("selected", self.COLOR_PANEL), ("!selected", "#E3E8EC")],
+                      background=[("selected", self.COLOR_PANEL), ("!selected", "#E7EBF1")],
                       foreground=[("selected", self.COLOR_PRIMARY), ("!selected", self.COLOR_MUTED)])
 
-        style.configure("TButton", font=("Segoe UI", 10), padding=(10, 6))
+        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 7))
         if using_native:
             # Native theme buttons don't reliably support background-color
             # overrides, so keep them native-styled but bold/larger for emphasis.
-            style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 8))
-            style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 8))
+            style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9))
+            style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9))
         else:
-            style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 8),
-                            background=self.COLOR_ACCENT, foreground="white")
-            style.map("Accent.TButton", background=[("active", self.COLOR_PRIMARY_DARK), ("disabled", "#A9B7C2")])
-            style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 8),
-                            background=self.COLOR_SUCCESS, foreground="white")
-            style.map("Send.TButton", background=[("active", "#1B5E20")])
+            style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9),
+                            background=self.COLOR_ACCENT, foreground="white", borderwidth=0)
+            style.map("Accent.TButton", background=[("active", self.COLOR_ACCENT_DARK), ("disabled", "#B7C3D1")])
+            style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9),
+                            background=self.COLOR_SUCCESS, foreground="white", borderwidth=0)
+            style.map("Send.TButton", background=[("active", "#155F3C"), ("disabled", "#B7C3D1")])
 
-        style.configure("Treeview", font=("Segoe UI", 10), rowheight=26,
-                        background="white", fieldbackground="white", bordercolor="#D6DCE1")
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"),
-                        background=self.COLOR_PRIMARY, foreground="white", relief="flat")
+        style.configure("Treeview", font=("Segoe UI", 10), rowheight=28,
+                        background="white", fieldbackground="white",
+                        bordercolor=self.COLOR_BORDER, borderwidth=0)
+        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10, "bold"),
+                        background=self.COLOR_PRIMARY, foreground="white", relief="flat",
+                        padding=(10, 8))
         style.map("Treeview.Heading", background=[("active", self.COLOR_PRIMARY_DARK)])
         style.map("Treeview", background=[("selected", self.COLOR_ACCENT)], foreground=[("selected", "white")])
+        style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])  # drop the sunken native border
 
-        style.configure("TEntry", padding=4)
-        style.configure("TCombobox", padding=4)
+        style.configure("TEntry", padding=6, bordercolor=self.COLOR_BORDER, relief="solid")
+        style.map("TEntry", bordercolor=[("focus", self.COLOR_ACCENT)])
+        style.configure("TCombobox", padding=6)
         style.configure("TCheckbutton", background=self.COLOR_BG, font=base_font)
-        style.configure("Horizontal.TSeparator", background="#D6DCE1")
+        style.configure("TRadiobutton", background=self.COLOR_BG, font=base_font)
+        style.configure("Horizontal.TSeparator", background=self.COLOR_BORDER)
+        style.configure("Horizontal.TScrollbar", background=self.COLOR_PANEL_ALT, troughcolor=self.COLOR_BG, bordercolor=self.COLOR_BG)
+        style.configure("Vertical.TScrollbar", background="#C7D2E0", troughcolor=self.COLOR_PANEL_ALT,
+                        bordercolor=self.COLOR_PANEL_ALT, arrowsize=13, width=13)
+        style.map("Vertical.TScrollbar", background=[("active", self.COLOR_ACCENT)])
 
     # ---------- UI construction ----------
     def _build_ui(self):
@@ -215,12 +253,13 @@ class BalanceApp(tk.Tk):
         self._build_sidebar(body)
         self._build_content_area(body)
 
-        status_frame = tk.Frame(self, bg="#E3E8EC", height=30)
+        tk.Frame(self, bg=self.COLOR_BORDER, height=1).pack(fill="x", side="bottom")
+        status_frame = tk.Frame(self, bg=self.COLOR_PANEL_ALT, height=30)
         status_frame.pack(fill="x", side="bottom")
         status_frame.pack_propagate(False)
         self.status_var = tk.StringVar(value="Ready.")
-        tk.Label(status_frame, textvariable=self.status_var, bg="#E3E8EC", fg=self.COLOR_MUTED,
-                 font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=12, pady=4)
+        tk.Label(status_frame, textvariable=self.status_var, bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="both", padx=16, pady=5)
 
     def _build_header(self):
         """Fixed top header - GIMS mark + wordmark on the left, the
@@ -230,59 +269,65 @@ class BalanceApp(tk.Tk):
         header_wrap = tk.Frame(self, bg=self.COLOR_PRIMARY)
         header_wrap.pack(fill="x", side="top")
 
-        header = tk.Frame(header_wrap, bg=self.COLOR_PRIMARY, height=68)
+        header = tk.Frame(header_wrap, bg=self.COLOR_PRIMARY, height=74)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
-        # Thin darker strip under the header reads as a subtle drop
-        # shadow, lifting the header off the page instead of it sitting
-        # perfectly flush with the content below.
-        tk.Frame(header_wrap, bg=self.COLOR_HEADER_BORDER, height=2).pack(fill="x", side="top")
+        # A slender gold rule is the header's one "signature" accent -
+        # it reads as an intentional, editorial flourish (think a gilt
+        # line under a masthead) rather than another slab of color, and
+        # sits above the darker drop-shadow strip so the header still
+        # lifts cleanly off the page beneath it.
+        tk.Frame(header_wrap, bg=self.COLOR_GOLD, height=2).pack(fill="x", side="top")
+        tk.Frame(header_wrap, bg=self.COLOR_HEADER_BORDER, height=1).pack(fill="x", side="top")
 
         # ---- Left: GIMS mark + wordmark ----
         brand = tk.Frame(header, bg=self.COLOR_PRIMARY)
-        brand.place(relx=0, rely=0.5, x=22, anchor="w")  # vertically centered, fixed left inset
+        brand.place(relx=0, rely=0.5, x=26, anchor="w")  # vertically centered, fixed left inset
 
         if self.logo_gims_img is not None:
-            tk.Label(brand, image=self.logo_gims_img, bg=self.COLOR_PRIMARY).pack(side="left", padx=(0, 12))
+            tk.Label(brand, image=self.logo_gims_img, bg=self.COLOR_PRIMARY).pack(side="left", padx=(0, 14))
         else:
-            # Fallback drawn mark if Pillow / the asset file isn't available
-            mark = tk.Canvas(brand, width=40, height=40, bg=self.COLOR_PRIMARY, highlightthickness=0)
-            mark.pack(side="left", padx=(0, 12))
-            mark.create_oval(0, 0, 40, 40, fill=self.COLOR_ACCENT, outline="")
-            mark.create_text(20, 21, text="G", fill="white", font=("Segoe UI", 17, "bold"))
+            # Fallback drawn mark if Pillow / the asset file isn't available -
+            # a slim gold ring around the navy disc echoes the header's own
+            # gold accent line instead of reading as a generic flat icon.
+            mark = tk.Canvas(brand, width=42, height=42, bg=self.COLOR_PRIMARY, highlightthickness=0)
+            mark.pack(side="left", padx=(0, 14))
+            mark.create_oval(1, 1, 41, 41, fill=self.COLOR_PRIMARY_DARK, outline=self.COLOR_GOLD, width=1.5)
+            mark.create_text(21, 22, text="G", fill=self.COLOR_GOLD, font=("Segoe UI Semibold", 18, "bold"))
 
         wordmark_col = tk.Frame(brand, bg=self.COLOR_PRIMARY)
         wordmark_col.pack(side="left")
-        tk.Label(wordmark_col, text="GIMS", font=("Segoe UI Semibold", 20, "bold"),
+        tk.Label(wordmark_col, text="GIMS", font=("Segoe UI Semibold", 21, "bold"),
                  bg=self.COLOR_PRIMARY, fg="white").pack(anchor="w")
-        tk.Label(wordmark_col, text="General Insurance Management System",
-                 font=("Segoe UI", 8), bg=self.COLOR_PRIMARY, fg="#B9CBDD").pack(anchor="w")
+        tk.Label(wordmark_col, text="G E N E R A L   I N S U R A N C E   M A N A G E M E N T   S O F T W A R E",
+                 font=("Segoe UI", 7, "bold"), bg=self.COLOR_PRIMARY, fg=self.COLOR_GOLD).pack(anchor="w")
 
         # ---- Right: company logo ----
         company_slot = tk.Frame(header, bg=self.COLOR_PRIMARY)
-        company_slot.place(relx=1.0, rely=0.5, x=-22, anchor="e")  # vertically centered, fixed right inset
+        company_slot.place(relx=1.0, rely=0.5, x=-26, anchor="e")  # vertically centered, fixed right inset
 
         if self.logo_company_img is not None:
             # White pill behind the logo so it reads cleanly against the
             # dark header regardless of the logo's own background.
-            pill = tk.Frame(company_slot, bg="white")
+            pill = tk.Frame(company_slot, bg="white", highlightbackground=self.COLOR_GOLD, highlightthickness=1)
             pill.pack()
-            tk.Label(pill, image=self.logo_company_img, bg="white").pack(padx=12, pady=6)
+            tk.Label(pill, image=self.logo_company_img, bg="white").pack(padx=13, pady=7)
 
     def _build_sidebar(self, parent):
         """Persistent left sidebar. Every section now lives under one of
         two collapsible parent menus: 'General Operations' (Outstanding
         Premium, Loss Ratio, Renewal) and 'Coinsurance' (its existing
-        three sub-items). The active section is shown with a left accent
-        bar, bold text, and a tinted background, same as before."""
-        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=240)
+        three sub-items). The active section is shown with a gold accent
+        bar, full-white bold text, and a clearly brighter "pill"
+        background, so the current page is unmistakable at a glance."""
+        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=254)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=20).pack(fill="x")
-        tk.Label(sidebar, text="MODULES", font=("Segoe UI", 8, "bold"), bg=self.COLOR_SIDEBAR,
-                 fg=self.COLOR_MUTED).pack(anchor="w", padx=22, pady=(0, 8))
+        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=24).pack(fill="x")
+        tk.Label(sidebar, text="M O D U L E S", font=("Segoe UI", 8, "bold"), bg=self.COLOR_SIDEBAR,
+                 fg=self.COLOR_GOLD).pack(anchor="w", padx=24, pady=(0, 12))
 
         self.nav_items = {}
 
@@ -314,15 +359,29 @@ class BalanceApp(tk.Tk):
             before=coinsurance_header,
         )
 
-        # Thin divider between the sidebar and content area
-        tk.Frame(parent, bg=self.COLOR_BORDER, width=1).pack(side="left", fill="y")
+        # Bottom-anchored footer strip - a quiet, permanent "floor" under
+        # the nav that keeps the dark panel from just trailing off into
+        # empty space, and doubles as a natural home for a build/version
+        # marker without competing with the module list above it.
+        footer = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
+        footer.pack(side="bottom", fill="x")
+        tk.Frame(footer, bg=self.COLOR_SIDEBAR_GUIDE, height=1).pack(fill="x", side="top")
+        tk.Label(footer, text="GIMS \u00b7 Finance Automation Suite", font=("Segoe UI", 8),
+                 bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_DIM,
+                 anchor="w").pack(fill="x", padx=24, pady=10)
+
+        # Hairline seam between the dark sidebar and the light content
+        # canvas - crisper than letting the two surfaces butt directly
+        # against each other.
+        tk.Frame(parent, bg=self.COLOR_SIDEBAR_DIVIDER, width=1).pack(side="left", fill="y")
 
     def _build_collapsible_menu(self, sidebar, label_text, icon_char, sub_items, before):
         """Generic collapsible parent menu (e.g. 'General Operations' or
-        'Coinsurance'), shown inside a subtly tinted block with a left
-        indent guide so its sub-items read as nested under the parent.
-        Clicking the header only expands/collapses it (it isn't itself a
-        page); clicking a sub-item navigates like any other nav item.
+        'Coinsurance'), shown inside a recessed, darker-navy block with a
+        left indent guide so its sub-items read as clearly nested under
+        the parent. Clicking the header only expands/collapses it (it
+        isn't itself a page); clicking a sub-item navigates like any
+        other nav item.
 
         `before`: a permanent fixed sibling widget, packed once and never
         forgotten/re-packed, that this menu's header and submenu are
@@ -342,30 +401,32 @@ class BalanceApp(tk.Tk):
         header_accent.pack(side="left", fill="y")
 
         header_inner = tk.Frame(header, bg=self.COLOR_SIDEBAR)
-        header_inner.pack(side="left", fill="both", expand=True, padx=(14, 12), pady=14)
+        header_inner.pack(side="left", fill="both", expand=True, padx=(14, 14), pady=15)
 
-        icon_label = tk.Label(header_inner, text=icon_char, font=("Segoe UI", 10), width=2,
-                               bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
+        icon_label = tk.Label(header_inner, text=icon_char, font=("Segoe UI", 11), width=2,
+                               bg=self.COLOR_SIDEBAR, fg=self.COLOR_GOLD, anchor="w")
         icon_label.pack(side="left")
 
-        header_label = tk.Label(header_inner, text=label_text, font=("Segoe UI", 11),
-                                 bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED, anchor="w")
+        header_label = tk.Label(header_inner, text=label_text, font=("Segoe UI Semibold", 11, "bold"),
+                                 bg=self.COLOR_SIDEBAR, fg=self.COLOR_SIDEBAR_TEXT_ACTIVE, anchor="w")
         header_label.pack(side="left", fill="both", expand=True)
 
         caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 9),
-                          bg=self.COLOR_SIDEBAR, fg=self.COLOR_MUTED)
+                          bg=self.COLOR_SIDEBAR, fg=self.COLOR_SIDEBAR_TEXT_DIM)
         caret.pack(side="right")
 
-        # Tinted wrapper block for the sub-items, with a thin vertical
-        # indent guide on the left so the sub-items read as nested under
-        # the parent rather than as flat, unrelated rows.
+        # Recessed wrapper block for the sub-items - a visibly darker
+        # navy "well" (not just a faint tint) so the nesting relationship
+        # to the parent header is obvious at a glance, with a slim gold-
+        # tinted guide line down the left edge instead of a barely-there
+        # 1px border.
         submenu_block = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
         submenu_block.pack(fill="x", before=before)
-        guide = tk.Frame(submenu_block, bg=self.COLOR_BORDER, width=1)
-        guide.place(x=28, y=0, relheight=1.0)
+        guide = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
+        guide.place(x=29, y=2, relheight=1.0, height=-4)
 
         submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
-        submenu_frame.pack(fill="x")  # starts expanded
+        submenu_frame.pack(fill="x", pady=(2, 6))  # starts expanded
 
         for key, label in sub_items:
             self.nav_items[key] = self._make_nav_item(
@@ -391,7 +452,7 @@ class BalanceApp(tk.Tk):
         bg = self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR
         for w in (header, header_inner, icon_label, header_label):
             w.configure(bg=bg)
-        header_accent.configure(bg=self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR)
+        header_accent.configure(bg=bg)
 
     def _make_nav_item(self, parent, key, text, indent=False, before=None, base_bg=None):
         base_bg = base_bg or self.COLOR_SIDEBAR
@@ -406,16 +467,16 @@ class BalanceApp(tk.Tk):
 
         inner = tk.Frame(wrapper, bg=base_bg)
         inner.pack(side="left", fill="both", expand=True,
-                    padx=(26, 10) if indent else (10, 10), pady=12 if indent else 14)
+                    padx=(24, 14) if indent else (12, 14), pady=13 if indent else 15)
 
         icon = NAV_ICONS.get(key, "")
-        icon_label = tk.Label(inner, text=icon, font=("Segoe UI", 9 if indent else 10), width=2,
-                               bg=base_bg, fg=self.COLOR_MUTED, anchor="w")
+        icon_label = tk.Label(inner, text=icon, font=("Segoe UI", 10 if indent else 11), width=2,
+                               bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT, anchor="w")
         icon_label.pack(side="left")
 
         label = tk.Label(inner, text=text, font=("Segoe UI", 10 if indent else 11),
-                          bg=base_bg, fg=self.COLOR_MUTED, anchor="w",
-                          wraplength=160 if indent else None, justify="left")
+                          bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT, anchor="w",
+                          wraplength=170 if indent else None, justify="left")
         label.pack(side="left", fill="both", expand=True)
 
         def on_click(event=None, k=key):
@@ -423,14 +484,18 @@ class BalanceApp(tk.Tk):
 
         def on_enter(event=None):
             if self.active_nav != key:
-                hover_bg = self.COLOR_SIDEBAR_HOVER if not indent else "#E9EFF5"
-                for w in (wrapper, accent, inner, icon_label, label):
+                hover_bg = self.COLOR_SIDEBAR_HOVER
+                for w in (wrapper, accent, inner):
                     w.configure(bg=hover_bg)
+                icon_label.configure(bg=hover_bg, fg=self.COLOR_GOLD)
+                label.configure(bg=hover_bg, fg=self.COLOR_SIDEBAR_TEXT_ACTIVE)
 
         def on_leave(event=None):
             if self.active_nav != key:
-                for w in (wrapper, accent, inner, icon_label, label):
+                for w in (wrapper, accent, inner):
                     w.configure(bg=base_bg)
+                icon_label.configure(bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT)
+                label.configure(bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT)
 
         for widget in (wrapper, accent, inner, icon_label, label):
             widget.bind("<Button-1>", on_click)
@@ -447,20 +512,22 @@ class BalanceApp(tk.Tk):
 
     def select_nav(self, key):
         """Switch the visible content page and restyle the sidebar so only
-        the active section (top-level or Coinsurance sub-item) shows the
-        accent bar / bold text / tinted bg."""
+        the active section shows the gold accent bar, a clearly brighter
+        "pill" background, a gold icon, and full-white bold text - the
+        three states (default / hover / active) are visually distinct
+        enough that the current page never has to be guessed at."""
         self.active_nav = key
         for k, item in self.nav_items.items():
             selected = (k == key)
             bg = self.COLOR_SIDEBAR_ACTIVE if selected else item.base_bg
             base_size = 10 if item.indent else 11
             item.configure(bg=bg)
-            item.accent.configure(bg=self.COLOR_ACCENT if selected else bg)
+            item.accent.configure(bg=self.COLOR_GOLD if selected else bg)
             item.inner.configure(bg=bg)
-            item.icon_label.configure(bg=bg, fg=self.COLOR_PRIMARY if selected else self.COLOR_MUTED)
+            item.icon_label.configure(bg=bg, fg=self.COLOR_GOLD if selected else self.COLOR_SIDEBAR_TEXT)
             item.label.configure(
                 bg=bg,
-                fg=self.COLOR_PRIMARY if selected else self.COLOR_MUTED,
+                fg=self.COLOR_SIDEBAR_TEXT_ACTIVE if selected else self.COLOR_SIDEBAR_TEXT,
                 font=("Segoe UI", base_size, "bold" if selected else "normal"),
             )
         self.nav_pages[key].tkraise()
@@ -558,16 +625,17 @@ class BalanceApp(tk.Tk):
         # --- Page header ---
         header = ttk.Frame(body)
         header.pack(fill="x", padx=PAD_X, pady=(20, 6))
-        ttk.Label(header, text="Loss Ratio", font=("Segoe UI Semibold", 17, "bold"),
+        ttk.Label(header, text="Loss Ratio", font=("Segoe UI Semibold", 18, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
         ttk.Label(header, text="Calculate and summarize Loss Ratio for one company or a group, from Excel or PDF source files.",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
 
-        formula_badge = tk.Frame(header, bg=self.COLOR_SIDEBAR_ACTIVE)
+        formula_badge = tk.Frame(header, bg=self.COLOR_ACCENT_SOFT)
         formula_badge.pack(anchor="w")
+        tk.Frame(formula_badge, bg=self.COLOR_GOLD, width=3).pack(side="left", fill="y")
         tk.Label(formula_badge, text="Loss Ratio %  =  (Incurred Loss + Commission Accrual)  \u00f7  Gross Premium Written  \u00d7  100",
-                 bg=self.COLOR_SIDEBAR_ACTIVE, fg=self.COLOR_PRIMARY, font=("Consolas", 10, "bold"),
-                 padx=14, pady=8).pack()
+                 bg=self.COLOR_ACCENT_SOFT, fg=self.COLOR_PRIMARY, font=("Consolas", 10, "bold"),
+                 padx=14, pady=8).pack(side="left")
 
         # --- Section 1: Mode ---
         s1 = self._loss_section_card(body, "1", "Mode & Report Name", PAD_X)
@@ -745,39 +813,66 @@ class BalanceApp(tk.Tk):
         elsewhere in the app (Save Signature, Calculate Loss Ratio, etc.)
         so every action button - across Individual and Group file modes -
         shares one consistent size/shape instead of each spot picking its
-        own fixed character width."""
+        own fixed character width. A genuine hover state (not just the
+        native click-flash) is wired via Enter/Leave so buttons feel
+        responsive under the cursor, matching the sidebar's own hover
+        treatment."""
+        hover_bg = self.COLOR_ACCENT_SOFT if outline else self._shade(bg, -18)
         btn = tk.Button(
             parent, text=text, command=command,
-            font=("Segoe UI", 9, "bold"), bg=bg, fg=fg,
-            activebackground=self.COLOR_SIDEBAR_ACTIVE if outline else self.COLOR_PRIMARY_DARK,
-            activeforeground=fg,
+            font=("Segoe UI", 9, "bold"), bg=bg, fg=(self.COLOR_PRIMARY if outline else fg),
+            activebackground=hover_bg,
+            activeforeground=(self.COLOR_PRIMARY if outline else fg),
             relief="solid" if outline else "flat",
             borderwidth=1 if outline else 0,
             highlightbackground=self.COLOR_BORDER,
-            padx=14, pady=7, cursor="hand2",
+            padx=15, pady=8, cursor="hand2",
         )
+        btn.bind("<Enter>", lambda e: btn.configure(bg=hover_bg))
+        btn.bind("<Leave>", lambda e: btn.configure(bg=bg))
         return btn
+
+    @staticmethod
+    def _shade(hex_color, amount):
+        """Lighten (amount > 0) or darken (amount < 0) a #RRGGBB color by
+        `amount` per channel - used for lightweight, dependency-free hover
+        states instead of hand-picking a second color for every button."""
+        hex_color = hex_color.lstrip("#")
+        if len(hex_color) != 6:
+            return "#" + hex_color
+        r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+        r, g, b = (max(0, min(255, c + amount)) for c in (r, g, b))
+        return f"#{r:02X}{g:02X}{b:02X}"
 
     def _loss_section_card(self, parent, number, title, pad_x, expand_bottom=False):
         """A numbered section card matching the app's '1. Upload & Filter'
-        style numbering convention, for visual consistency across pages."""
-        wrapper = tk.Frame(parent, bg=self.COLOR_PANEL, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
-        wrapper.pack(fill="both" if expand_bottom else "x", expand=expand_bottom,
+        style numbering convention, for visual consistency across pages.
+        Rendered with a soft drop shadow (a slightly darker frame peeking
+        out from behind the panel) and a slim gold top rule, so each card
+        reads as a distinct, lightly elevated surface rather than a flat
+        bordered box - the same "quiet elegance" cue used in the header."""
+        shadow = tk.Frame(parent, bg="#D6DDE7")
+        shadow.pack(fill="both" if expand_bottom else "x", expand=expand_bottom,
                      padx=pad_x, pady=8)
 
-        title_row = tk.Frame(wrapper, bg=self.COLOR_PANEL)
-        title_row.pack(fill="x", padx=16, pady=(14, 10))
+        wrapper = tk.Frame(shadow, bg=self.COLOR_PANEL, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        wrapper.pack(fill="both", expand=True, padx=(0, 3), pady=(0, 3))
 
-        badge = tk.Canvas(title_row, width=22, height=22, bg=self.COLOR_PANEL, highlightthickness=0)
-        badge.pack(side="left", padx=(0, 8))
-        badge.create_oval(1, 1, 21, 21, fill=self.COLOR_ACCENT, outline="")
-        badge.create_text(11, 11, text=number, fill="white", font=("Segoe UI", 9, "bold"))
+        tk.Frame(wrapper, bg=self.COLOR_GOLD, height=2).pack(fill="x", side="top")
+
+        title_row = tk.Frame(wrapper, bg=self.COLOR_PANEL)
+        title_row.pack(fill="x", padx=18, pady=(15, 10))
+
+        badge = tk.Canvas(title_row, width=24, height=24, bg=self.COLOR_PANEL, highlightthickness=0)
+        badge.pack(side="left", padx=(0, 10))
+        badge.create_oval(1, 1, 23, 23, fill=self.COLOR_PRIMARY, outline="")
+        badge.create_text(12, 12, text=number, fill=self.COLOR_GOLD, font=("Segoe UI Semibold", 10, "bold"))
 
         tk.Label(title_row, text=title, bg=self.COLOR_PANEL, fg=self.COLOR_PRIMARY,
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
+                 font=("Segoe UI Semibold", 12, "bold")).pack(side="left")
 
         content = tk.Frame(wrapper, bg=self.COLOR_PANEL)
-        content.pack(fill="both" if expand_bottom else "x", expand=expand_bottom, padx=16, pady=(0, 16))
+        content.pack(fill="both" if expand_bottom else "x", expand=expand_bottom, padx=18, pady=(0, 18))
         return content
 
     def _toggle_loss_mode(self):
@@ -966,17 +1061,18 @@ class BalanceApp(tk.Tk):
         # --- Page header ---
         header = ttk.Frame(body)
         header.pack(fill="x", padx=PAD_X, pady=(20, 6))
-        ttk.Label(header, text="Premium Register", font=("Segoe UI Semibold", 17, "bold"),
+        ttk.Label(header, text="Premium Register", font=("Segoe UI Semibold", 18, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
         ttk.Label(header, text="Match a co-insurance leader's own policy numbers against IGI's Premium "
                                 "Register, and pull in the matched IGI Policy Number automatically.",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
 
-        info_badge = tk.Frame(header, bg=self.COLOR_SIDEBAR_ACTIVE)
+        info_badge = tk.Frame(header, bg=self.COLOR_ACCENT_SOFT)
         info_badge.pack(anchor="w")
+        tk.Frame(info_badge, bg=self.COLOR_GOLD, width=3).pack(side="left", fill="y")
         tk.Label(info_badge, text="Fuzzy digit-run matching \u2014 unmatched rows are flagged red for manual entry, not guessed",
-                 bg=self.COLOR_SIDEBAR_ACTIVE, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
-                 padx=14, pady=8).pack()
+                 bg=self.COLOR_ACCENT_SOFT, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
+                 padx=14, pady=8).pack(side="left")
 
         # --- Section 1: Input files ---
         s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
@@ -1335,7 +1431,7 @@ class BalanceApp(tk.Tk):
         self.receivable_results_tree.column("num_clients", width=80, anchor="center")
         self.receivable_results_tree.column("premium_total", width=170, anchor="e")
         self.receivable_results_tree.column("claims_total", width=170, anchor="e")
-        self.receivable_results_tree.tag_configure("oddrow", background="#F4F7FA")
+        self.receivable_results_tree.tag_configure("oddrow", background="#F6F8FB")
         self.receivable_results_tree.tag_configure("evenrow", background="white")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.receivable_results_tree.yview)
@@ -1971,7 +2067,7 @@ class BalanceApp(tk.Tk):
         self.results_tree.column("total", width=150, anchor="e")
         self.results_tree.column("agent", width=220)
         self.results_tree.column("branch", width=220)
-        self.results_tree.tag_configure("oddrow", background="#F4F7FA")
+        self.results_tree.tag_configure("oddrow", background="#F6F8FB")
         self.results_tree.tag_configure("evenrow", background="white")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.results_tree.yview)
