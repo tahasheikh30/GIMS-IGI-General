@@ -276,9 +276,56 @@ def _resolve_bg_color(widget):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Progress bar palette - deliberately kept in sync with (but independent
+# of) BalanceApp's own palette in app.py, the same way loss_ratio_generator.py
+# and receivable_generator.py each keep their own small color constant
+# block rather than importing app.py's (which would be a backwards,
+# UI-depends-on-utility, import). Sapphire while running, muted gold
+# accent chip, success green / danger red on completion depending on
+# what the caller's own finish() text says.
+# ---------------------------------------------------------------------------
+_PB_TRACK = "#E3E9F1"        # light neutral trough
+_PB_RUNNING = "#2E6E9E"      # sapphire - matches COLOR_ACCENT
+_PB_DONE = "#1E8354"         # success green - matches COLOR_SUCCESS
+_PB_FAILED = "#B3402F"       # danger red - matches COLOR_DANGER
+_PB_GOLD = "#B8925A"         # muted gold - matches COLOR_GOLD
+_PB_TEXT_MUTED = "#5E6E80"   # matches COLOR_MUTED
+_PB_TEXT_STRONG = "#16212E"  # matches COLOR_TEXT
+
+_PB_STYLES_READY = False
+
+
+def _ensure_progress_styles():
+    """Register the three named Progressbar styles (running / done /
+    failed) exactly once per process. Only takes effect on a theme that
+    actually honors custom trough/bar colors (ttk's "clam" theme and
+    similar) - native Windows themes ("vista"/"xpnative") render their
+    own chrome for a Progressbar and ignore color overrides, the same
+    limitation app.py's own _setup_style already works around for
+    buttons, so this degrades to the platform's native progress bar
+    look there rather than fighting it."""
+    global _PB_STYLES_READY
+    if _PB_STYLES_READY:
+        return
+    from tkinter import ttk
+    style = ttk.Style()
+    if style.theme_use() in ("vista", "xpnative"):
+        _PB_STYLES_READY = True
+        return
+    for name, color in (("GIMSRunning", _PB_RUNNING), ("GIMSDone", _PB_DONE), ("GIMSFailed", _PB_FAILED)):
+        style.configure(
+            f"{name}.Horizontal.TProgressbar",
+            troughcolor=_PB_TRACK, troughrelief="flat", borderwidth=0,
+            background=color, lightcolor=color, darkcolor=color,
+            thickness=10,
+        )
+    _PB_STYLES_READY = True
+
+
 class ProgressBarPanel:
     """
-    A small determinate/indeterminate progress bar + status label, meant
+    A small determinate/indeterminate progress bar + status line, meant
     to sit directly under a "Generate Excel Reports"-style button.
 
     Usage:
@@ -295,13 +342,20 @@ class ProgressBarPanel:
 
     The panel stays permanently packed in its slot (so it never disturbs
     the surrounding layout by appearing/disappearing) and simply resets
-    to an empty, idle look between runs.
+    to an empty, idle look between runs. Visually it's a compact two-line
+    "card": a status line with a colored state chip on the left and a
+    live percentage readout on the right, then a slim colored bar below
+    it - the bar recolors itself (sapphire while running, green on
+    finish(), red if finish()'s own text reads as a failure), so the
+    outcome of a run is legible even without reading the status text.
     """
     def __init__(self, parent, width=320):
         import tkinter as tk
         from tkinter import ttk
 
+        _ensure_progress_styles()
         bg = _resolve_bg_color(parent)
+        frame_kwargs = {"bg": bg} if bg else {}
 
         # A plain tk.Frame (not ttk.Frame) is used deliberately here even
         # when the parent is a themed ttk widget: it's the only frame type
@@ -310,37 +364,74 @@ class ProgressBarPanel:
         # dropped into (a themed ttk page vs. a hand-styled tk.Frame card
         # elsewhere in the app) without needing the caller to tell it which
         # kind of parent it has.
-        frame_kwargs = {"bg": bg} if bg else {}
         self.frame = tk.Frame(parent, **frame_kwargs)
 
-        self.bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
-                                    length=width, maximum=100, value=0)
-        self.bar.pack(side="left", padx=(0, 10), pady=2)
+        top_row = tk.Frame(self.frame, **frame_kwargs)
+        top_row.pack(fill="x", pady=(0, 4))
+
+        # Small square state chip - a quiet color cue (sapphire/green/red)
+        # that echoes the accent-strip language used on cards elsewhere
+        # in the app, so this panel reads as part of the same family
+        # rather than a bare native widget dropped onto the page.
+        self._chip = tk.Canvas(top_row, width=8, height=8, highlightthickness=0, **frame_kwargs)
+        self._chip.pack(side="left", padx=(0, 8), pady=(2, 0))
+        self._chip_id = self._chip.create_oval(0, 0, 8, 8, fill=_PB_TEXT_MUTED, outline="")
 
         self.status_var = tk.StringVar(value="")
-        label_kwargs = {"bg": bg} if bg else {}
-        self.status_label = tk.Label(self.frame, textvariable=self.status_var,
+        self.status_label = tk.Label(top_row, textvariable=self.status_var,
                                       font=("Segoe UI", 9), anchor="w",
-                                      fg="#5B6B79", **label_kwargs)
+                                      fg=_PB_TEXT_MUTED, **frame_kwargs)
         self.status_label.pack(side="left", fill="x", expand=True)
 
+        self.percent_var = tk.StringVar(value="")
+        self.percent_label = tk.Label(top_row, textvariable=self.percent_var,
+                                       font=("Segoe UI Semibold", 9, "bold"), anchor="e",
+                                       fg=_PB_GOLD, **frame_kwargs)
+        self.percent_label.pack(side="right")
+
+        self._style_prefix = "GIMSRunning"
+        self.bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
+                                    length=width, maximum=100, value=0,
+                                    style=f"{self._style_prefix}.Horizontal.TProgressbar")
+        self.bar.pack(fill="x")
+
         self._indeterminate = False
+
+    def _set_state(self, state):
+        """state: 'running' | 'done' | 'failed' | 'idle' - drives both the
+        bar's own color and the small chip beside the status text."""
+        prefix, chip_color = {
+            "running": ("GIMSRunning", _PB_RUNNING),
+            "done": ("GIMSDone", _PB_DONE),
+            "failed": ("GIMSFailed", _PB_FAILED),
+            "idle": ("GIMSRunning", _PB_TEXT_MUTED),
+        }[state]
+        self._style_prefix = prefix
+        try:
+            self.bar.configure(style=f"{prefix}.Horizontal.TProgressbar")
+        except Exception:
+            pass  # native theme ignores custom styles - the bar still functions correctly
+        self._chip.itemconfig(self._chip_id, fill=chip_color)
 
     def start(self, total=None, text="Starting..."):
         """Call once right before the background task starts. total=None
         switches the bar to indeterminate ("busy stripe") mode, used for
         operations that don't have a natural item count up front (e.g.
         fuzzy-matching a whole file in one call)."""
+        self._set_state("running")
         if self._indeterminate:
             self.bar.stop()
             self._indeterminate = False
         if total:
             self.bar.configure(mode="determinate", maximum=max(total, 1), value=0)
+            self.percent_var.set("0%")
         else:
             self.bar.configure(mode="indeterminate")
             self.bar.start(12)
             self._indeterminate = True
+            self.percent_var.set("")
         self.status_var.set(text)
+        self.status_label.configure(fg=_PB_TEXT_STRONG)
 
     def update(self, current, total=None, text=None):
         """Matches the on_progress_value(current, total, text) signature
@@ -353,17 +444,23 @@ class ProgressBarPanel:
                 self.bar.stop()
                 self._indeterminate = False
             self.bar["value"] = current
+            pct = (current / total * 100) if total else 0
+            self.percent_var.set(f"{pct:.0f}%")
         if text:
             self.status_var.set(text)
         elif total:
-            pct = (current / total * 100) if total else 0
-            self.status_var.set(f"{current:,} / {total:,}  ({pct:.0f}%)")
+            self.status_var.set(f"{current:,} / {total:,}")
 
     def finish(self, text="Done."):
         """Call from on_done/on_error. Leaves the bar full (or stopped, if
         it was indeterminate) with a final status line - it stays visible
         rather than disappearing, so the user can see the last run's
-        outcome until they start the next one."""
+        outcome until they start the next one. The bar and status text
+        recolor to green or red depending on whether `text` itself reads
+        as a failure (looks for "fail"/"error" case-insensitively), so a
+        failed run is unmistakable even at a glance."""
+        failed = any(w in text.lower() for w in ("fail", "error"))
+        self._set_state("failed" if failed else "done")
         if self._indeterminate:
             self.bar.stop()
             self._indeterminate = False
@@ -373,14 +470,19 @@ class ProgressBarPanel:
                 self.bar["value"] = self.bar["maximum"]
             except Exception:
                 pass
+        self.percent_var.set("" if failed else "100%")
         self.status_var.set(text)
+        self.status_label.configure(fg=_PB_FAILED if failed else _PB_DONE)
 
     def reset(self):
         if self._indeterminate:
             self.bar.stop()
             self._indeterminate = False
+        self._set_state("idle")
         self.bar.configure(mode="determinate", maximum=100, value=0)
+        self.percent_var.set("")
         self.status_var.set("")
+        self.status_label.configure(fg=_PB_TEXT_MUTED)
 
 
 # ---------------------------------------------------------------------------

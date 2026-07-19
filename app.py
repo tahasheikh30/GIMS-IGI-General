@@ -39,18 +39,6 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 GIMS_LOGO_PATH = os.path.join(ASSETS_DIR, "gims_logo_cropped.png")
 COMPANY_LOGO_PATH = os.path.join(ASSETS_DIR, "company_logo_cropped.png")
 
-# Simple leading glyphs for each sidebar nav item - kept as plain
-# characters (no emoji) so they render consistently across Windows font
-# sets instead of relying on a specific icon font being installed.
-NAV_ICONS = {
-    "outstanding_premium": "\u25A3",   # filled-grid square - balances/reporting
-    "loss_ratio": "\u25B3",            # triangle - ratio/analysis
-    "coinsurance_pc_email": "\u2709",  # envelope - email automation
-    "coinsurance_premium_register": "\u2263",  # stacked lines - register/list
-    "coinsurance_claims_register": "\u2263",
-    "renewal": "\u27F3",               # circular arrow - renewal
-}
-
 
 class BalanceApp(tk.Tk):
     # Palette - a refined "deep navy + sapphire + muted gold" scheme,
@@ -71,6 +59,10 @@ class BalanceApp(tk.Tk):
     COLOR_ACCENT_DARK = "#1F5279"
     COLOR_ACCENT_SOFT = "#EAF1F8"  # very light sapphire wash for subtle fills
     COLOR_GOLD = "#B8925A"        # muted gold - the one "signature" accent
+    COLOR_GOLD_DEEP = "#8C6633"   # deeper gold - used wherever WHITE text sits directly on gold
+                                   # (e.g. badge numbers); the lighter COLOR_GOLD above reads fine
+                                   # as text/icons on navy but only clears ~2.9:1 against white,
+                                   # short of the ~4.5:1 needed for small bold text to stay crisp
     COLOR_GOLD_SOFT = "#F5EEE2"
     COLOR_SUCCESS = "#1E8354"
     COLOR_WARN = "#B4791C"
@@ -215,12 +207,31 @@ class BalanceApp(tk.Tk):
             style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9))
             style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9))
         else:
+            # Plain TButton ("Browse...", "Open Output Folder") gets a real
+            # secondary-button treatment - a crisp navy border and label on
+            # white, with a soft sapphire wash on hover/press - instead of
+            # the flat, low-contrast grey a bare ttk button renders as by
+            # default. This is what every "Browse..." picker button and
+            # "Open Output Folder" button renders through app-wide.
+            style.configure("TButton", font=("Segoe UI", 10), padding=(12, 7),
+                            background=self.COLOR_PANEL, foreground=self.COLOR_PRIMARY,
+                            bordercolor=self.COLOR_BORDER, lightcolor=self.COLOR_PANEL,
+                            darkcolor=self.COLOR_PANEL, focusthickness=1, focuscolor=self.COLOR_ACCENT)
+            style.map("TButton",
+                      background=[("pressed", self.COLOR_ACCENT_SOFT), ("active", self.COLOR_ACCENT_SOFT)],
+                      bordercolor=[("pressed", self.COLOR_ACCENT), ("active", self.COLOR_ACCENT)],
+                      foreground=[("disabled", "#A9B7C2")])
+
             style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9),
                             background=self.COLOR_ACCENT, foreground="white", borderwidth=0)
-            style.map("Accent.TButton", background=[("active", self.COLOR_ACCENT_DARK), ("disabled", "#B7C3D1")])
+            style.map("Accent.TButton",
+                      background=[("pressed", self.COLOR_ACCENT_DARK), ("active", self._shade(self.COLOR_ACCENT, -18)),
+                                  ("disabled", "#B7C3D1")])
             style.configure("Send.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 9),
                             background=self.COLOR_SUCCESS, foreground="white", borderwidth=0)
-            style.map("Send.TButton", background=[("active", "#155F3C"), ("disabled", "#B7C3D1")])
+            style.map("Send.TButton",
+                      background=[("pressed", "#124A2C"), ("active", self._shade(self.COLOR_SUCCESS, -18)),
+                                  ("disabled", "#B7C3D1")])
 
         style.configure("Treeview", font=("Segoe UI", 10), rowheight=28,
                         background="white", fieldbackground="white",
@@ -340,7 +351,7 @@ class BalanceApp(tk.Tk):
         bottom_anchor.pack(fill="x")
 
         coinsurance_header = self._build_collapsible_menu(
-            sidebar, "Coinsurance", "\u2295",
+            sidebar, "Coinsurance",
             [
                 ("coinsurance_pc_email", "Premium/Claims Email Automation"),
                 ("coinsurance_premium_register", "Premium Register"),
@@ -350,7 +361,7 @@ class BalanceApp(tk.Tk):
         )
 
         self._build_collapsible_menu(
-            sidebar, "General Operations", "\u2699",
+            sidebar, "General Operations",
             [
                 ("outstanding_premium", "Outstanding Premium"),
                 ("loss_ratio", "Loss Ratio"),
@@ -375,7 +386,7 @@ class BalanceApp(tk.Tk):
         # against each other.
         tk.Frame(parent, bg=self.COLOR_SIDEBAR_DIVIDER, width=1).pack(side="left", fill="y")
 
-    def _build_collapsible_menu(self, sidebar, label_text, icon_char, sub_items, before):
+    def _build_collapsible_menu(self, sidebar, label_text, sub_items, before):
         """Generic collapsible parent menu (e.g. 'General Operations' or
         'Coinsurance'), shown inside a recessed, darker-navy block with a
         left indent guide so its sub-items read as clearly nested under
@@ -401,11 +412,7 @@ class BalanceApp(tk.Tk):
         header_accent.pack(side="left", fill="y")
 
         header_inner = tk.Frame(header, bg=self.COLOR_SIDEBAR)
-        header_inner.pack(side="left", fill="both", expand=True, padx=(14, 14), pady=15)
-
-        icon_label = tk.Label(header_inner, text=icon_char, font=("Segoe UI", 11), width=2,
-                               bg=self.COLOR_SIDEBAR, fg=self.COLOR_GOLD, anchor="w")
-        icon_label.pack(side="left")
+        header_inner.pack(side="left", fill="both", expand=True, padx=(16, 14), pady=15)
 
         header_label = tk.Label(header_inner, text=label_text, font=("Segoe UI Semibold", 11, "bold"),
                                  bg=self.COLOR_SIDEBAR, fg=self.COLOR_SIDEBAR_TEXT_ACTIVE, anchor="w")
@@ -441,16 +448,16 @@ class BalanceApp(tk.Tk):
                 submenu_block.pack(fill="x", before=before)
                 caret.configure(text="\u25BE")
 
-        for w in (header, header_accent, header_inner, icon_label, caret, header_label):
+        for w in (header, header_accent, header_inner, caret, header_label):
             w.bind("<Button-1>", toggle_menu)
-            w.bind("<Enter>", lambda e: self._hover_menu_header(header, header_accent, header_inner, icon_label, header_label, True))
-            w.bind("<Leave>", lambda e: self._hover_menu_header(header, header_accent, header_inner, icon_label, header_label, False))
+            w.bind("<Enter>", lambda e: self._hover_menu_header(header, header_accent, header_inner, header_label, True))
+            w.bind("<Leave>", lambda e: self._hover_menu_header(header, header_accent, header_inner, header_label, False))
 
         return header
 
-    def _hover_menu_header(self, header, header_accent, header_inner, icon_label, header_label, entering):
+    def _hover_menu_header(self, header, header_accent, header_inner, header_label, entering):
         bg = self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR
-        for w in (header, header_inner, icon_label, header_label):
+        for w in (header, header_inner, header_label):
             w.configure(bg=bg)
         header_accent.configure(bg=bg)
 
@@ -467,16 +474,11 @@ class BalanceApp(tk.Tk):
 
         inner = tk.Frame(wrapper, bg=base_bg)
         inner.pack(side="left", fill="both", expand=True,
-                    padx=(24, 14) if indent else (12, 14), pady=13 if indent else 15)
-
-        icon = NAV_ICONS.get(key, "")
-        icon_label = tk.Label(inner, text=icon, font=("Segoe UI", 10 if indent else 11), width=2,
-                               bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT, anchor="w")
-        icon_label.pack(side="left")
+                    padx=(24, 14) if indent else (16, 14), pady=13 if indent else 15)
 
         label = tk.Label(inner, text=text, font=("Segoe UI", 10 if indent else 11),
                           bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT, anchor="w",
-                          wraplength=170 if indent else None, justify="left")
+                          wraplength=190 if indent else None, justify="left")
         label.pack(side="left", fill="both", expand=True)
 
         def on_click(event=None, k=key):
@@ -487,24 +489,21 @@ class BalanceApp(tk.Tk):
                 hover_bg = self.COLOR_SIDEBAR_HOVER
                 for w in (wrapper, accent, inner):
                     w.configure(bg=hover_bg)
-                icon_label.configure(bg=hover_bg, fg=self.COLOR_GOLD)
                 label.configure(bg=hover_bg, fg=self.COLOR_SIDEBAR_TEXT_ACTIVE)
 
         def on_leave(event=None):
             if self.active_nav != key:
                 for w in (wrapper, accent, inner):
                     w.configure(bg=base_bg)
-                icon_label.configure(bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT)
                 label.configure(bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT)
 
-        for widget in (wrapper, accent, inner, icon_label, label):
+        for widget in (wrapper, accent, inner, label):
             widget.bind("<Button-1>", on_click)
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
 
         wrapper.accent = accent
         wrapper.inner = inner
-        wrapper.icon_label = icon_label
         wrapper.label = label
         wrapper.indent = indent
         wrapper.base_bg = base_bg
@@ -513,9 +512,9 @@ class BalanceApp(tk.Tk):
     def select_nav(self, key):
         """Switch the visible content page and restyle the sidebar so only
         the active section shows the gold accent bar, a clearly brighter
-        "pill" background, a gold icon, and full-white bold text - the
-        three states (default / hover / active) are visually distinct
-        enough that the current page never has to be guessed at."""
+        "pill" background, and full-white bold text - the three states
+        (default / hover / active) are visually distinct enough that the
+        current page never has to be guessed at."""
         self.active_nav = key
         for k, item in self.nav_items.items():
             selected = (k == key)
@@ -524,7 +523,6 @@ class BalanceApp(tk.Tk):
             item.configure(bg=bg)
             item.accent.configure(bg=self.COLOR_GOLD if selected else bg)
             item.inner.configure(bg=bg)
-            item.icon_label.configure(bg=bg, fg=self.COLOR_GOLD if selected else self.COLOR_SIDEBAR_TEXT)
             item.label.configure(
                 bg=bg,
                 fg=self.COLOR_SIDEBAR_TEXT_ACTIVE if selected else self.COLOR_SIDEBAR_TEXT,
@@ -772,12 +770,7 @@ class BalanceApp(tk.Tk):
         ttk.Label(threshold_row, text="Rows \u2265 70% are always flagged amber, regardless of this value.",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
 
-        calc_btn = tk.Button(
-            s3, text="Calculate Loss Ratio", command=self._calculate_loss_ratio,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=18, pady=9, cursor="hand2", borderwidth=0,
-        )
+        calc_btn = self._make_action_button(s3, "Calculate Loss Ratio", self._calculate_loss_ratio, kind="accent")
         calc_btn.pack(anchor="w")
 
         # --- Section 4: Log ---
@@ -844,6 +837,46 @@ class BalanceApp(tk.Tk):
         r, g, b = (max(0, min(255, c + amount)) for c in (r, g, b))
         return f"#{r:02X}{g:02X}{b:02X}"
 
+    def _make_action_button(self, parent, text, command, kind="accent", compact=False):
+        """Shared factory for every primary call-to-action button in the
+        app (Calculate Loss Ratio, Run Matching, Save Edits, Send This
+        Email, ...) - previously each of these was its own hand-built
+        tk.Button with slightly different padding/hover logic. Centralizing
+        them here means one visual language (flat fill, generous padding,
+        a genuine hover shade, a subtle pressed-in shade on click) across
+        every page instead of small inconsistencies page to page.
+
+        kind: 'accent' (sapphire - the default primary action), 'success'
+            (green - sending/affirmative actions), or 'quiet' (navy - a
+            lower-emphasis action like Save Signature that shouldn't
+            visually compete with the page's main CTA).
+        compact: smaller padding for a button that sits inline next to a
+            text field (e.g. Save Signature) rather than anchoring a
+            section on its own.
+        """
+        bg, fg = {
+            "accent": (self.COLOR_ACCENT, "white"),
+            "success": (self.COLOR_SUCCESS, "white"),
+            "quiet": (self.COLOR_PRIMARY, "white"),
+        }.get(kind, (self.COLOR_ACCENT, "white"))
+        hover_bg = self._shade(bg, -18)
+        press_bg = self._shade(bg, -32)
+        padx, pady, font_size = (12, 6, 9) if compact else (20, 11, 10)
+
+        btn = tk.Button(
+            parent, text=text, command=command,
+            font=("Segoe UI", font_size, "bold"), bg=bg, fg=fg,
+            activebackground=press_bg, activeforeground=fg,
+            relief="flat", borderwidth=0, cursor="hand2",
+            padx=padx, pady=pady,
+            highlightthickness=0,
+        )
+        btn.bind("<Enter>", lambda e: btn.configure(bg=hover_bg))
+        btn.bind("<Leave>", lambda e: btn.configure(bg=bg))
+        btn.bind("<ButtonPress-1>", lambda e: btn.configure(bg=press_bg))
+        btn.bind("<ButtonRelease-1>", lambda e: btn.configure(bg=hover_bg))
+        return btn
+
     def _loss_section_card(self, parent, number, title, pad_x, expand_bottom=False):
         """A numbered section card matching the app's '1. Upload & Filter'
         style numbering convention, for visual consistency across pages.
@@ -865,8 +898,8 @@ class BalanceApp(tk.Tk):
 
         badge = tk.Canvas(title_row, width=24, height=24, bg=self.COLOR_PANEL, highlightthickness=0)
         badge.pack(side="left", padx=(0, 10))
-        badge.create_oval(1, 1, 23, 23, fill=self.COLOR_PRIMARY, outline="")
-        badge.create_text(12, 12, text=number, fill=self.COLOR_GOLD, font=("Segoe UI Semibold", 10, "bold"))
+        badge.create_oval(1, 1, 23, 23, fill=self.COLOR_GOLD_DEEP, outline="")
+        badge.create_text(12, 12, text=number, fill="white", font=("Segoe UI Semibold", 10, "bold"))
 
         tk.Label(title_row, text=title, bg=self.COLOR_PANEL, fg=self.COLOR_PRIMARY,
                  font=("Segoe UI Semibold", 12, "bold")).pack(side="left")
@@ -1110,12 +1143,7 @@ class BalanceApp(tk.Tk):
                             "IGI Policy Number, the matched register reference, a match score, and a "
                             "Matched/Not Matched status.",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
-        run_btn = tk.Button(
-            s2, text="Run Matching", command=self._run_premium_register_match,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=18, pady=9, cursor="hand2", borderwidth=0,
-        )
+        run_btn = self._make_action_button(s2, "Run Matching", self._run_premium_register_match, kind="accent")
         run_btn.pack(anchor="w")
         self.premreg_summary_var = tk.StringVar(value="")
         ttk.Label(s2, textvariable=self.premreg_summary_var, foreground=self.COLOR_SUCCESS,
@@ -1458,12 +1486,8 @@ class BalanceApp(tk.Tk):
 
         sig_btn_holder = tk.Frame(sig_frame, bg=self.COLOR_PANEL)
         sig_btn_holder.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        sig_btn = tk.Button(
-            sig_btn_holder, text="Save Signature", command=self.save_receivable_signature,
-            font=("Segoe UI", 9, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=10, pady=4, cursor="hand2", borderwidth=0,
-        )
+        sig_btn = self._make_action_button(sig_btn_holder, "Save Signature", self.save_receivable_signature,
+                                            kind="quiet", compact=True)
         sig_btn.pack(expand=True)
 
         body = ttk.Frame(f)
@@ -1521,20 +1545,10 @@ class BalanceApp(tk.Tk):
         btn_row = ttk.Frame(right)
         btn_row.grid(row=4, column=0, sticky="w")
 
-        save_btn = tk.Button(
-            btn_row, text="Save Edits to Selected Email", command=self.save_receivable_email_edit,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
-        )
+        save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_receivable_email_edit, kind="accent")
         save_btn.pack(side="left", padx=(0, 8))
 
-        send_one_btn = tk.Button(
-            btn_row, text="Send This Email", command=self.send_individual_receivable_email,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_SUCCESS, fg="white",
-            activebackground="#1B5E20", activeforeground="white",
-            relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
-        )
+        send_one_btn = self._make_action_button(btn_row, "Send This Email", self.send_individual_receivable_email, kind="success")
         send_one_btn.pack(side="left")
 
     # ---------- Receivable actions ----------
@@ -2097,12 +2111,8 @@ class BalanceApp(tk.Tk):
         # multi-line text box rather than floating at the top of the row.
         sig_btn_holder = tk.Frame(sig_frame, bg=self.COLOR_PANEL)
         sig_btn_holder.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        sig_btn = tk.Button(
-            sig_btn_holder, text="Save Signature", command=self.save_signature,
-            font=("Segoe UI", 9, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=10, pady=4, cursor="hand2", borderwidth=0,
-        )
+        sig_btn = self._make_action_button(sig_btn_holder, "Save Signature", self.save_signature,
+                                            kind="quiet", compact=True)
         sig_btn.pack(expand=True)
 
         body = ttk.Frame(f)
@@ -2166,20 +2176,10 @@ class BalanceApp(tk.Tk):
         btn_row = ttk.Frame(right)
         btn_row.grid(row=4, column=0, sticky="w")
 
-        save_btn = tk.Button(
-            btn_row, text="Save Edits to Selected Email", command=self.save_email_edit,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_ACCENT, fg="white",
-            activebackground=self.COLOR_PRIMARY_DARK, activeforeground="white",
-            relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
-        )
+        save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_email_edit, kind="accent")
         save_btn.pack(side="left", padx=(0, 8))
 
-        send_one_btn = tk.Button(
-            btn_row, text="Send This Email", command=self.send_individual_email,
-            font=("Segoe UI", 10, "bold"), bg=self.COLOR_SUCCESS, fg="white",
-            activebackground="#1B5E20", activeforeground="white",
-            relief="flat", padx=14, pady=8, cursor="hand2", borderwidth=0,
-        )
+        send_one_btn = self._make_action_button(btn_row, "Send This Email", self.send_individual_email, kind="success")
         send_one_btn.pack(side="left")
 
     # ---------- Actions ----------
