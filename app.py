@@ -430,7 +430,7 @@ class BalanceApp(tk.Tk):
         submenu_block = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
         submenu_block.pack(fill="x", before=before)
         guide = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
-        guide.place(x=29, y=2, relheight=1.0, height=-4)
+        guide.place(x=29, y=2, relheight=1.0, height=-8)
 
         submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
         submenu_frame.pack(fill="x", pady=(2, 6))  # starts expanded
