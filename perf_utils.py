@@ -53,6 +53,12 @@ import time
 
 import openpyxl
 
+try:
+    from PIL import Image, ImageDraw, ImageTk
+    _PIL_AVAILABLE = True
+except ImportError:  # Pillow not installed - the progress panel's state
+    _PIL_AVAILABLE = False  # chip falls back to a plain (less smooth) Canvas oval
+
 
 # ---------------------------------------------------------------------------
 # 1. Background task runner for Tkinter
@@ -282,53 +288,79 @@ def _resolve_bg_color(widget):
 # and receivable_generator.py each keep their own small color constant
 # block rather than importing app.py's (which would be a backwards,
 # UI-depends-on-utility, import). Sapphire while running, muted gold
-# accent chip, success green / danger red on completion depending on
-# what the caller's own finish() text says.
+# percentage readout, success green / danger red on completion depending
+# on what the caller's own finish() text says.
 # ---------------------------------------------------------------------------
-_PB_TRACK = "#E3E9F1"        # light neutral trough
+_PB_TRACK = "#E4E9F0"        # light neutral trough
 _PB_RUNNING = "#2E6E9E"      # sapphire - matches COLOR_ACCENT
 _PB_DONE = "#1E8354"         # success green - matches COLOR_SUCCESS
 _PB_FAILED = "#B3402F"       # danger red - matches COLOR_DANGER
-_PB_GOLD = "#B8925A"         # muted gold - matches COLOR_GOLD
+_PB_PERCENT = "#B8925A"      # muted gold - matches COLOR_GOLD
 _PB_TEXT_MUTED = "#5E6E80"   # matches COLOR_MUTED
 _PB_TEXT_STRONG = "#16212E"  # matches COLOR_TEXT
+_PB_CARD_BG = "#FFFFFF"      # matches COLOR_PANEL
+_PB_CARD_BORDER = "#DCE3ED"  # matches COLOR_BORDER
 
-_PB_STYLES_READY = False
+
+def _round_rect_points(x1, y1, x2, y2, r):
+    """Corner points for a smooth-polygon rounded rectangle (a standard
+    Tk technique: 12 points around the 4 corners, drawn with
+    smooth=True so Tk bows each corner into a curve instead of a hard
+    angle). Used for both the bar's track and its fill, which is what
+    lets the bar look the same everywhere - unlike ttk.Progressbar,
+    plain Canvas drawing has no dependency on the active OS theme."""
+    r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
 
 
-def _ensure_progress_styles():
-    """Register the three named Progressbar styles (running / done /
-    failed) exactly once per process. Only takes effect on a theme that
-    actually honors custom trough/bar colors (ttk's "clam" theme and
-    similar) - native Windows themes ("vista"/"xpnative") render their
-    own chrome for a Progressbar and ignore color overrides, the same
-    limitation app.py's own _setup_style already works around for
-    buttons, so this degrades to the platform's native progress bar
-    look there rather than fighting it."""
-    global _PB_STYLES_READY
-    if _PB_STYLES_READY:
-        return
-    from tkinter import ttk
-    style = ttk.Style()
-    if style.theme_use() in ("vista", "xpnative"):
-        _PB_STYLES_READY = True
-        return
-    for name, color in (("GIMSRunning", _PB_RUNNING), ("GIMSDone", _PB_DONE), ("GIMSFailed", _PB_FAILED)):
-        style.configure(
-            f"{name}.Horizontal.TProgressbar",
-            troughcolor=_PB_TRACK, troughrelief="flat", borderwidth=0,
-            background=color, lightcolor=color, darkcolor=color,
-            thickness=10,
-        )
-    _PB_STYLES_READY = True
+_DOT_CACHE = {}
+
+
+def _make_state_dot(color, size=9, supersample=4):
+    """
+    Render the panel's small round "state chip" as a genuinely smooth,
+    anti-aliased dot, cached per color (there are only ever four: sapphire
+    running / green done / red failed / muted-grey idle).
+
+    Plain tk.Canvas.create_oval() has NO anti-aliasing at all, so at the
+    small size a status chip needs to stay (a handful of pixels, so it
+    doesn't compete with the status text next to it), it doesn't render
+    as a circle at all - it comes out as a hard-edged, almost-square blob
+    instead, since there just aren't enough pixels for Tk's line-drawing
+    algorithm to trace a curve. Drawing the circle at `supersample`x the
+    target resolution with Pillow and then downsampling with LANCZOS
+    resampling gives every edge pixel a proper partial-opacity blend
+    against the transparent background, which is what actually produces
+    a round-looking dot instead of a blocky one.
+    """
+    key = (color, size)
+    cached = _DOT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    big = size * supersample
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    pad = supersample  # small inset so the smoothed edge isn't clipped by the canvas bounds
+    draw.ellipse([pad, pad, big - pad, big - pad], fill=color)
+    img = img.resize((size, size), Image.LANCZOS)
+    photo = ImageTk.PhotoImage(img)
+    _DOT_CACHE[key] = photo
+    return photo
 
 
 class ProgressBarPanel:
     """
-    A small determinate/indeterminate progress bar + status line, meant
-    to sit directly under a "Generate Excel Reports"-style button.
+    A small, self-contained progress "card" meant to sit directly under a
+    "Generate Excel Reports"-style button - shown ONLY while a background
+    task (see run_in_background above) is actually running, and hidden
+    the rest of the time so it never sits on the page as an empty bar
+    with nothing to show.
 
-    Usage:
+    Usage is unchanged from before:
         panel = ProgressBarPanel(parent_frame)
         panel.frame.pack(fill="x", padx=12, pady=(0, 8))   # once, at build time
         ...
@@ -340,149 +372,231 @@ class ProgressBarPanel:
             busy_widgets=[...],
         )
 
-    The panel stays permanently packed in its slot (so it never disturbs
-    the surrounding layout by appearing/disappearing) and simply resets
-    to an empty, idle look between runs. Visually it's a compact two-line
-    "card": a status line with a colored state chip on the left and a
-    live percentage readout on the right, then a slim colored bar below
-    it - the bar recolors itself (sapphire while running, green on
-    finish(), red if finish()'s own text reads as a failure), so the
-    outcome of a run is legible even without reading the status text.
+    `panel.frame` is still packed exactly once, permanently, by the
+    caller - it's an empty outer "slot" that Tk automatically shrinks to
+    zero height whenever nothing is packed inside it, so showing/hiding
+    the panel never requires the caller to touch its own layout code.
+    start() reveals a bordered white card inside that slot; finish()
+    leaves the final result on screen just long enough to register, then
+    the panel quietly collapses back to nothing on its own. The bar
+    itself (track + fill, both rounded) is hand-drawn on a plain
+    tk.Canvas rather than a ttk.Progressbar, so its look is identical on
+    every Windows theme instead of depending on whether the active ttk
+    theme happens to honor custom Progressbar colors.
     """
-    def __init__(self, parent, width=320):
+    def __init__(self, parent, bar_height=9, auto_hide_delay=2600):
         import tkinter as tk
-        from tkinter import ttk
 
-        _ensure_progress_styles()
+        self._auto_hide_delay = auto_hide_delay
+        self._hide_job = None
+        self._anim_job = None
+        self._indeterminate = False
+        self._anim_pos = 0.0
+        self._bar_height = bar_height
+        self._state = "idle"
+        self._fraction = 0.0
+        self._visible = False
+
         bg = _resolve_bg_color(parent)
-        frame_kwargs = {"bg": bg} if bg else {}
+        outer_kwargs = {"bg": bg} if bg else {}
+        # Outer slot - packed once, permanently, by the caller. Left
+        # empty (no fixed size) so it collapses to 0 height whenever the
+        # card below isn't packed inside it.
+        self.frame = tk.Frame(parent, **outer_kwargs)
 
-        # A plain tk.Frame (not ttk.Frame) is used deliberately here even
-        # when the parent is a themed ttk widget: it's the only frame type
-        # that reliably accepts an explicit bg color on every Tk build,
-        # which keeps this panel's background matched to whatever it's
-        # dropped into (a themed ttk page vs. a hand-styled tk.Frame card
-        # elsewhere in the app) without needing the caller to tell it which
-        # kind of parent it has.
-        self.frame = tk.Frame(parent, **frame_kwargs)
+        # The visible card itself - a clean bordered white surface (the
+        # same "elevated surface on a soft canvas" language used by the
+        # numbered section cards elsewhere in the app) - not packed yet,
+        # so the panel starts fully hidden.
+        self._card = tk.Frame(self.frame, bg=_PB_CARD_BG,
+                               highlightbackground=_PB_CARD_BORDER, highlightthickness=1)
+        self._card_pack_kwargs = {"fill": "x"}
 
-        top_row = tk.Frame(self.frame, **frame_kwargs)
-        top_row.pack(fill="x", pady=(0, 4))
+        inner = tk.Frame(self._card, bg=_PB_CARD_BG)
+        inner.pack(fill="x", padx=14, pady=(11, 12))
 
-        # Small square state chip - a quiet color cue (sapphire/green/red)
-        # that echoes the accent-strip language used on cards elsewhere
-        # in the app, so this panel reads as part of the same family
-        # rather than a bare native widget dropped onto the page.
-        self._chip = tk.Canvas(top_row, width=8, height=8, highlightthickness=0, **frame_kwargs)
-        self._chip.pack(side="left", padx=(0, 8), pady=(2, 0))
-        self._chip_id = self._chip.create_oval(0, 0, 8, 8, fill=_PB_TEXT_MUTED, outline="")
+        top_row = tk.Frame(inner, bg=_PB_CARD_BG)
+        top_row.pack(fill="x", pady=(0, 9))
+
+        # Small round state chip - a quiet color cue (sapphire/green/red)
+        # echoing the accent language used elsewhere in the app. Rendered
+        # as a genuinely smooth anti-aliased dot via Pillow (see
+        # _make_state_dot) rather than a raw Canvas oval, which at this
+        # size renders as a hard-edged, near-square blob instead of a
+        # circle - Pillow is already a project dependency (used for the
+        # header logos in app.py), so this only needs a plain Canvas-oval
+        # fallback for the rare case it isn't installed.
+        self._chip_uses_image = _PIL_AVAILABLE
+        if self._chip_uses_image:
+            self._chip_img = _make_state_dot(_PB_TEXT_MUTED)
+            self._chip = tk.Label(top_row, image=self._chip_img, bg=_PB_CARD_BG, bd=0, highlightthickness=0)
+            self._chip.pack(side="left", padx=(0, 9), pady=(2, 0))
+        else:
+            self._chip = tk.Canvas(top_row, width=8, height=8, highlightthickness=0, bg=_PB_CARD_BG)
+            self._chip.pack(side="left", padx=(0, 9), pady=(2, 0))
+            self._chip_id = self._chip.create_oval(0, 0, 8, 8, fill=_PB_TEXT_MUTED, outline="")
 
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(top_row, textvariable=self.status_var,
                                       font=("Segoe UI", 9), anchor="w",
-                                      fg=_PB_TEXT_MUTED, **frame_kwargs)
+                                      fg=_PB_TEXT_MUTED, bg=_PB_CARD_BG)
         self.status_label.pack(side="left", fill="x", expand=True)
 
         self.percent_var = tk.StringVar(value="")
         self.percent_label = tk.Label(top_row, textvariable=self.percent_var,
                                        font=("Segoe UI Semibold", 9, "bold"), anchor="e",
-                                       fg=_PB_GOLD, **frame_kwargs)
+                                       fg=_PB_PERCENT, bg=_PB_CARD_BG)
         self.percent_label.pack(side="right")
 
-        self._style_prefix = "GIMSRunning"
-        self.bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
-                                    length=width, maximum=100, value=0,
-                                    style=f"{self._style_prefix}.Horizontal.TProgressbar")
-        self.bar.pack(fill="x")
+        self._bar = tk.Canvas(inner, height=bar_height, highlightthickness=0, bg=_PB_CARD_BG)
+        self._bar.pack(fill="x")
+        self._bar.bind("<Configure>", self._redraw)
 
-        self._indeterminate = False
+    # ---- visibility - the whole point of this rewrite ----
+    def _show(self):
+        if not self._visible:
+            self._card.pack(**self._card_pack_kwargs)
+            self._visible = True
 
+    def hide(self):
+        """Collapse the panel back to nothing. Safe to call any time."""
+        self._cancel_hide_job()
+        self._stop_animation()
+        if self._visible:
+            self._card.pack_forget()
+            self._visible = False
+
+    def _cancel_hide_job(self):
+        if self._hide_job is not None:
+            try:
+                self.frame.after_cancel(self._hide_job)
+            except Exception:
+                pass
+            self._hide_job = None
+
+    def _schedule_hide(self):
+        self._cancel_hide_job()
+        if self._auto_hide_delay is not None:
+            self._hide_job = self.frame.after(self._auto_hide_delay, self.hide)
+
+    # ---- drawing ----
+    def _redraw(self, event=None):
+        self._bar.delete("all")
+        w = self._bar.winfo_width()
+        h = self._bar_height
+        if w <= 2:
+            return
+        r = h / 2
+        fill_color = {"running": _PB_RUNNING, "done": _PB_DONE,
+                      "failed": _PB_FAILED, "idle": _PB_TRACK}[self._state]
+
+        self._bar.create_polygon(_round_rect_points(0, 0, w, h, r), smooth=True, fill=_PB_TRACK, outline="")
+
+        if self._indeterminate:
+            seg_w = max(34, w * 0.22)
+            x = self._anim_pos * (w + seg_w) - seg_w
+            x1, x2 = max(0, x), min(w, x + seg_w)
+            if x2 > x1:
+                self._bar.create_polygon(_round_rect_points(x1, 0, x2, h, r), smooth=True, fill=fill_color, outline="")
+        else:
+            fw = max(0, min(w, w * self._fraction))
+            if fw > 0:
+                fr = min(r, fw / 2)  # keep the fill's own corners rounded even when very narrow
+                self._bar.create_polygon(_round_rect_points(0, 0, fw, h, fr), smooth=True, fill=fill_color, outline="")
+
+    def _stop_animation(self):
+        if self._anim_job is not None:
+            try:
+                self.frame.after_cancel(self._anim_job)
+            except Exception:
+                pass
+            self._anim_job = None
+
+    def _animate(self):
+        self._anim_pos += 0.02
+        if self._anim_pos > 1.4:
+            self._anim_pos = 0.0
+        self._redraw()
+        self._anim_job = self.frame.after(20, self._animate)
+
+    # ---- state ----
     def _set_state(self, state):
         """state: 'running' | 'done' | 'failed' | 'idle' - drives both the
-        bar's own color and the small chip beside the status text."""
-        prefix, chip_color = {
-            "running": ("GIMSRunning", _PB_RUNNING),
-            "done": ("GIMSDone", _PB_DONE),
-            "failed": ("GIMSFailed", _PB_FAILED),
-            "idle": ("GIMSRunning", _PB_TEXT_MUTED),
-        }[state]
-        self._style_prefix = prefix
-        try:
-            self.bar.configure(style=f"{prefix}.Horizontal.TProgressbar")
-        except Exception:
-            pass  # native theme ignores custom styles - the bar still functions correctly
-        self._chip.itemconfig(self._chip_id, fill=chip_color)
+        bar's fill color and the small chip beside the status text."""
+        self._state = state
+        chip_color = {"running": _PB_RUNNING, "done": _PB_DONE,
+                      "failed": _PB_FAILED, "idle": _PB_TEXT_MUTED}[state]
+        if self._chip_uses_image:
+            self._chip_img = _make_state_dot(chip_color)  # keep a live reference - Tk drops GC'd PhotoImages
+            self._chip.configure(image=self._chip_img)
+        else:
+            self._chip.itemconfig(self._chip_id, fill=chip_color)
 
     def start(self, total=None, text="Starting..."):
-        """Call once right before the background task starts. total=None
-        switches the bar to indeterminate ("busy stripe") mode, used for
-        operations that don't have a natural item count up front (e.g.
-        fuzzy-matching a whole file in one call)."""
+        """Call once right before the background task starts. Reveals the
+        panel (if it was hidden) and switches to running state. total=None
+        renders an indeterminate "marching" bar, for operations without a
+        natural item count up front (e.g. fuzzy-matching a whole file in
+        one call)."""
+        self._cancel_hide_job()
+        self._show()
         self._set_state("running")
-        if self._indeterminate:
-            self.bar.stop()
-            self._indeterminate = False
-        if total:
-            self.bar.configure(mode="determinate", maximum=max(total, 1), value=0)
-            self.percent_var.set("0%")
-        else:
-            self.bar.configure(mode="indeterminate")
-            self.bar.start(12)
-            self._indeterminate = True
-            self.percent_var.set("")
+        self._fraction = 0.0
         self.status_var.set(text)
         self.status_label.configure(fg=_PB_TEXT_STRONG)
+        self._stop_animation()
+        if total:
+            self._indeterminate = False
+            self.percent_var.set("0%")
+        else:
+            self._indeterminate = True
+            self.percent_var.set("")
+            self._anim_pos = 0.0
+            self._animate()
+        self._redraw()
 
     def update(self, current, total=None, text=None):
         """Matches the on_progress_value(current, total, text) signature
         run_in_background calls directly, so `on_progress_value=panel.update`
         can be passed straight through with no wrapper lambda needed."""
         if total:
-            if int(self.bar["maximum"]) != int(total):
-                self.bar.configure(mode="determinate", maximum=max(total, 1))
             if self._indeterminate:
-                self.bar.stop()
+                self._stop_animation()
                 self._indeterminate = False
-            self.bar["value"] = current
-            pct = (current / total * 100) if total else 0
-            self.percent_var.set(f"{pct:.0f}%")
+            self._fraction = max(0.0, min(1.0, current / total))
+            self.percent_var.set(f"{self._fraction * 100:.0f}%")
+            self._redraw()
         if text:
             self.status_var.set(text)
         elif total:
             self.status_var.set(f"{current:,} / {total:,}")
 
     def finish(self, text="Done."):
-        """Call from on_done/on_error. Leaves the bar full (or stopped, if
-        it was indeterminate) with a final status line - it stays visible
-        rather than disappearing, so the user can see the last run's
-        outcome until they start the next one. The bar and status text
-        recolor to green or red depending on whether `text` itself reads
-        as a failure (looks for "fail"/"error" case-insensitively), so a
-        failed run is unmistakable even at a glance."""
+        """Call from on_done/on_error. Shows the final result (full bar,
+        green or red depending on whether `text` itself reads as a
+        failure - looks for "fail"/"error" case-insensitively) just long
+        enough to register, then the panel automatically hides itself
+        again a couple of seconds later."""
+        self._stop_animation()
+        self._indeterminate = False
         failed = any(w in text.lower() for w in ("fail", "error"))
         self._set_state("failed" if failed else "done")
-        if self._indeterminate:
-            self.bar.stop()
-            self._indeterminate = False
-            self.bar.configure(mode="determinate", maximum=100, value=100)
-        else:
-            try:
-                self.bar["value"] = self.bar["maximum"]
-            except Exception:
-                pass
+        self._fraction = 1.0
         self.percent_var.set("" if failed else "100%")
         self.status_var.set(text)
         self.status_label.configure(fg=_PB_FAILED if failed else _PB_DONE)
+        self._redraw()
+        self._schedule_hide()
 
     def reset(self):
-        if self._indeterminate:
-            self.bar.stop()
-            self._indeterminate = False
+        """Hide immediately and clear all state - safe to call any time,
+        e.g. right before kicking off a new run."""
         self._set_state("idle")
-        self.bar.configure(mode="determinate", maximum=100, value=0)
+        self._fraction = 0.0
         self.percent_var.set("")
         self.status_var.set("")
         self.status_label.configure(fg=_PB_TEXT_MUTED)
+        self.hide()
 
 
 # ---------------------------------------------------------------------------
