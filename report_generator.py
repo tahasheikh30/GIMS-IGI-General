@@ -50,6 +50,26 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NUM_FORMAT = "#,##0;(#,##0);-"
 
 
+def _write_text_safe(cell):
+    """
+    Guard against a confirmed real-world data-quality issue: some source
+    exports carry junk placeholder text in a text column (e.g. "=../-",
+    "====-=-") instead of a real value. openpyxl auto-detects ANY string
+    value starting with "=" as a live Excel formula - and since junk text
+    like that isn't valid formula syntax, Excel then flags the whole
+    workbook as containing "unreadable content" and silently strips it on
+    open (the "we found a problem with some content" repair prompt). This
+    sheet writes every original source column verbatim (raw transaction
+    rows), so it carries the same risk as receivable_generator.py's own
+    data sheets - force the cell back to plain text whenever openpyxl
+    auto-classified it as a formula, preserving the original text exactly
+    (no stray leading apostrophe) with zero functional loss.
+    """
+    if cell.data_type == "f":
+        cell.data_type = "s"
+    return cell
+
+
 def safe_filename(name):
     name = re.sub(r'[\\/*?:"<>|]', "_", str(name)).strip()
     return name[:150]  # keep filenames reasonable length
@@ -114,6 +134,7 @@ def _write_raw_data_into(ws, raw_df, report=None):
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
             cell = ws.cell(row=i, column=j, value=val)
+            _write_text_safe(cell)
             # Only style a cell that actually has a value - see the matching
             # comment in receivable_generator.py's _write_sheet(). Setting
             # .font on a still-valueless cell forces openpyxl to write it out

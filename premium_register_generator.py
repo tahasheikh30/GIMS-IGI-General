@@ -57,6 +57,27 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NEW_COLUMNS = ["IGI Policy Number", "Matched Leader Ref (Register)", "Match Score", "Match Status"]
 
 
+def _write_text_safe(cell):
+    """
+    Guard against a confirmed real-world data-quality issue: a source
+    export can carry junk placeholder text in a text column (e.g.
+    "=../-", "====-=-") instead of a real value. openpyxl auto-detects
+    ANY string value starting with "=" as a live Excel formula - and
+    since junk text like that isn't valid formula syntax, Excel then
+    flags the whole workbook as containing "unreadable content" and
+    silently strips it on open (the "we found a problem with some
+    content" repair prompt). This writer preserves every original column
+    from the leader's own file verbatim, so it carries the same risk as
+    receivable_generator.py's own data sheets - force the cell back to
+    plain text whenever openpyxl auto-classified it as a formula,
+    preserving the original text exactly (no stray leading apostrophe)
+    with zero functional loss.
+    """
+    if cell.data_type == "f":
+        cell.data_type = "s"
+    return cell
+
+
 def _safe_filename_part(name):
     name = re.sub(r"[^\w]+", "_", str(name).strip())
     return re.sub(r"_+", "_", name).strip("_")[:80] or "output"
@@ -126,6 +147,7 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
         is_unmatched = row[status_col_idx] != "Matched"
         for j, (col, val) in enumerate(zip(columns, row), start=1):
             cell = ws.cell(row=i, column=j, value=val)
+            _write_text_safe(cell)
             if val is None:
                 continue
             # The unmatched-row highlight is functional information (it's

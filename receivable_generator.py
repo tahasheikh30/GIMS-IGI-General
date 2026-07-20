@@ -190,6 +190,7 @@ def _write_sheet(ws, df, amount_col, drop_cols=None, report=None):
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
             cell = ws.cell(row=i, column=j, value=val)
+            _write_text_safe(cell)
             # IMPORTANT: only style a cell that actually has a value. In
             # openpyxl, calling ws.cell(value=None) alone writes nothing
             # to the sheet - the cell simply doesn't exist in the saved
