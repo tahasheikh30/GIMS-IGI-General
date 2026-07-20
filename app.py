@@ -8,6 +8,7 @@ import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -33,6 +34,15 @@ import run_log
 import premium_register_processor as prp
 import premium_register_generator as prg
 import perf_utils
+import bank_statement_processor as bsp
+import bank_position_register as bpr
+import bank_position_generator as bpg
+
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:  # keyring not installed - password slots still work, just have to be
+    KEYRING_AVAILABLE = False  # retyped each run instead of saved to the OS credential store
 
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -124,6 +134,15 @@ class BalanceApp(tk.Tk):
         self.premreg_leader_file = ""
         self.premreg_register_file = ""
         self.premreg_result_df = None
+
+        # Bank Position module state
+        self.bankpos_statement_paths = {}     # bank_key -> filepath
+        self.bankpos_statement_results = {}   # bank_key -> bank_statement_processor.StatementResult
+        self.bankpos_balance_vars = {}        # template_row_key -> tk.StringVar (conventional + islamic)
+        self.bankpos_remittances = []         # list of dicts: reinsurer, insured_name, amount, currency
+        self.bankpos_previous_file_var = None  # set in _build_bank_position_page
+        self.bankpos_output_dir = os.path.join(os.getcwd(), "bank_position_output")
+        self.bankpos_last_warnings = []
 
         self._load_logos()
         self._setup_style()
@@ -360,6 +379,14 @@ class BalanceApp(tk.Tk):
             before=bottom_anchor,
         )
 
+        finance_header = self._build_collapsible_menu(
+            sidebar, "Finance",
+            [
+                ("bank_position", "Bank Position"),
+            ],
+            before=coinsurance_header,
+        )
+
         self._build_collapsible_menu(
             sidebar, "General Operations",
             [
@@ -367,7 +394,7 @@ class BalanceApp(tk.Tk):
                 ("loss_ratio", "Loss Ratio"),
                 ("renewal", "Renewal"),
             ],
-            before=coinsurance_header,
+            before=finance_header,
         )
 
         # Bottom-anchored footer strip - a quiet, permanent "floor" under
@@ -551,6 +578,11 @@ class BalanceApp(tk.Tk):
         loss_ratio_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["loss_ratio"] = loss_ratio_page
         self._build_loss_ratio_page(loss_ratio_page)
+
+        bank_position_page = ttk.Frame(container)
+        bank_position_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["bank_position"] = bank_position_page
+        self._build_bank_position_page(bank_position_page)
 
         pc_email_page = ttk.Frame(container)
         pc_email_page.grid(row=0, column=0, sticky="nsew")
@@ -1056,6 +1088,586 @@ class BalanceApp(tk.Tk):
         self._log_loss(f"\nSaved: {output_path}")
         self.status_var.set(f"Loss Ratio report saved: {os.path.basename(output_path)}")
         messagebox.showinfo("Done", f"Loss Ratio report generated successfully:\n{output_path}")
+
+    # ---------- Bank Position module ----------
+    BANKPOS_KEYRING_SERVICE = "GIMS_BankPosition"
+    BANKPOS_STATEMENT_BANKS = [
+        ("hbl", "Habib Bank Limited (HBL)"),
+        ("mcb", "MCB Bank"),
+        ("faysal", "Faysal Bank"),
+        ("bafl", "Bank Alfalah (BAFL)"),
+        ("js", "JS Bank"),
+    ]
+
+    def _build_bank_position_page(self, parent):
+        """Daily CFO Bank Position report: previous file -> today's
+        balances (manual entry, pre-filled from parsed statements where
+        available) -> remittances -> Expected Items Register (Major
+        Payments/Receivables, with auto-reconciliation) -> generate +
+        send. Same scrollable numbered-card pattern as Loss Ratio /
+        Premium Register."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        PAD_X = 20
+
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Bank Position", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Daily conventional + Islamic bank balances, remittances, and expected "
+                                "receivables/payments for the CFO - built on top of yesterday's file so "
+                                "Kibor rates, T-Bills, and the Investment portfolio carry forward untouched.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+
+        # --- Section 1: Previous day's file ---
+        s1 = self._loss_section_card(body, "1", "Previous Day's File", PAD_X)
+        ttk.Label(s1, text="Today's file is built on top of this one - every section not covered below "
+                            "(Kibor rates, T-Bills, Investment portfolio, Annex-A) is carried forward exactly as-is.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+        prev_row = ttk.Frame(s1)
+        prev_row.pack(fill="x")
+        self.bankpos_previous_file_var = tk.StringVar()
+        ttk.Entry(prev_row, textvariable=self.bankpos_previous_file_var, font=("Segoe UI", 10)).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._make_pill_button(prev_row, "Browse...", self._browse_bankpos_previous_file, bg=self.COLOR_ACCENT).pack(side="left", padx=(0, 8))
+        self._make_pill_button(prev_row, "Load", self._load_bankpos_previous_file, bg=self.COLOR_PRIMARY).pack(side="left")
+
+        # --- Section 2: Statement uploads + passwords ---
+        s2 = self._loss_section_card(body, "2", "Statement Uploads (optional, per bank)", PAD_X)
+        ttk.Label(s2, text="The live portal balance you type in Section 3 is always preferred - statements here are "
+                            "used to pre-fill a starting value and for the receivables reconciliation in Section 5. "
+                            "If a statement is password-protected, save its password once and it unlocks automatically "
+                            "from then on (stored in Windows' own credential store, not in a plain file).",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 12))
+
+        self.bankpos_slot_widgets = {}
+        for bank_key, display_name in self.BANKPOS_STATEMENT_BANKS:
+            row = tk.Frame(s2, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+            row.pack(fill="x", pady=(0, 6))
+            inner = tk.Frame(row, bg=self.COLOR_PANEL_ALT)
+            inner.pack(fill="x", padx=12, pady=8)
+
+            tk.Label(inner, text=display_name, font=("Segoe UI", 10, "bold"), bg=self.COLOR_PANEL_ALT,
+                     fg=self.COLOR_TEXT, width=24, anchor="w").pack(side="left")
+
+            name_var = tk.StringVar(value="No file selected")
+            tk.Label(inner, textvariable=name_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
+                     fg=self.COLOR_MUTED, width=22, anchor="w").pack(side="left", padx=(6, 6))
+
+            self._make_pill_button(inner, "Browse...", lambda bk=bank_key: self._browse_bankpos_statement(bk),
+                                    bg=self.COLOR_ACCENT).pack(side="left", padx=(0, 10))
+
+            tk.Label(inner, text="Password:", font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED).pack(side="left")
+            pw_var = tk.StringVar()
+            ttk.Entry(inner, textvariable=pw_var, show="*", width=14).pack(side="left", padx=(4, 6))
+            self._make_pill_button(inner, "Save", lambda bk=bank_key, v=pw_var: self._save_bankpos_password(bk, v),
+                                    bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left")
+
+            status_var = tk.StringVar(value="")
+            tk.Label(inner, textvariable=status_var, font=("Segoe UI", 9, "bold"), bg=self.COLOR_PANEL_ALT,
+                     fg=self.COLOR_SUCCESS, width=14, anchor="w").pack(side="left", padx=(10, 0))
+
+            self.bankpos_slot_widgets[bank_key] = {"name_var": name_var, "pw_var": pw_var, "status_var": status_var}
+
+        parse_row = ttk.Frame(s2)
+        parse_row.pack(fill="x", pady=(6, 0))
+        self._make_action_button(parse_row, "Parse All Statements", self._parse_bankpos_statements, kind="accent").pack(side="left")
+
+        # --- Section 3: Today's balances ---
+        s3 = self._loss_section_card(body, "3", "Today's Balances", PAD_X)
+        ttk.Label(s3, text="Read straight off each bank's portal dashboard - this is preferred over the statement's "
+                            "closing balance, which is always at least a day old. Load Section 1's file first to "
+                            "populate this list with the real account names and yesterday's starting values.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+
+        balances_cols = ttk.Frame(s3)
+        balances_cols.pack(fill="both", expand=True)
+        balances_cols.columnconfigure(0, weight=1)
+        balances_cols.columnconfigure(1, weight=1)
+
+        conv_col = ttk.Frame(balances_cols)
+        conv_col.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        ttk.Label(conv_col, text="Conventional", font=("Segoe UI", 10, "bold"), foreground=self.COLOR_PRIMARY).pack(anchor="w", pady=(0, 4))
+        self.bankpos_conventional_frame = ttk.Frame(conv_col)
+        self.bankpos_conventional_frame.pack(fill="both", expand=True)
+
+        isl_col = ttk.Frame(balances_cols)
+        isl_col.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        ttk.Label(isl_col, text="Islamic (Takaful)", font=("Segoe UI", 10, "bold"), foreground=self.COLOR_PRIMARY).pack(anchor="w", pady=(0, 4))
+        self.bankpos_islamic_frame = ttk.Frame(isl_col)
+        self.bankpos_islamic_frame.pack(fill="both", expand=True)
+
+        self.bankpos_balances_placeholder = ttk.Label(
+            s3, text="Load Section 1's file to populate this list.", foreground=self.COLOR_MUTED, font=("Segoe UI", 9, "italic"))
+        self.bankpos_balances_placeholder.pack(anchor="w", pady=(8, 0))
+
+        # --- Section 4: Remittances ---
+        s4 = self._loss_section_card(body, "4", "Outward Remittances", PAD_X)
+        ttk.Label(s4, text="Manual entry, per current process. Note: the template has a fixed 3-row capacity for "
+                            "this section - a 4th+ remittance on the same day will be flagged for manual addition "
+                            "rather than silently dropped or risking corruption of the sheet below it.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+
+        remit_form = ttk.Frame(s4)
+        remit_form.pack(fill="x", pady=(0, 8))
+        for i, (label, width) in enumerate([("Reinsurer/Broker", 22), ("Insured Name", 20), ("Amount (PKR)", 14), ("Currency", 8)]):
+            ttk.Label(remit_form, text=label, style="Panel.TLabel", font=("Segoe UI", 9)).grid(row=0, column=i, sticky="w", padx=4)
+        self.bankpos_remit_reinsurer_var = tk.StringVar()
+        self.bankpos_remit_insured_var = tk.StringVar()
+        self.bankpos_remit_amount_var = tk.StringVar()
+        self.bankpos_remit_currency_var = tk.StringVar(value="PKR")
+        ttk.Entry(remit_form, textvariable=self.bankpos_remit_reinsurer_var, width=22).grid(row=1, column=0, padx=4)
+        ttk.Entry(remit_form, textvariable=self.bankpos_remit_insured_var, width=20).grid(row=1, column=1, padx=4)
+        ttk.Entry(remit_form, textvariable=self.bankpos_remit_amount_var, width=14).grid(row=1, column=2, padx=4)
+        ttk.Entry(remit_form, textvariable=self.bankpos_remit_currency_var, width=8).grid(row=1, column=3, padx=4)
+        self._make_pill_button(remit_form, "Add", self._add_bankpos_remittance, bg=self.COLOR_ACCENT).grid(row=1, column=4, padx=(10, 0))
+
+        remit_list_frame = tk.Frame(s4, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        remit_list_frame.pack(fill="x", pady=(4, 4))
+        self.bankpos_remit_tree = ttk.Treeview(remit_list_frame, columns=("reinsurer", "insured", "amount", "currency"),
+                                                show="headings", height=4)
+        for col, text, width in [("reinsurer", "Reinsurer/Broker", 220), ("insured", "Insured Name", 180),
+                                  ("amount", "Amount", 130), ("currency", "Currency", 80)]:
+            self.bankpos_remit_tree.heading(col, text=text)
+            self.bankpos_remit_tree.column(col, width=width, anchor="e" if col == "amount" else "w")
+        self.bankpos_remit_tree.pack(fill="x")
+        self._make_pill_button(s4, "Remove Selected", self._remove_bankpos_remittance,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(anchor="w", pady=(6, 0))
+
+        # --- Section 5: Expected Items Register (Major Payments/Receivables) ---
+        s5 = self._loss_section_card(body, "5", "Expected Items Register (Major Payments/Receivables)", PAD_X)
+        ttk.Label(s5, text="Log anything expected before it lands - reconciliation below auto-clears it once a "
+                            "matching credit/debit shows up in a parsed statement, and flags anything still open "
+                            "past its expected date as overdue. A match is only ever auto-accepted when there's "
+                            "exactly one candidate; anything ambiguous is left for you to confirm.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+
+        reg_form = ttk.Frame(s5)
+        reg_form.pack(fill="x", pady=(0, 8))
+        labels = ["Category", "Counterparty", "Amount (PKR)", "Expected Date (YYYY-MM-DD)", "Bank (optional)", "Note (optional)"]
+        for i, label in enumerate(labels):
+            ttk.Label(reg_form, text=label, style="Panel.TLabel", font=("Segoe UI", 9)).grid(row=0, column=i, sticky="w", padx=4)
+        self.bankpos_reg_category_var = tk.StringVar(value=bpr.CATEGORY_RECEIVABLE)
+        ttk.Combobox(reg_form, textvariable=self.bankpos_reg_category_var,
+                     values=[bpr.CATEGORY_RECEIVABLE, bpr.CATEGORY_PAYMENT], state="readonly", width=12).grid(row=1, column=0, padx=4)
+        self.bankpos_reg_counterparty_var = tk.StringVar()
+        ttk.Entry(reg_form, textvariable=self.bankpos_reg_counterparty_var, width=22).grid(row=1, column=1, padx=4)
+        self.bankpos_reg_amount_var = tk.StringVar()
+        ttk.Entry(reg_form, textvariable=self.bankpos_reg_amount_var, width=14).grid(row=1, column=2, padx=4)
+        self.bankpos_reg_date_var = tk.StringVar()
+        ttk.Entry(reg_form, textvariable=self.bankpos_reg_date_var, width=18).grid(row=1, column=3, padx=4)
+        self.bankpos_reg_bank_var = tk.StringVar()
+        ttk.Combobox(reg_form, textvariable=self.bankpos_reg_bank_var,
+                     values=[""] + [bk for bk, _ in self.BANKPOS_STATEMENT_BANKS], width=10).grid(row=1, column=4, padx=4)
+        self.bankpos_reg_note_var = tk.StringVar()
+        ttk.Entry(reg_form, textvariable=self.bankpos_reg_note_var, width=20).grid(row=1, column=5, padx=4)
+        self._make_pill_button(reg_form, "Add Item", self._add_bankpos_register_item, bg=self.COLOR_ACCENT).grid(row=1, column=6, padx=(10, 0))
+
+        reg_toolbar = ttk.Frame(s5)
+        reg_toolbar.pack(fill="x", pady=(4, 4))
+        self._make_action_button(reg_toolbar, "Reconcile Now", self._reconcile_bankpos_register, kind="accent").pack(side="left")
+        ttk.Button(reg_toolbar, text="Refresh List", command=self._refresh_bankpos_register_tree).pack(side="left", padx=(8, 0))
+
+        reg_list_frame = tk.Frame(s5, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        reg_list_frame.pack(fill="x", pady=(4, 4))
+        self.bankpos_reg_tree = ttk.Treeview(
+            reg_list_frame, columns=("category", "counterparty", "amount", "expected_date", "bank", "status", "overdue"),
+            show="headings", height=8)
+        for col, text, width in [("category", "Category", 90), ("counterparty", "Counterparty", 180),
+                                  ("amount", "Amount", 110), ("expected_date", "Expected", 90),
+                                  ("bank", "Bank", 70), ("status", "Status", 130), ("overdue", "Overdue", 80)]:
+            self.bankpos_reg_tree.heading(col, text=text)
+            self.bankpos_reg_tree.column(col, width=width, anchor="e" if col == "amount" else "w")
+        self.bankpos_reg_tree.tag_configure("overdue_row", background="#F8D7DA")
+        self.bankpos_reg_tree.pack(fill="x")
+
+        self.bankpos_reg_log = scrolledtext.ScrolledText(s5, height=5, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.bankpos_reg_log.pack(fill="x", pady=(8, 0))
+
+        # --- Section 6: Generate & Send ---
+        s6 = self._loss_section_card(body, "6", "Generate & Send", PAD_X, expand_bottom=True)
+        out_row = ttk.Frame(s6)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.bankpos_output_dir_var = tk.StringVar(value=self.bankpos_output_dir)
+        ttk.Entry(out_row, textvariable=self.bankpos_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_bankpos_output_dir).pack(side="left")
+
+        gen_row = ttk.Frame(s6)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate Bank Position Report", self._generate_bankpos_report, kind="accent").pack(side="left")
+
+        self.bankpos_progress = perf_utils.ProgressBarPanel(s6)
+        self.bankpos_progress.frame.pack(fill="x", pady=(4, 8))
+
+        send_row = ttk.Frame(s6)
+        send_row.pack(fill="x", pady=(4, 8))
+        ttk.Label(send_row, text="Send to (CFO email)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.bankpos_recipient_var = tk.StringVar()
+        ttk.Entry(send_row, textvariable=self.bankpos_recipient_var, width=30).pack(side="left", padx=(0, 8))
+        self.bankpos_dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(send_row, text="Dry run", variable=self.bankpos_dry_run_var).pack(side="left", padx=(0, 8))
+        self._make_action_button(send_row, "Send", self._send_bankpos_report, kind="success", compact=True).pack(side="left")
+
+        self.bankpos_log = scrolledtext.ScrolledText(s6, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.bankpos_log.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._refresh_bankpos_register_tree()
+
+    def _log_bankpos(self, msg):
+        self.bankpos_log.insert("end", str(msg) + "\n")
+        self.bankpos_log.see("end")
+
+    # ---- Section 1 actions ----
+    def _browse_bankpos_previous_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if path:
+            self.bankpos_previous_file_var.set(path)
+
+    def _load_bankpos_previous_file(self):
+        path = self.bankpos_previous_file_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Select a valid previous-day Bank Position file first.")
+            return
+        try:
+            conv_labels, isl_labels = bpg.get_account_labels(path)
+            conv_prior, isl_prior = bpg.get_prior_balances(path)
+        except Exception as e:
+            messagebox.showerror("Could not read file", f"Could not read account labels from this file:\n\n{e}")
+            return
+
+        self.bankpos_balance_vars = {}
+        for widget in list(self.bankpos_conventional_frame.winfo_children()):
+            widget.destroy()
+        for widget in list(self.bankpos_islamic_frame.winfo_children()):
+            widget.destroy()
+
+        for row_key, label in conv_labels.items():
+            self._make_bankpos_balance_row(self.bankpos_conventional_frame, row_key, label, conv_prior.get(row_key))
+        for row_key, label in isl_labels.items():
+            self._make_bankpos_balance_row(self.bankpos_islamic_frame, row_key, label, isl_prior.get(row_key))
+
+        self.bankpos_balances_placeholder.pack_forget()
+        self._log_bankpos(f"Loaded account list and prior balances from: {os.path.basename(path)}")
+        self.status_var.set("Bank Position: previous file loaded. Today's balances pre-filled with yesterday's values.")
+
+    def _make_bankpos_balance_row(self, parent, row_key, label, prior_value):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text=str(label), font=("Segoe UI", 9), width=26, anchor="w").pack(side="left")
+        var = tk.StringVar(value=f"{prior_value:,.2f}" if isinstance(prior_value, (int, float)) else "")
+        ttk.Entry(row, textvariable=var, width=16, font=("Segoe UI", 9)).pack(side="left")
+        self.bankpos_balance_vars[row_key] = var
+
+    # ---- Section 2 actions ----
+    def _browse_bankpos_statement(self, bank_key):
+        path = filedialog.askopenfilename(filetypes=[("Statement files", "*.xls *.xlsx *.csv *.pdf"), ("All files", "*.*")])
+        if path:
+            self.bankpos_statement_paths[bank_key] = path
+            self.bankpos_slot_widgets[bank_key]["name_var"].set(os.path.basename(path))
+
+    def _bankpos_password_key(self, bank_key):
+        return f"{self.BANKPOS_KEYRING_SERVICE}:{bank_key}"
+
+    def _save_bankpos_password(self, bank_key, pw_var):
+        pw = pw_var.get()
+        if not pw:
+            messagebox.showinfo("Nothing to save", "Type a password first.")
+            return
+        if not KEYRING_AVAILABLE:
+            messagebox.showwarning(
+                "keyring not installed",
+                "The 'keyring' package isn't installed, so this password can't be saved to Windows' credential "
+                "store - it'll need to be retyped each session. (pip install keyring)")
+            return
+        keyring.set_password(self.BANKPOS_KEYRING_SERVICE, bank_key, pw)
+        self.bankpos_slot_widgets[bank_key]["status_var"].set("Password saved")
+        pw_var.set("")
+
+    def _bankpos_get_saved_password(self, bank_key):
+        if not KEYRING_AVAILABLE:
+            return None
+        try:
+            return keyring.get_password(self.BANKPOS_KEYRING_SERVICE, bank_key)
+        except Exception:
+            return None
+
+    def _parse_bankpos_statements(self):
+        pairs = [(fp, bk) for bk, fp in self.bankpos_statement_paths.items()]
+        if not pairs:
+            messagebox.showinfo("Nothing to parse", "Browse to at least one statement file first.")
+            return
+
+        password_lookup = {bk: self._bankpos_get_saved_password(bk) for bk, _ in pairs}
+        self._log_bankpos(f"\nParsing {len(pairs)} statement(s)...")
+
+        def worker(report):
+            return bsp.parse_batch(pairs, password_lookup=password_lookup)
+
+        def on_done(result):
+            results, errors = result
+            self.bankpos_statement_results = {r.bank_key: r for r in results}
+            for r in results:
+                self._log_bankpos(f"  OK   {r.bank_key}: closing balance {r.closing_balance:,.2f} as of {r.closing_date}"
+                                   + (f"  [{'; '.join(r.warnings)}]" if r.warnings else ""))
+                self.bankpos_slot_widgets[r.bank_key]["status_var"].set(f"Parsed: {r.closing_balance:,.0f}")
+                row_key = bpg.STATEMENT_BANK_TO_TEMPLATE_ROW.get(r.bank_key)
+                if row_key and row_key in self.bankpos_balance_vars and not self.bankpos_balance_vars[row_key].get().strip():
+                    # Only pre-fill if the user hasn't already typed something -
+                    # manual entry always wins over a statement value.
+                    self.bankpos_balance_vars[row_key].set(f"{r.closing_balance:,.2f}")
+            for e in errors:
+                self._log_bankpos(f"  ERROR  {e.filename}: {e.message}")
+                if isinstance(e, bsp.PasswordRequired):
+                    for bk, fp in self.bankpos_statement_paths.items():
+                        if fp == e.filepath:
+                            self.bankpos_slot_widgets[bk]["status_var"].set("Password needed")
+            self.status_var.set(f"Bank Position: parsed {len(results)}/{len(pairs)} statement(s).")
+
+        def on_error(exc):
+            self._log_bankpos(f"\nERROR: {exc}")
+            messagebox.showerror("Parsing failed", str(exc))
+
+        perf_utils.run_in_background(self, worker, on_done=on_done, on_error=on_error)
+
+    # ---- Section 4 actions (remittances) ----
+    def _add_bankpos_remittance(self):
+        try:
+            amount = float(self.bankpos_remit_amount_var.get().replace(",", ""))
+        except ValueError:
+            messagebox.showerror("Invalid amount", "Amount must be a number.")
+            return
+        if not self.bankpos_remit_reinsurer_var.get().strip():
+            messagebox.showerror("Missing Reinsurer/Broker", "Enter the Reinsurer/Broker name.")
+            return
+        entry = {
+            "reinsurer": self.bankpos_remit_reinsurer_var.get().strip(),
+            "insured_name": self.bankpos_remit_insured_var.get().strip(),
+            "amount": amount,
+            "currency": self.bankpos_remit_currency_var.get().strip() or "PKR",
+        }
+        self.bankpos_remittances.append(entry)
+        self.bankpos_remit_tree.insert("", "end", values=(entry["reinsurer"], entry["insured_name"],
+                                                            f"{entry['amount']:,.2f}", entry["currency"]))
+        self.bankpos_remit_reinsurer_var.set("")
+        self.bankpos_remit_insured_var.set("")
+        self.bankpos_remit_amount_var.set("")
+        if len(self.bankpos_remittances) > bpg.REMITTANCES_CAPACITY:
+            self._log_bankpos(f"\nNote: {len(self.bankpos_remittances)} remittances entered, but the template "
+                               f"only has room for {bpg.REMITTANCES_CAPACITY} - the extra one(s) will need manual "
+                               f"addition after generating (you'll get a warning at generate time too).")
+
+    def _remove_bankpos_remittance(self):
+        sel = self.bankpos_remit_tree.selection()
+        if not sel:
+            return
+        idx = self.bankpos_remit_tree.index(sel[0])
+        del self.bankpos_remittances[idx]
+        self.bankpos_remit_tree.delete(sel[0])
+
+    # ---- Section 5 actions (Expected Items Register) ----
+    def _add_bankpos_register_item(self):
+        try:
+            amount = float(self.bankpos_reg_amount_var.get().replace(",", ""))
+        except ValueError:
+            messagebox.showerror("Invalid amount", "Amount must be a number.")
+            return
+        counterparty = self.bankpos_reg_counterparty_var.get().strip()
+        if not counterparty:
+            messagebox.showerror("Missing counterparty", "Enter a counterparty name.")
+            return
+        date_text = self.bankpos_reg_date_var.get().strip()
+        try:
+            expected_date = datetime.strptime(date_text, "%Y-%m-%d").date() if date_text else None
+        except ValueError:
+            messagebox.showerror("Invalid date", "Expected Date must be in YYYY-MM-DD format (or left blank).")
+            return
+
+        bpr.add_item(
+            category=self.bankpos_reg_category_var.get(),
+            counterparty=counterparty,
+            expected_amount=amount,
+            expected_date=expected_date,
+            bank_key=self.bankpos_reg_bank_var.get().strip() or None,
+            note=self.bankpos_reg_note_var.get().strip(),
+        )
+        for v in (self.bankpos_reg_counterparty_var, self.bankpos_reg_amount_var,
+                  self.bankpos_reg_date_var, self.bankpos_reg_bank_var, self.bankpos_reg_note_var):
+            v.set("")
+        self._refresh_bankpos_register_tree()
+
+    def _refresh_bankpos_register_tree(self):
+        self.bankpos_reg_tree.delete(*self.bankpos_reg_tree.get_children())
+        for item in bpr.list_items():
+            overdue = f"{item['days_overdue']}d" if item["days_overdue"] else ""
+            tag = ("overdue_row",) if item["days_overdue"] else ()
+            self.bankpos_reg_tree.insert("", "end", iid=item["id"], values=(
+                item["category"], item["counterparty"], f"{item['expected_amount']:,.2f}",
+                item["expected_date"] or "", item["bank_key"] or "", item["status"], overdue,
+            ), tags=tag)
+
+    def _reconcile_bankpos_register(self):
+        if not self.bankpos_statement_results:
+            messagebox.showinfo("No statements parsed", "Parse at least one statement in Section 2 first - "
+                                                          "reconciliation checks the register against real transactions.")
+            return
+        result = bpr.reconcile(list(self.bankpos_statement_results.values()))
+        self.bankpos_reg_log.delete("1.0", "end")
+        self.bankpos_reg_log.insert("end", f"Matched: {len(result['matched'])}\n")
+        for m in result["matched"]:
+            self.bankpos_reg_log.insert("end", f"  CLEARED  {m['counterparty']}: {m['matched_amount']:,.2f} "
+                                                f"on {m['matched_date']} ({m['matched_bank_key']})\n")
+        if result["ambiguous"]:
+            self.bankpos_reg_log.insert("end", f"\nAmbiguous (needs manual review): {len(result['ambiguous'])}\n")
+            for a in result["ambiguous"]:
+                self.bankpos_reg_log.insert("end", f"  {a['counterparty']}: {len(a['candidates'])} possible matches - left open\n")
+        if result["unexplained_credits"]:
+            self.bankpos_reg_log.insert("end", f"\nUnexplained large credits (not in register): {len(result['unexplained_credits'])}\n")
+            for u in result["unexplained_credits"][:10]:
+                self.bankpos_reg_log.insert("end", f"  {u['bank_key']}: {u['amount']:,.2f} on {u['date']} - {u['description'][:60]}\n")
+        self._refresh_bankpos_register_tree()
+        self.status_var.set(f"Bank Position: reconciled - {len(result['matched'])} cleared, "
+                             f"{len(result['ambiguous'])} ambiguous, {len(result['unexplained_credits'])} unexplained credit(s).")
+
+    # ---- Section 6 actions ----
+    def _browse_bankpos_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.bankpos_output_dir_var.set(path)
+
+    def _collect_bankpos_balances(self, row_keys):
+        """Parses whatever's currently in the Section 3 Entry widgets for
+        the given set of row_keys - blank entries are simply omitted, which
+        is what makes 'not touched here' equivalent to 'carried forward'
+        in the generator."""
+        out = {}
+        for row_key in row_keys:
+            var = self.bankpos_balance_vars.get(row_key)
+            if not var:
+                continue
+            text = var.get().strip().replace(",", "")
+            if not text:
+                continue
+            try:
+                out[row_key] = float(text)
+            except ValueError:
+                raise ValueError(f"'{text}' for account '{row_key}' isn't a valid number.")
+        return out
+
+    def _generate_bankpos_report(self):
+        previous_file = self.bankpos_previous_file_var.get().strip()
+        if not previous_file or not os.path.exists(previous_file):
+            messagebox.showerror("Error", "Select and Load a valid previous-day file in Section 1 first.")
+            return
+        if not self.bankpos_balance_vars:
+            messagebox.showerror("Error", "Click 'Load' in Section 1 first, so today's balance fields exist.")
+            return
+
+        try:
+            conventional_balances = self._collect_bankpos_balances(bpg.IGI_GENERAL_ROWS.keys())
+            islamic_balances = self._collect_bankpos_balances(bpg.TAKAFUL_ROWS.keys())
+        except ValueError as e:
+            messagebox.showerror("Invalid balance", str(e))
+            return
+
+        def _register_items_for_generator(category):
+            items = bpr.list_items(category=category, include_resolved=False)
+            return [{"name": i["counterparty"], "amount": i["expected_amount"],
+                      "bank": i["bank_key"] or "", "expected_date": i["expected_date"]} for i in items]
+
+        major_payments = _register_items_for_generator(bpr.CATEGORY_PAYMENT)
+        major_receivables = _register_items_for_generator(bpr.CATEGORY_RECEIVABLE)
+
+        output_dir = self.bankpos_output_dir_var.get().strip()
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f"Bank_Position_{date.today().strftime('%d%m%Y')}.xlsx")
+
+        self.status_var.set("Generating Bank Position report...")
+        self.bankpos_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return bpg.generate_bank_position(
+                previous_file=previous_file, output_file=output_file,
+                conventional_balances=conventional_balances, islamic_balances=islamic_balances,
+                remittances=self.bankpos_remittances, major_payments=major_payments, major_receivables=major_receivables,
+            )
+
+        def on_done(warnings):
+            self.bankpos_last_output_file = output_file
+            self.bankpos_last_warnings = warnings
+            self.bankpos_progress.finish("Done." if not warnings else f"Done, with {len(warnings)} warning(s).")
+            self._log_bankpos(f"\nGenerated: {output_file}")
+            if warnings:
+                self._log_bankpos(f"{len(warnings)} warning(s) - review before sending:")
+                for w in warnings:
+                    self._log_bankpos(f"  - {w.message}")
+                messagebox.showwarning("Generated with warnings",
+                                        f"Report generated, but {len(warnings)} item(s) need manual attention "
+                                        f"before sending - see the log.\n\n" + "\n".join(w.message for w in warnings))
+            else:
+                messagebox.showinfo("Done", f"Bank Position report generated:\n{output_file}")
+            self.status_var.set(f"Bank Position report generated: {os.path.basename(output_file)}")
+
+        def on_error(exc):
+            self.bankpos_progress.finish("Failed - see the log for details.")
+            self._log_bankpos(f"\nERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.bankpos_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _send_bankpos_report(self):
+        output_file = getattr(self, "bankpos_last_output_file", None)
+        if not output_file or not os.path.exists(output_file):
+            messagebox.showwarning("Nothing to send", "Generate the report first (Section 6).")
+            return
+        recipient = self.bankpos_recipient_var.get().strip()
+        if not recipient:
+            messagebox.showerror("Missing recipient", "Enter the CFO's email address first.")
+            return
+        if self.bankpos_last_warnings:
+            proceed = messagebox.askyesno(
+                "Unresolved warnings",
+                f"The last generation had {len(self.bankpos_last_warnings)} warning(s) about items that didn't "
+                f"fit into the template automatically. Send anyway?")
+            if not proceed:
+                return
+
+        dry_run = self.bankpos_dry_run_var.get()
+        subject = f"Daily Bank Position - {date.today().strftime('%d-%b-%Y')}"
+        body = "Please find attached today's Bank Position report.\n\nRegards,\n" + eg.load_signature()
+
+        def worker():
+            success, message = osend.send_email(recipient, subject, body, output_file, dry_run)
+            self._log_bankpos(f"\n{'[DRY RUN] ' if dry_run else ''}{message}")
+            messagebox.showinfo("Done", f"{'[DRY RUN] ' if dry_run else ''}{message}")
+            self.status_var.set(f"{'[DRY RUN] ' if dry_run else ''}{message}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- Coinsurance > Premium Register module ----------
     def _build_premium_register_page(self, parent):
