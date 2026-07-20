@@ -96,10 +96,14 @@ def validate_data(df, date_col_for_year=DEFAULT_DATE_COL_FOR_YEAR):
     clean_df = df.loc[~bad_rows].copy()
     clean_df["O/s"] = pd.to_numeric(clean_df["O/s"], errors="coerce")
 
-    # Derive Year from the chosen date column (fallback: "Unknown")
+    # Derive Year from the chosen date column (fallback: "Unknown").
+    # Vectorized (no per-row Python apply()): pandas' nullable Int64
+    # dtype lets a column of years survive NaN through an int cast, so
+    # the whole column converts to text in one C-level pass instead of a
+    # Python function call per row.
     if date_col_for_year in clean_df.columns:
-        years = pd.to_datetime(clean_df[date_col_for_year], errors="coerce").dt.year
-        clean_df["Year"] = years.apply(lambda y: str(int(y)) if pd.notna(y) else "Unknown")
+        years = pd.to_datetime(clean_df[date_col_for_year], errors="coerce").dt.year.astype("Int64")
+        clean_df["Year"] = years.astype(str).where(years.notna(), "Unknown")
     else:
         clean_df["Year"] = "Unknown"
 
@@ -135,7 +139,13 @@ def build_pivot(clean_df, company_filter=None, department_filter=None, agent_fil
 
 
 def client_agents(df, client_name):
-    """Return the distinct agent name(s) associated with a client in df."""
+    """Return the distinct agent name(s) associated with a client in df.
+
+    PERFORMANCE NOTE: this re-scans the whole (potentially huge) df for
+    a single client. Calling this once per client in a loop over many
+    qualifying clients is O(num_clients x num_rows) - use
+    client_agents_branches_bulk() below instead when you need this for
+    every qualifying client at once."""
     if "Agent Name" not in df.columns:
         return []
     sub = df[df["Client/Participant"] == client_name]
@@ -143,17 +153,76 @@ def client_agents(df, client_name):
 
 
 def client_branches(df, client_name):
-    """Return the distinct branch(es) associated with a client in df."""
+    """Return the distinct branch(es) associated with a client in df.
+    See the performance note on client_agents() above - the same applies
+    here."""
     if BRANCH_COL not in df.columns:
         return []
     sub = df[df["Client/Participant"] == client_name]
     return sorted(sub[BRANCH_COL].dropna().unique().tolist())
 
 
+def client_agents_branches_bulk(df):
+    """
+    Compute the distinct Agent Name(s) and Branch desc(s) for EVERY
+    client in df in a single pass, instead of calling client_agents()/
+    client_branches() once per client in a loop (each of which rescans
+    the whole dataframe). On a real ~1,000,000-row export with hundreds
+    of qualifying clients, that loop pattern is O(num_clients x
+    num_rows); this is one groupby pass over the data regardless of how
+    many clients there are.
+
+    Returns (agents_by_client, branches_by_client), each a
+    {client_name: [sorted values]} dict. A client with no Agent Name /
+    Branch desc column present, or no non-blank values, simply won't
+    have a key (callers should use .get(client, []) - see analyze() in
+    app.py).
+    """
+    agents_by_client = {}
+    if "Agent Name" in df.columns:
+        agents_by_client = (
+            df.dropna(subset=["Agent Name"])
+            .groupby("Client/Participant")["Agent Name"]
+            .apply(lambda s: sorted(s.unique().tolist()))
+            .to_dict()
+        )
+    branches_by_client = {}
+    if BRANCH_COL in df.columns:
+        branches_by_client = (
+            df.dropna(subset=[BRANCH_COL])
+            .groupby("Client/Participant")[BRANCH_COL]
+            .apply(lambda s: sorted(s.unique().tolist()))
+            .to_dict()
+        )
+    return agents_by_client, branches_by_client
+
+
 def get_client_raw_rows(clean_df, client_name):
     """Return the original transaction rows for a single client (for the
-    'Raw Data' sheet in that client's report)."""
+    'Raw Data' sheet in that client's report).
+
+    PERFORMANCE NOTE: same caveat as client_agents() above - calling this
+    once per client in the Generate Reports loop is O(num_clients x
+    num_rows). Use group_raw_rows_by_client() below instead to pre-split
+    once and look each client up in O(1)."""
     return clean_df[clean_df["Client/Participant"] == client_name].copy()
+
+
+def group_raw_rows_by_client(df):
+    """
+    Pre-split df into one sub-dataframe per client via a SINGLE groupby
+    pass, instead of the get_client_raw_rows() pattern of re-scanning the
+    whole dataframe once per client in a loop. On a real ~1,000,000-row
+    export with hundreds of qualifying clients, the per-client-scan
+    pattern is O(num_clients x num_rows); this is a single O(num_rows)
+    pass regardless of how many clients there are, then an O(1)
+    dictionary lookup per client afterward.
+
+    Returns {client_name: sub_df}. Every client actually present in df
+    gets an entry (not just qualifying ones) - callers look up only the
+    ones they need.
+    """
+    return {name: sub.copy() for name, sub in df.groupby("Client/Participant", sort=False)}
 
 
 def qualifying_clients(df, grand_totals, threshold):
@@ -166,10 +235,30 @@ def client_pivot_table(df, client_name):
     """
     Build the Department (rows) x Year (columns) pivot table for a single client,
     with Grand Total row and column, matching the style of the existing Sheet2 pivot.
+
+    PERFORMANCE NOTE: this filters the whole (potentially huge) df down
+    to one client every time it's called. In the Generate Reports loop
+    that client's raw rows have usually already been isolated (via
+    group_raw_rows_by_client()) - pass those directly to
+    client_pivot_table_from_rows() instead to skip re-filtering the full
+    dataset per client.
     """
     sub = df[df["Client/Participant"] == client_name]
+    return client_pivot_table_from_rows(sub)
+
+
+def client_pivot_table_from_rows(raw_rows):
+    """
+    Same Department x Year margin-pivot as client_pivot_table(), built
+    directly from a client's own ALREADY-FILTERED raw rows (e.g. from
+    group_raw_rows_by_client()) rather than re-filtering the full
+    dataset - this is what avoids the O(num_clients x num_rows) scan
+    client_pivot_table() would otherwise do once per client in the
+    Generate Reports loop (used for the non-native-Excel fallback path,
+    which is the ONLY path when Excel/pywin32 isn't installed at all).
+    """
     pivot = pd.pivot_table(
-        sub, values="O/s", index="Department", columns="Year",
+        raw_rows, values="O/s", index="Department", columns="Year",
         aggfunc="sum", fill_value=0, margins=True, margins_name="Grand Total"
     )
     # Order year columns chronologically, keep Grand Total last

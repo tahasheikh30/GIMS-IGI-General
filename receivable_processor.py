@@ -332,6 +332,27 @@ def _classify_type(value):
     return None
 
 
+def _classify_type_bulk(series):
+    """
+    Vectorized equivalent of Series.apply(_classify_type) - used on the
+    legacy single-amount-column fallback layout's Type/Category column.
+    Tests every row against each marker pattern with one Series-wide
+    str.contains() call instead of a Python function call per row, same
+    rationale as _bucket_series() above. Marker priority (Premium checked
+    before Claims) is preserved by only letting a later label claim rows
+    an earlier one hasn't already matched.
+    """
+    s = series.astype(str).str.strip().str.lower()
+    result = pd.Series([None] * len(series), index=series.index, dtype=object)
+    already_matched = pd.Series(False, index=series.index)
+    for label, markers in TYPE_MARKERS.items():
+        pattern = "|".join(re.escape(m) for m in markers)
+        mask = s.str.contains(pattern, na=False, regex=True) & ~already_matched
+        result = result.mask(mask, label)
+        already_matched = already_matched | mask
+    return result.where(series.notna(), None)
+
+
 def validate_data(df):
     """
     Validate the raw dataframe (as returned by load_raw_data). Returns
@@ -417,7 +438,7 @@ def validate_data(df):
         clean_df["_rec_claims_amt"] = pd.to_numeric(clean_df[claims_col], errors="coerce").fillna(0)
     else:
         type_col, amount_col = cols["type"], cols["amount"]
-        normalized_type = df[type_col].apply(_classify_type)
+        normalized_type = _classify_type_bulk(df[type_col])
         mask_bad_type = normalized_type.isna()
         amount_numeric = pd.to_numeric(df[amount_col], errors="coerce")
         mask_bad_amount = amount_numeric.isna()
@@ -459,11 +480,20 @@ def _is_ofc_company(company_name):
 
 
 def _bucket_series(clean_df):
-    """Map every row's Company to its output bucket: its own exact
-    Company name, or the shared OFC_BUCKET_LABEL if that name contains
-    "OFC". This is the one place that decides bucketing, so every
-    grouping/totals/breakdown function below stays in sync automatically."""
-    return clean_df["_rec_company"].apply(lambda c: OFC_BUCKET_LABEL if _is_ofc_company(c) else c)
+    """
+    Map every row's Company to its output bucket: its own exact Company
+    name, or the shared OFC_BUCKET_LABEL if that name contains "OFC".
+    This is the one place that decides bucketing, so every grouping/
+    totals/breakdown function below stays in sync automatically.
+
+    Fully vectorized (Series.str.contains) rather than a per-row
+    Series.apply(_is_ofc_company) - on a real ~1,000,000-row export the
+    old .apply() form meant a Python function call for every single row,
+    every time this was called; a vectorized string op does the same
+    check as a single C-level pass over the whole column instead.
+    """
+    is_ofc = clean_df["_rec_company"].str.contains("ofc", case=False, na=False, regex=False)
+    return clean_df["_rec_company"].where(~is_ofc, OFC_BUCKET_LABEL)
 
 
 def build_company_groups(clean_df):
@@ -523,10 +553,22 @@ def company_totals(clean_df, groups):
 
 
 def client_breakdown_for_bucket(clean_df, bucket_label):
-    """Per-client Premium/Claims Receivable totals within one output
-    bucket (a single company, or the pooled OFC set) - this feeds that
+    """
+    Per-client Premium/Claims Receivable totals within ONE output bucket
+    (a single company, or the pooled OFC set) - this feeds that
     workbook's own Summary sheet chart, sorted largest Premium Receivable
-    first so the chart reads most-to-least at a glance."""
+    first so the chart reads most-to-least at a glance.
+
+    PERFORMANCE NOTE: this re-buckets and re-scans the WHOLE clean_df
+    from scratch on every call. That's fine for a one-off lookup, but a
+    real run can have 100+ output buckets (a real run logged in
+    receivable_run_history.json had 113) - calling this once per bucket
+    in a loop means re-scanning the entire dataset that many times over.
+    For that case (generating every bucket's workbook in one pass), use
+    build_client_breakdowns() below instead, which computes every
+    bucket's breakdown in a single pass over the data regardless of how
+    many buckets there are.
+    """
     df = clean_df.copy()
     df["_rec_bucket"] = _bucket_series(df)
     sub = df[df["_rec_bucket"] == bucket_label]
@@ -537,3 +579,81 @@ def client_breakdown_for_bucket(clean_df, bucket_label):
         .rename(columns={"_rec_client": "Client Name"})
     )
     return g.sort_values("premium_total", ascending=False).reset_index(drop=True)
+
+
+def build_client_breakdowns(clean_df):
+    """
+    The bulk, single-pass equivalent of calling client_breakdown_for_bucket()
+    once per bucket in a loop. Computes the per-client Premium/Claims
+    Receivable breakdown for EVERY output bucket at once, via one
+    groupby(["_rec_bucket", "_rec_client"]) pass over the data, instead
+    of re-scanning and re-bucketing the entire dataframe from scratch for
+    every bucket. On the real 113-bucket run mentioned above, this turns
+    113 full-dataset scans into one.
+
+    Returns {bucket_label: breakdown_df}, where each breakdown_df has the
+    exact same shape as client_breakdown_for_bucket()'s own return value
+    (Client Name / premium_total / claims_total, sorted largest Premium
+    Receivable first).
+    """
+    df = clean_df.copy()
+    df["_rec_bucket"] = _bucket_series(df)
+    grouped = (
+        df.groupby(["_rec_bucket", "_rec_client"])
+        .agg(premium_total=("_rec_premium_amt", "sum"), claims_total=("_rec_claims_amt", "sum"))
+        .reset_index()
+        .rename(columns={"_rec_client": "Client Name"})
+    )
+    breakdowns = {}
+    for bucket, g in grouped.groupby("_rec_bucket", sort=False):
+        breakdowns[bucket] = (
+            g.drop(columns=["_rec_bucket"]).sort_values("premium_total", ascending=False).reset_index(drop=True)
+        )
+    return breakdowns
+
+
+def analyze_buckets(clean_df):
+    """
+    One-stop replacement for calling build_company_groups(), then
+    company_totals(), then build_client_breakdowns() as three separate
+    passes (which is what the GUI and the CLI pipeline both used to do) -
+    computes the "_rec_bucket" assignment exactly once and reuses it for
+    all three results, so a huge file only gets bucketed a single time
+    no matter how many downstream results are needed from it.
+
+    Returns (groups, totals, breakdowns) - identical shapes to what
+    build_company_groups() / company_totals() / build_client_breakdowns()
+    already return, so this is a drop-in replacement for calling all
+    three back to back.
+    """
+    df = clean_df.copy()
+    df["_rec_bucket"] = _bucket_series(df)
+
+    groups = {}
+    totals = {}
+    for bucket, sub in df.groupby("_rec_bucket", sort=False):
+        premium_rows = sub[sub["_rec_premium_amt"] != 0].drop(columns=_HELPER_COLS + ["_rec_bucket"])
+        claims_rows = sub[sub["_rec_claims_amt"] != 0].drop(columns=_HELPER_COLS + ["_rec_bucket"])
+        groups[bucket] = {
+            "premium_rows": premium_rows.reset_index(drop=True),
+            "claims_rows": claims_rows.reset_index(drop=True),
+        }
+        totals[bucket] = {
+            "premium_total": sub["_rec_premium_amt"].sum(),
+            "claims_total": sub["_rec_claims_amt"].sum(),
+            "num_clients": int(sub["_rec_client"].nunique()),
+        }
+
+    grouped_clients = (
+        df.groupby(["_rec_bucket", "_rec_client"])
+        .agg(premium_total=("_rec_premium_amt", "sum"), claims_total=("_rec_claims_amt", "sum"))
+        .reset_index()
+        .rename(columns={"_rec_client": "Client Name"})
+    )
+    breakdowns = {}
+    for bucket, g in grouped_clients.groupby("_rec_bucket", sort=False):
+        breakdowns[bucket] = (
+            g.drop(columns=["_rec_bucket"]).sort_values("premium_total", ascending=False).reset_index(drop=True)
+        )
+
+    return groups, totals, breakdowns

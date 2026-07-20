@@ -109,3 +109,98 @@ the versions here. Every change degrades gracefully: if `perf_utils.py` is
 ever missing, each module falls back to its exact original behavior (a
 plain `try/except ImportError` guards every import), so nothing hard-breaks
 if only some files get updated.
+
+## Part 3, eliminating O(items x rows) re-scans
+
+Parts 1 and 2 kept the GUI responsive on a huge file by moving the work
+off the main thread and speeding up the read/write paths. They didn't
+touch a separate problem: several places re-filtered or re-bucketed the
+**entire** dataset once per output item, inside a loop over those items -
+fine on a handful of clients/companies, but scaling as O(num_items x
+num_rows) rather than O(num_rows) as either number grows. On real data
+this was the single biggest remaining bottleneck, worse than anything
+Parts 1-2 addressed.
+
+### What was slow, and why
+
+- **Receivable module - the worst offender.** `client_breakdown_for_bucket()`
+  re-scanned and re-bucketed the whole cleaned dataset from scratch, using
+  a non-vectorized `Series.apply()`, and was called once per OUTPUT BUCKET
+  inside the report-generation loop (both in `app.py`'s GUI flow and in
+  `receivable_automation.run_pipeline()`'s scripted flow). A real logged
+  run (`receivable_run_history.json`) had 113 output buckets - so a file
+  that should be scanned once was instead being fully re-scanned 113
+  times over. `_bucket_series()` itself (used by this and by
+  `build_company_groups()`/`company_totals()`) was also a per-row Python
+  `.apply()` rather than a vectorized string check, so every one of those
+  113 passes was slower than it needed to be too.
+- **Outstanding Premium - the same shape of bug, twice.** `analyze()`'s
+  treeview-population loop called `client_agents()`/`client_branches()`
+  once per QUALIFYING CLIENT, each re-scanning the whole filtered
+  dataset. `generate_reports()`'s worker did the same thing twice over -
+  `get_client_raw_rows()` and (on the non-native-Excel fallback path,
+  which is the *only* path when Excel/pywin32 isn't installed at all)
+  `client_pivot_table()` each re-filtered the whole dataset once per
+  qualifying client.
+- Neither `analyze()` (Outstanding Premium) nor `analyze_receivable()`
+  (Coinsurance) ran through `perf_utils.run_in_background` at all - only
+  the Load and Generate steps did. On a huge file, clicking Analyze could
+  still freeze the window even after Parts 1-2.
+
+### What changed
+
+- **`receivable_processor.py`**: `_bucket_series()` is now a single
+  vectorized `Series.str.contains()` call instead of a per-row
+  `.apply()`. A new `build_client_breakdowns()` computes every bucket's
+  client breakdown in one `groupby(["_rec_bucket", "_rec_client"])` pass
+  regardless of how many buckets there are. A new `analyze_buckets()`
+  goes further and computes groups + totals + breakdowns all from a
+  single bucket assignment, for callers (the GUI, the scripted pipeline)
+  that need all three. `client_breakdown_for_bucket()` and the older
+  `build_company_groups()`/`company_totals()` are kept as-is for
+  one-off/backward-compatible use, with their docstrings now pointing at
+  the bulk versions for anything that loops over multiple buckets. The
+  legacy single-amount-column fallback's `Type`/`Category` classification
+  (`_classify_type`) also got a vectorized `_classify_type_bulk()`
+  counterpart, for the same reason.
+- **`data_processor.py`**: new `group_raw_rows_by_client()` (one groupby
+  pass, O(1) lookup per client afterward) and
+  `client_agents_branches_bulk()` (same idea, for the Agent/Branch
+  columns) replace the per-client-loop scanning pattern. A new
+  `client_pivot_table_from_rows()` builds a client's Department x Year
+  pivot directly from that client's own already-filtered rows instead of
+  re-filtering the full dataset - `client_pivot_table()` itself is now
+  implemented on top of it and kept for one-off use. The `Year` column
+  derivation in `validate_data()` was also switched from a per-row
+  `.apply()` to a vectorized nullable-Int64 cast.
+- **`app.py`**: `generate_reports()` and `generate_receivable_reports()`
+  now consume these bulk-computed lookups instead of re-scanning per
+  item. `analyze()` and `analyze_receivable()` now both run through
+  `perf_utils.run_in_background` too (with their own "Analyze" button
+  passed as a `busy_widget` so a second click can't queue up a duplicate
+  run), computing everything the treeview needs via the new bulk
+  functions before handing the result back to the main thread to render.
+- **`receivable_automation.py`**: `run_pipeline()` (the scripted/CLI
+  entry point, used outside the GUI) now uses `analyze_buckets()` too, so
+  a scripted run gets the identical fix rather than only the GUI path.
+
+### Verified
+
+Every new bulk function was checked against its old per-item equivalent
+on synthetic data (identical output, not just "doesn't crash") before
+being wired in, and benchmarked at a scale matching real usage:
+
+- Outstanding Premium, 300,000 rows / 400 qualifying clients: the old
+  per-client raw-row scan took ~7.1s; the new one-pass grouping took
+  ~0.2s (about 33x).
+- Receivable, 150,000 rows / 111 output buckets (matching the 113-bucket
+  real run in `receivable_run_history.json`): the old per-bucket
+  breakdown loop took ~4.5s; the new single bulk pass took ~0.14s (about
+  32x).
+
+Both numbers scale further in the app's favor as the row count or item
+count grows, since the old pattern was O(items x rows) and the new one is
+O(rows) regardless of item count. Empty-dataframe and missing-column edge
+cases (no data after filtering, no Agent Name/Branch desc column present)
+were checked separately and degrade to empty results rather than raising.
+

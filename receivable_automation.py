@@ -149,8 +149,15 @@ def run_pipeline(master_filepath, output_dir, load_email_lookup=True, email_look
         for issue_label, count in issue_counts.items():
             logger(f"   {count}x  {issue_label}")
 
-    groups = rp.build_company_groups(clean_df)
-    totals = rp.company_totals(clean_df, groups)
+    # analyze_buckets() computes the company/OFC bucket assignment ONCE
+    # and derives groups, totals, and every bucket's client breakdown
+    # from that single pass (see receivable_processor.py) - this used to
+    # be build_company_groups() + company_totals() as separate scans,
+    # plus client_breakdown_for_bucket() called again per bucket inside
+    # the generation loop below (a full-dataset rescan per output file -
+    # on a real 113-bucket run, that's 113 rescans of the whole file
+    # where one now does).
+    groups, totals, breakdowns = rp.analyze_buckets(clean_df)
     logger(f"\n{len(groups)} output file(s) identified (one per insurance company, "
            f"with every company containing \"OFC\" in its name pooled into a single shared 'OFC' file).")
 
@@ -164,7 +171,7 @@ def run_pipeline(master_filepath, output_dir, load_email_lookup=True, email_look
     filename_lookup = {}
     for bucket_label, g in groups.items():
         try:
-            breakdown = rp.client_breakdown_for_bucket(clean_df, bucket_label)
+            breakdown = breakdowns.get(bucket_label)
             fp = rg.build_company_workbook(
                 bucket_label, g["premium_rows"], g["claims_rows"], breakdown,
                 output_dir, premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,

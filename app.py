@@ -1417,8 +1417,9 @@ class BalanceApp(tk.Tk):
         self.receivable_company_filter_var = tk.StringVar()
         ttk.Entry(filter_box, textvariable=self.receivable_company_filter_var, width=90).grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 8))
 
-        ttk.Button(filter_box, text="Analyze / Build Groups", style="Accent.TButton", width=24,
-                   command=self.analyze_receivable).grid(row=4, column=0, sticky="w", padx=6, pady=(4, 4))
+        self.analyze_receivable_btn = ttk.Button(filter_box, text="Analyze / Build Groups", style="Accent.TButton", width=24,
+                   command=self.analyze_receivable)
+        self.analyze_receivable_btn.grid(row=4, column=0, sticky="w", padx=6, pady=(4, 4))
 
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
@@ -1639,22 +1640,48 @@ class BalanceApp(tk.Tk):
             company_filter = [c.strip() for c in company_text.split(",") if c.strip()]
             df = df[df[company_col].isin(company_filter)]
 
-        self.receivable_filtered_df = df  # kept for the per-client chart breakdown when generating reports
-        self.receivable_groups = rvp.build_company_groups(df)
-        self.receivable_totals = rvp.company_totals(df, self.receivable_groups)
+        self.status_var.set("Analyzing / building groups...")
 
-        self.receivable_results_tree.delete(*self.receivable_results_tree.get_children())
-        for i, (bucket_label, _g) in enumerate(self.receivable_groups.items()):
-            t = self.receivable_totals[bucket_label]
-            tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.receivable_results_tree.insert("", "end", values=(
-                bucket_label, t["num_clients"], f"{t['premium_total']:,.0f}", f"{t['claims_total']:,.0f}"
-            ), tags=(tag,))
-        self.receivable_results_summary_var.set(f"{len(self.receivable_groups)} output file(s) identified")
+        def worker(report):
+            # analyze_buckets() computes the company/OFC bucket assignment
+            # ONCE and derives groups, totals, AND every bucket's client
+            # breakdown from that single pass - see receivable_processor.py.
+            # This replaces what used to be build_company_groups() +
+            # company_totals() as two separate full-dataset scans, and
+            # (critically) precomputes every bucket's client breakdown up
+            # front so generate_receivable_reports() below never needs to
+            # re-scan the whole dataset per company again.
+            groups, totals, breakdowns = rvp.analyze_buckets(df)
+            return groups, totals, breakdowns
 
-        self.log_receivable(f"\nAnalysis complete: {len(self.receivable_groups)} output file(s) "
-                             f"(one per insurance company, OFC-named companies pooled into one shared file).")
-        self.status_var.set(f"{len(self.receivable_groups)} files. See tab 2.")
+        def on_done(result):
+            groups, totals, breakdowns = result
+            self.receivable_filtered_df = df  # kept for reference/consistency with the rest of the module
+            self.receivable_groups = groups
+            self.receivable_totals = totals
+            self.receivable_breakdowns = breakdowns
+
+            self.receivable_results_tree.delete(*self.receivable_results_tree.get_children())
+            for i, (bucket_label, _g) in enumerate(self.receivable_groups.items()):
+                t = self.receivable_totals[bucket_label]
+                tag = "evenrow" if i % 2 == 0 else "oddrow"
+                self.receivable_results_tree.insert("", "end", values=(
+                    bucket_label, t["num_clients"], f"{t['premium_total']:,.0f}", f"{t['claims_total']:,.0f}"
+                ), tags=(tag,))
+            self.receivable_results_summary_var.set(f"{len(self.receivable_groups)} output file(s) identified")
+
+            self.log_receivable(f"\nAnalysis complete: {len(self.receivable_groups)} output file(s) "
+                                 f"(one per insurance company, OFC-named companies pooled into one shared file).")
+            self.status_var.set(f"{len(self.receivable_groups)} files. See tab 2.")
+
+        def on_error(exc):
+            messagebox.showerror("Analysis failed", str(exc))
+            self.status_var.set("Analysis failed.")
+
+        perf_utils.run_in_background(
+            self, worker, on_done=on_done, on_error=on_error,
+            busy_widgets=[self.analyze_receivable_btn],
+        )
 
     def generate_receivable_reports(self):
         if not getattr(self, "receivable_groups", None):
@@ -1675,6 +1702,12 @@ class BalanceApp(tk.Tk):
 
         source_df = getattr(self, "receivable_filtered_df", self.receivable_clean_df)
         groups = self.receivable_groups
+        # Precomputed once by analyze_receivable() (see analyze_buckets() in
+        # receivable_processor.py) - falls back to the old per-bucket call
+        # only if Analyze hasn't been re-run since an older session state,
+        # which shouldn't normally happen since analyze_receivable() always
+        # sets this alongside receivable_groups.
+        breakdowns = getattr(self, "receivable_breakdowns", None)
         self.status_var.set(f"Generating {len(groups)} Receivable workbook(s)...")
         self.receivable_reports_progress.start(total=len(groups), text=f"0 / {len(groups)} workbook(s) generated")
 
@@ -1687,7 +1720,10 @@ class BalanceApp(tk.Tk):
                 report(f"[{i}/{len(groups)}] {bucket_label} ({n_rows:,} row(s))")
                 report.progress(i - 1, len(groups), text=f"Generating: {bucket_label} ({i}/{len(groups)})")
                 try:
-                    breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
+                    if breakdowns is not None:
+                        breakdown = breakdowns.get(bucket_label)
+                    else:
+                        breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
                     fp = rvg.build_company_workbook(
                         bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
                         premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
@@ -2040,8 +2076,9 @@ class BalanceApp(tk.Tk):
         self.company_filter_var = tk.StringVar()
         ttk.Entry(company_row, textvariable=self.company_filter_var, width=90).pack(fill="x", pady=(4, 0))
 
-        ttk.Button(filter_box, text="Analyze / Apply Filters", style="Accent.TButton", width=24,
-                   command=self.analyze).grid(row=3, column=0, sticky="w", padx=6, pady=(12, 4))
+        self.analyze_btn = ttk.Button(filter_box, text="Analyze / Apply Filters", style="Accent.TButton", width=24,
+                   command=self.analyze)
+        self.analyze_btn.grid(row=3, column=0, sticky="w", padx=6, pady=(12, 4))
 
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
@@ -2313,24 +2350,48 @@ class BalanceApp(tk.Tk):
         company_text = self.company_filter_var.get().strip()
         company_filter = [c.strip() for c in company_text.split(",") if c.strip()] if company_text else None
 
-        self.filtered_df, self.grand_totals = dp.build_pivot(
-            self.clean_df, company_filter=company_filter,
-            department_filter=selected_depts or None,
-            agent_filter=selected_agents or None,
-            branch_filter=selected_branches or None,
+        clean_df = self.clean_df
+        self.status_var.set("Analyzing...")
+
+        def worker(report):
+            filtered_df, grand_totals = dp.build_pivot(
+                clean_df, company_filter=company_filter,
+                department_filter=selected_depts or None,
+                agent_filter=selected_agents or None,
+                branch_filter=selected_branches or None,
+            )
+            qualifying = dp.qualifying_clients(filtered_df, grand_totals, threshold)
+            # Single bulk pass over filtered_df for every qualifying
+            # client's agent(s)/branch(es), instead of calling
+            # client_agents()/client_branches() once per client in the
+            # treeview-population loop below (each of which used to
+            # rescan the whole filtered dataset) - see
+            # data_processor.client_agents_branches_bulk().
+            agents_by_client, branches_by_client = dp.client_agents_branches_bulk(filtered_df)
+            return filtered_df, grand_totals, qualifying, agents_by_client, branches_by_client
+
+        def on_done(result):
+            self.filtered_df, self.grand_totals, self.qualifying, agents_by_client, branches_by_client = result
+
+            self.results_tree.delete(*self.results_tree.get_children())
+            for i, (client, total) in enumerate(self.qualifying.items()):
+                agents = ", ".join(agents_by_client.get(client, []))
+                branches = ", ".join(branches_by_client.get(client, []))
+                tag = "evenrow" if i % 2 == 0 else "oddrow"
+                self.results_tree.insert("", "end", values=(client, f"{total:,.0f}", agents, branches), tags=(tag,))
+            self.results_summary_var.set(f"{len(self.qualifying)} client(s) meet/exceed threshold {threshold:,.0f}")
+
+            self.log(self.setup_log, f"\nAnalysis complete: {len(self.qualifying)} clients meet/exceed threshold {threshold:,.0f}.")
+            self.status_var.set(f"{len(self.qualifying)} qualifying clients. See tab 2.")
+
+        def on_error(exc):
+            messagebox.showerror("Analysis failed", str(exc))
+            self.status_var.set("Analysis failed.")
+
+        perf_utils.run_in_background(
+            self, worker, on_done=on_done, on_error=on_error,
+            busy_widgets=[self.analyze_btn],
         )
-        self.qualifying = dp.qualifying_clients(self.filtered_df, self.grand_totals, threshold)
-
-        self.results_tree.delete(*self.results_tree.get_children())
-        for i, (client, total) in enumerate(self.qualifying.items()):
-            agents = ", ".join(dp.client_agents(self.filtered_df, client))
-            branches = ", ".join(dp.client_branches(self.filtered_df, client))
-            tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.results_tree.insert("", "end", values=(client, f"{total:,.0f}", agents, branches), tags=(tag,))
-        self.results_summary_var.set(f"{len(self.qualifying)} client(s) meet/exceed threshold {threshold:,.0f}")
-
-        self.log(self.setup_log, f"\nAnalysis complete: {len(self.qualifying)} clients meet/exceed threshold {threshold:,.0f}.")
-        self.status_var.set(f"{len(self.qualifying)} qualifying clients. See tab 2.")
 
     def generate_reports(self):
         if self.qualifying is None or len(self.qualifying) == 0:
@@ -2356,6 +2417,15 @@ class BalanceApp(tk.Tk):
             except ImportError:
                 com_initialized = False
 
+            # Split filtered_df into one sub-dataframe per client in a
+            # SINGLE pass up front, instead of the loop below calling
+            # get_client_raw_rows()/client_pivot_table() once per client
+            # (each of which used to rescan/refilter the whole - possibly
+            # huge - filtered_df) - see data_processor.py for the
+            # before/after benchmark in the docstrings.
+            report("Grouping raw rows by client...")
+            rows_by_client = dp.group_raw_rows_by_client(filtered_df)
+
             use_native = pivot_native.EXCEL_AVAILABLE
             excel_app = None
             generated = []
@@ -2369,7 +2439,9 @@ class BalanceApp(tk.Tk):
                         report(f"Could not start Excel for native PivotTables ({e}) - using static formatted tables instead.")
 
                 for i, client in enumerate(clients, start=1):
-                    raw_rows = dp.get_client_raw_rows(filtered_df, client)
+                    raw_rows = rows_by_client.get(client)
+                    if raw_rows is None:  # shouldn't normally happen - safety net only
+                        raw_rows = dp.get_client_raw_rows(filtered_df, client)
                     report(f"[{i}/{len(clients)}] {client} ({len(raw_rows):,} row(s))")
                     report.progress(i - 1, len(clients), text=f"Generating: {client} ({i}/{len(clients)})")
                     fp = None
@@ -2379,10 +2451,10 @@ class BalanceApp(tk.Tk):
                             pivot_native.add_native_pivot_table(fp, client_name=client, excel_app=excel_app)
                         except Exception:
                             native_failures.append(client)
-                            pivot_df = dp.client_pivot_table(filtered_df, client)
+                            pivot_df = dp.client_pivot_table_from_rows(raw_rows)
                             fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
                     else:
-                        pivot_df = dp.client_pivot_table(filtered_df, client)
+                        pivot_df = dp.client_pivot_table_from_rows(raw_rows)
                         fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
                     generated.append(fp)
                     report.progress(i, len(clients), text=f"{i} / {len(clients)} report(s) generated")
