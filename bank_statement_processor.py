@@ -545,20 +545,35 @@ def parse_js(filepath_or_buffer, source_name=None):
 # ---------------------------------------------------------------------------
 
 BANK_REGISTRY = {
-    "hbl":    {"display_name": "Habib Bank Limited (HBL)", "parser": parse_hbl,    "expected_ext": [".xls"]},
-    "mcb":    {"display_name": "MCB Bank",                 "parser": parse_mcb,    "expected_ext": [".xls"]},
-    "faysal": {"display_name": "Faysal Bank",               "parser": parse_faysal, "expected_ext": [".xls"]},
-    "bafl":   {"display_name": "Bank Alfalah (BAFL)",        "parser": parse_bafl,   "expected_ext": [".csv"]},
-    "js":     {"display_name": "JS Bank",                    "parser": parse_js,     "expected_ext": [".xlsx"]},
+    "hbl":         {"display_name": "Habib Bank Limited (HBL)",       "parser": parse_hbl,    "expected_ext": [".xls"]},
+    # MCB has two real accounts (Savings 5655, Current 5190) - both are
+    # the same export format, so both slots share parse_mcb(); the slot
+    # key itself (not the value parse_mcb() happens to hardcode into
+    # StatementResult.bank_key) is what disambiguates them from here on,
+    # via the bank_key override in parse_statement() below.
+    "mcb_savings": {"display_name": "MCB Bank - Savings (5655)",       "parser": parse_mcb,    "expected_ext": [".xls"]},
+    "mcb_current": {"display_name": "MCB Bank - Current (5190)",       "parser": parse_mcb,    "expected_ext": [".xls"]},
+    "faysal":      {"display_name": "Faysal Bank",                     "parser": parse_faysal, "expected_ext": [".xls"]},
+    "bafl":        {"display_name": "Bank Alfalah (BAFL)",             "parser": parse_bafl,   "expected_ext": [".csv"]},
+    "js":          {"display_name": "JS Bank",                        "parser": parse_js,     "expected_ext": [".xlsx"]},
+    # NOT YET SUPPORTED - no real sample statement has been provided for
+    # Standard Chartered (conventional + Islamic 601/602) or UBL
+    # (Islamic), so there's no verified parser for them yet, per this
+    # module's own rule (see the module docstring) against guessing an
+    # unconfirmed export format. Today's balance can still be entered
+    # manually for these accounts in the app; only statement-based
+    # pre-fill and reconciliation are unavailable until a sample is
+    # shared and a parser is added here.
 }
 
 
 def parse_statement(filepath, bank_key, password=None):
     """
     Main entry point. filepath: path to the uploaded file. bank_key: which
-    bank slot this was uploaded into (e.g. "hbl") - the dedicated-slot-per-
-    bank design means the caller always knows this already, so there's no
-    need for (and no reliability lost by skipping) auto-detection.
+    upload slot this was uploaded into (e.g. "hbl", "mcb_savings") - the
+    dedicated-slot-per-account design means the caller always knows this
+    already, so there's no need for (and no reliability lost by skipping)
+    auto-detection.
     password: saved password from the credential store (see the module
     docstring) - passed through untouched if the file isn't encrypted.
 
@@ -579,6 +594,14 @@ def parse_statement(filepath, bank_key, password=None):
 
     source = decrypt_if_needed(filepath, password=password)
     result = entry["parser"](source, source_name=filepath)
+    # Stamp the result with the SLOT it was uploaded into rather than
+    # whatever bank_key the parser function itself hardcodes (e.g.
+    # parse_mcb() always sets "mcb", regardless of whether this came from
+    # the Savings or Current slot) - this is what lets two registry
+    # entries safely share one parser while still being distinguishable
+    # everywhere downstream (STATEMENT_BANK_TO_TEMPLATE_ROW, the Expected
+    # Items Register's bank_key filter, etc.).
+    result.bank_key = bank_key
     return result
 
 
@@ -608,7 +631,7 @@ if __name__ == "__main__":
     import sys
     samples = {
         "hbl": "/mnt/user-data/uploads/HBL.xls",
-        "mcb": "/mnt/user-data/uploads/MCB_July_5655.xls",
+        "mcb_savings": "/mnt/user-data/uploads/MCB_July_5655.xls",  # account 5655 = the Savings slot
         "faysal": "/mnt/user-data/uploads/Faysal_6018-.xls",
         "bafl": "/mnt/user-data/uploads/BAFL_July_till_date.csv",
         "js": "/mnt/user-data/uploads/JS_107791.xlsx",

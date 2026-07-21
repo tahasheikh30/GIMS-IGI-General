@@ -1093,10 +1093,18 @@ class BalanceApp(tk.Tk):
     BANKPOS_KEYRING_SERVICE = "GIMS_BankPosition"
     BANKPOS_STATEMENT_BANKS = [
         ("hbl", "Habib Bank Limited (HBL)"),
-        ("mcb", "MCB Bank"),
+        ("mcb_savings", "MCB Bank - Savings (5655)"),
+        ("mcb_current", "MCB Bank - Current (5190)"),
         ("faysal", "Faysal Bank"),
         ("bafl", "Bank Alfalah (BAFL)"),
         ("js", "JS Bank"),
+        # No statement upload slot yet for Standard Chartered (conventional
+        # + Islamic 601/602), UBL (Islamic), Faysal Islamic, or Bank
+        # Alfalah Islamic - no verified parser exists for them (see
+        # bank_statement_processor.BANK_REGISTRY). Today's Balances (tab
+        # 2) still accepts a manual entry for every one of these; only
+        # statement-based pre-fill/reconciliation is unavailable until a
+        # real sample statement is shared for each.
     ]
 
     def _build_bank_position_page(self, parent):

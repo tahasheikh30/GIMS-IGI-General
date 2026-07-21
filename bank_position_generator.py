@@ -34,8 +34,30 @@ from datetime import datetime, date
 import openpyxl
 
 # ---------------------------------------------------------------------------
-# Row maps - which row in the template each account lives on. Built from
-# inspecting the real Bank_Position_16th_July.xlsx template directly.
+# Row maps - which row in the template each account lives on.
+#
+# UPDATED to the real account list as given directly (previously this held
+# placeholder account names that didn't match the real books):
+#
+#   Conventional (IGI General): JS Bank, MCB Savings (5655), MCB Current
+#   (5190), Faysal Bank, Standard Chartered, HBL, Bank Alfalah.
+#
+#   Islamic (Takaful): Bank Alfalah, Standard Chartered 601, Standard
+#   Chartered 602, Faysal Bank, MCB, UBL.
+#
+# CAVEAT - row numbers below are INFERRED, not confirmed: with the
+# original placeholder template gone, there's no real
+# Bank_Position_*.xlsx to inspect, so these assume the same layout
+# convention as before (one row per account, in the order given, starting
+# at row 6, with a Grand Total row immediately after the last account -
+# see IGI_GENERAL_TOTAL_ROW / TAKAFUL_TOTAL_ROW below). If the real
+# template lists these accounts in a different order, or reserves a row
+# for something else in between, these numbers will be wrong. Share the
+# real Bank Position .xlsx and I'll fix the exact rows against it -
+# get_account_labels()/get_prior_balances() read the actual account
+# labels straight from the template's own column B at runtime regardless
+# (never hardcoded), so once the ROW NUMBERS are confirmed correct
+# everything else lines up automatically.
 # ---------------------------------------------------------------------------
 
 IGI_GENERAL_SHEET = "IGI General "  # trailing space is real, confirmed from the template
@@ -46,32 +68,50 @@ SUMMARY_SHEET = "Summary"
 AMOUNT_COL = 4  # column D on both IGI General and Takaful
 
 IGI_GENERAL_ROWS = {
-    "standard_chartered": 6, "faysal": 7, "js": 8, "hbl": 9,
-    "mcb_current": 10, "mcb_savings": 11, "bafl": 12, "alhabib": 13,
-    "ubl": 14, "alhabib_seaview": 15, "mcb_stock_exchange": 16,
-    "allied": 17, "alhabib_garden_town": 18,
+    "js": 6,
+    "mcb_savings_5655": 7,
+    "mcb_current_5190": 8,
+    "faysal": 9,
+    "standard_chartered": 10,
+    "hbl": 11,
+    "bafl": 12,
 }
-IGI_GENERAL_TOTAL_ROW = 19
+IGI_GENERAL_TOTAL_ROW = 13
 
 TAKAFUL_ROWS = {
-    "meezan_ptf": 6, "meezan_ops": 7, "bankislami_ptf": 8, "mcb_islamic_ptf": 9,
-    "alhabib_takaful_ptf": 10, "alfalah_islamic_ptf": 11, "ubl_ameen_ptf": 12,
-    "scb_sadiq_ptf": 13, "scb_sadiq_ops": 14, "faysal_islamic_ptf": 15,
-    "dib_ptf": 16, "dib_ops": 17,
+    "bafl_islamic": 6,
+    "scb_islamic_601": 7,
+    "scb_islamic_602": 8,
+    "faysal_islamic": 9,
+    "mcb_islamic": 10,
+    "ubl_islamic": 11,
 }
-TAKAFUL_TOTAL_ROW = 18
+TAKAFUL_TOTAL_ROW = 12
 
-# Which of bank_statement_processor's bank_keys maps to which template row
-# key, confirmed by matching account numbers between the real sample
-# statements and the real template (see build discussion). Only banks we
-# actually have a parser for today are listed - add more here as new
-# parsers/accounts come online, per the "5 banks now, rest later" decision.
+# Which of bank_statement_processor's bank_keys (i.e. which upload SLOT in
+# the app - see app.py's BANKPOS_STATEMENT_BANKS) maps to which template
+# row key. Only accounts we actually have a working statement parser for
+# today are listed here - a real parser exists for HBL, Faysal (conventional),
+# JS, Bank Alfalah (conventional), and MCB (both Savings 5655 and Current
+# 5190, disambiguated by upload slot - see BANK_REGISTRY in
+# bank_statement_processor.py).
+#
+# NOT YET COVERED (no parser - no real sample statement was ever provided
+# for these, and per this project's own rule this module never guesses an
+# unverified bank's export format): Standard Chartered (all 3 accounts -
+# conventional, Islamic 601, Islamic 602), UBL (Islamic), Faysal Islamic,
+# and Bank Alfalah Islamic. Today's Balances can still be entered manually
+# for every one of these - only the "pre-fill from a parsed statement" and
+# "auto-reconcile the Expected Items Register against this account's
+# transactions" conveniences are unavailable until a sample statement is
+# shared and a parser is added for it.
 STATEMENT_BANK_TO_TEMPLATE_ROW = {
     "hbl": "hbl",
     "faysal": "faysal",
     "js": "js",
     "bafl": "bafl",
-    "mcb": "mcb_savings",  # the MCB sample statement's account matches the savings account row
+    "mcb_savings": "mcb_savings_5655",
+    "mcb_current": "mcb_current_5190",
 }
 
 REMITTANCES_HEADER_ROW = 6
@@ -325,7 +365,7 @@ if __name__ == "__main__":
 
     samples = {
         "hbl": "/mnt/user-data/uploads/HBL.xls",
-        "mcb": "/mnt/user-data/uploads/MCB_July_5655.xls",
+        "mcb_savings": "/mnt/user-data/uploads/MCB_July_5655.xls",  # account 5655 = the Savings slot
         "faysal": "/mnt/user-data/uploads/Faysal_6018-.xls",
         "bafl": "/mnt/user-data/uploads/BAFL_July_till_date.csv",
         "js": "/mnt/user-data/uploads/JS_107791.xlsx",
