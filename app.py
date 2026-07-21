@@ -1104,9 +1104,55 @@ class BalanceApp(tk.Tk):
         balances (manual entry, pre-filled from parsed statements where
         available) -> remittances -> Expected Items Register (Major
         Payments/Receivables, with auto-reconciliation) -> generate +
-        send. Same scrollable numbered-card pattern as Loss Ratio /
-        Premium Register."""
-        outer = ttk.Frame(parent)
+        send.
+
+        Rebuilt as a 4-tab Notebook (previously one long scrollable
+        page), each tab holding one or two sections instead of all six -
+        so there's simply much less to scroll through per tab. Each
+        tab's own canvas uses the exact same Enter/Leave mousewheel
+        pattern as every other scrollable page in the app (see
+        _enable_mousewheel, and compare to the Receivable/Premium
+        Register tabs, which are also Notebook tabs with their own
+        scrollable canvas and already work correctly with this pattern)
+        - scrolling engages the moment the mouse is over a tab's content
+        and releases the moment it leaves, independent of how the tab
+        itself became visible (sidebar navigation, tab click, or
+        otherwise), rather than depending on a tab-change event firing
+        at exactly the right moment."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Bank Position", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Daily conventional + Islamic bank balances, remittances, and expected "
+                                "receivables/payments for the CFO - built on top of yesterday's file so "
+                                "Kibor rates, T-Bills, and the Investment portfolio carry forward untouched.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_previous = ttk.Frame(notebook)
+        tab_balances = ttk.Frame(notebook)
+        tab_remit_register = ttk.Frame(notebook)
+        tab_generate = ttk.Frame(notebook)
+        notebook.add(tab_previous, text="1. Previous File & Statements")
+        notebook.add(tab_balances, text="2. Today's Balances")
+        notebook.add(tab_remit_register, text="3. Remittances & Register")
+        notebook.add(tab_generate, text="4. Generate & Send")
+
+        self._build_bankpos_tab_previous_statements(tab_previous)
+        self._build_bankpos_tab_balances(tab_balances)
+        self._build_bankpos_tab_remit_register(tab_remit_register)
+        self._build_bankpos_tab_generate(tab_generate)
+
+        self._refresh_bankpos_register_tree()
+
+    def _make_bankpos_scrollable_body(self, tab):
+        """Standard canvas+scrollbar scrollable area for one Bank Position
+        tab, using the same Enter/Leave mousewheel binding
+        (self._enable_mousewheel) as every other scrollable page in the
+        app - see _build_bank_position_page's docstring."""
+        outer = ttk.Frame(tab)
         outer.pack(fill="both", expand=True)
 
         canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
@@ -1128,18 +1174,14 @@ class BalanceApp(tk.Tk):
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
         self._enable_mousewheel(canvas, _on_mousewheel)
+        return body
 
-        PAD_X = 20
-
-        header = ttk.Frame(body)
-        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
-        ttk.Label(header, text="Bank Position", font=("Segoe UI Semibold", 18, "bold"),
-                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
-        ttk.Label(header, text="Daily conventional + Islamic bank balances, remittances, and expected "
-                                "receivables/payments for the CFO - built on top of yesterday's file so "
-                                "Kibor rates, T-Bills, and the Investment portfolio carry forward untouched.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+    # ---- Tab 1: Previous File & Statements ----
+    def _build_bankpos_tab_previous_statements(self, tab):
+        body = self._make_bankpos_scrollable_body(tab)
+        PAD_X = 16
 
         # --- Section 1: Previous day's file ---
         s1 = self._loss_section_card(body, "1", "Previous Day's File", PAD_X)
@@ -1154,11 +1196,12 @@ class BalanceApp(tk.Tk):
         self._make_pill_button(prev_row, "Load", self._load_bankpos_previous_file, bg=self.COLOR_PRIMARY).pack(side="left")
 
         # --- Section 2: Statement uploads + passwords ---
-        s2 = self._loss_section_card(body, "2", "Statement Uploads (optional, per bank)", PAD_X)
-        ttk.Label(s2, text="The live portal balance you type in Section 3 is always preferred - statements here are "
-                            "used to pre-fill a starting value and for the receivables reconciliation in Section 5. "
-                            "If a statement is password-protected, save its password once and it unlocks automatically "
-                            "from then on (stored in Windows' own credential store, not in a plain file).",
+        s2 = self._loss_section_card(body, "2", "Statement Uploads (optional, per bank)", PAD_X, expand_bottom=True)
+        ttk.Label(s2, text="The live portal balance you type in the Today's Balances tab is always preferred - "
+                            "statements here are used to pre-fill a starting value and for the receivables "
+                            "reconciliation in the Remittances & Register tab. If a statement is password-protected, "
+                            "save its password once and it unlocks automatically from then on (stored in Windows' "
+                            "own credential store, not in a plain file).",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 12))
 
         self.bankpos_slot_widgets = {}
@@ -1194,11 +1237,15 @@ class BalanceApp(tk.Tk):
         parse_row.pack(fill="x", pady=(6, 0))
         self._make_action_button(parse_row, "Parse All Statements", self._parse_bankpos_statements, kind="accent").pack(side="left")
 
-        # --- Section 3: Today's balances ---
-        s3 = self._loss_section_card(body, "3", "Today's Balances", PAD_X)
+    # ---- Tab 2: Today's Balances ----
+    def _build_bankpos_tab_balances(self, tab):
+        body = self._make_bankpos_scrollable_body(tab)
+        PAD_X = 16
+
+        s3 = self._loss_section_card(body, "3", "Today's Balances", PAD_X, expand_bottom=True)
         ttk.Label(s3, text="Read straight off each bank's portal dashboard - this is preferred over the statement's "
-                            "closing balance, which is always at least a day old. Load Section 1's file first to "
-                            "populate this list with the real account names and yesterday's starting values.",
+                            "closing balance, which is always at least a day old. Load the previous file (tab 1) first "
+                            "to populate this list with the real account names and yesterday's starting values.",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
 
         balances_cols = ttk.Frame(s3)
@@ -1219,8 +1266,13 @@ class BalanceApp(tk.Tk):
         self.bankpos_islamic_frame.pack(fill="both", expand=True)
 
         self.bankpos_balances_placeholder = ttk.Label(
-            s3, text="Load Section 1's file to populate this list.", foreground=self.COLOR_MUTED, font=("Segoe UI", 9, "italic"))
+            s3, text="Load the previous file (tab 1) to populate this list.", foreground=self.COLOR_MUTED, font=("Segoe UI", 9, "italic"))
         self.bankpos_balances_placeholder.pack(anchor="w", pady=(8, 0))
+
+    # ---- Tab 3: Remittances & Register ----
+    def _build_bankpos_tab_remit_register(self, tab):
+        body = self._make_bankpos_scrollable_body(tab)
+        PAD_X = 16
 
         # --- Section 4: Remittances ---
         s4 = self._loss_section_card(body, "4", "Outward Remittances", PAD_X)
@@ -1256,7 +1308,7 @@ class BalanceApp(tk.Tk):
                                 bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(anchor="w", pady=(6, 0))
 
         # --- Section 5: Expected Items Register (Major Payments/Receivables) ---
-        s5 = self._loss_section_card(body, "5", "Expected Items Register (Major Payments/Receivables)", PAD_X)
+        s5 = self._loss_section_card(body, "5", "Expected Items Register (Major Payments/Receivables)", PAD_X, expand_bottom=True)
         ttk.Label(s5, text="Log anything expected before it lands - reconciliation below auto-clears it once a "
                             "matching credit/debit shows up in a parsed statement, and flags anything still open "
                             "past its expected date as overdue. A match is only ever auto-accepted when there's "
@@ -1305,7 +1357,11 @@ class BalanceApp(tk.Tk):
         self.bankpos_reg_log = scrolledtext.ScrolledText(s5, height=5, font=("Consolas", 9), relief="solid", borderwidth=1)
         self.bankpos_reg_log.pack(fill="x", pady=(8, 0))
 
-        # --- Section 6: Generate & Send ---
+    # ---- Tab 4: Generate & Send ----
+    def _build_bankpos_tab_generate(self, tab):
+        body = self._make_bankpos_scrollable_body(tab)
+        PAD_X = 16
+
         s6 = self._loss_section_card(body, "6", "Generate & Send", PAD_X, expand_bottom=True)
         out_row = ttk.Frame(s6)
         out_row.pack(fill="x", pady=(0, 8))
@@ -1332,8 +1388,6 @@ class BalanceApp(tk.Tk):
 
         self.bankpos_log = scrolledtext.ScrolledText(s6, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
         self.bankpos_log.pack(fill="both", expand=True, pady=(8, 0))
-
-        self._refresh_bankpos_register_tree()
 
     def _log_bankpos(self, msg):
         self.bankpos_log.insert("end", str(msg) + "\n")
