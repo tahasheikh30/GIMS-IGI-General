@@ -33,6 +33,10 @@ import receivable_run_log as rvlog
 import run_log
 import premium_register_processor as prp
 import premium_register_generator as prg
+import claims_register_processor as crp
+import claims_register_generator as crg
+import claims_register_email as cre
+import claims_register_run_log as crlog
 import perf_utils
 import bank_statement_processor as bsp
 import bank_position_register as bpr
@@ -134,6 +138,19 @@ class BalanceApp(tk.Tk):
         self.premreg_leader_file = ""
         self.premreg_register_file = ""
         self.premreg_result_df = None
+
+        self.claims_intimation_file = ""
+        self.claims_premium_register_file = ""
+        self.claims_matched_df = None
+        self.claims_unmatched_df = None
+        self.claims_groups = None
+        self.claims_totals = None
+        self.claims_breakdowns = None
+        self.claims_filename_lookup = {}
+        self.claims_email_lookup = {}
+        self.claims_poc_lookup = {}
+        self.claims_drafts = []
+        self.claims_output_dir = os.path.join(os.getcwd(), "claims_register_output")
 
         # Bank Position module state
         self.bankpos_statement_paths = {}     # bank_key -> filepath
@@ -594,9 +611,10 @@ class BalanceApp(tk.Tk):
         self.nav_pages["coinsurance_premium_register"] = premium_register_page
         self._build_premium_register_page(premium_register_page)
 
-        claims_register_page = self._build_placeholder_page(container, "Claims Register")
+        claims_register_page = ttk.Frame(container)
         claims_register_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["coinsurance_claims_register"] = claims_register_page
+        self._build_claims_register_page(claims_register_page)
 
         renewal_page = self._build_placeholder_page(container, "Renewal")
         renewal_page.grid(row=0, column=0, sticky="nsew")
@@ -2590,6 +2608,596 @@ class BalanceApp(tk.Tk):
         def worker():
             success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
             self.receivable_email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
+            prefix = "[DRY RUN] " if dry_run else ""
+            messagebox.showinfo("Done", f"{prefix}{message}")
+            self.status_var.set(f"{prefix}{message}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- Coinsurance > Claims Register module ----------
+    def _build_claims_register_page(self, parent):
+        """Claims Register (Coinsurance) - matches the Claim Intimation
+        Register against IGI's own Premium Register to recover each
+        claim's coinsurer name(s) (a policy can have several coinsurers
+        at once, so a claim can fan out to several of their files), then
+        writes one Excel workbook per coinsurer and drafts/sends a
+        recovery-statement email for each. Same three-tab structure as
+        the Premium/Claims Email Automation page."""
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+
+        self.tab_claims_setup = ttk.Frame(notebook)
+        self.tab_claims_groups = ttk.Frame(notebook)
+        self.tab_claims_emails = ttk.Frame(notebook)
+        notebook.add(self.tab_claims_setup, text="1. Upload & Match")
+        notebook.add(self.tab_claims_groups, text="2. Insurance Company Files")
+        notebook.add(self.tab_claims_emails, text="3. Review & Send Emails")
+
+        self._build_claims_setup_tab()
+        self._build_claims_groups_tab()
+        self._build_claims_emails_tab()
+
+    def _build_claims_setup_tab(self):
+        f = self.tab_claims_setup
+        f.configure(style="TFrame")
+
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        canvas_frame = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=canvas_frame, anchor="nw")
+
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas_frame.bind("<Configure>", _on_frame_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        pad = {"padx": 10, "pady": 8}
+
+        # ---- Section: Data Source ----
+        source_box = ttk.Labelframe(canvas_frame, text="  Data Source  ", padding=14)
+        source_box.pack(fill="x", padx=12, pady=(12, 8))
+        source_box.columnconfigure(1, weight=1)
+
+        ttk.Label(source_box, text="Claim Intimation Register (.xlsx/.xls)", style="Panel.TLabel").grid(row=0, column=0, sticky="w", **pad)
+        self.claims_intimation_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.claims_intimation_file_var).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_claims_intimation_file).grid(row=0, column=2, **pad)
+
+        ttk.Label(source_box, text="IGI Premium Register (.xlsx/.xls)", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
+        self.claims_premium_register_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.claims_premium_register_file_var).grid(row=1, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_claims_premium_register_file).grid(row=1, column=2, **pad)
+
+        ttk.Label(source_box, text="The claim's own 'Policy/PMD #' is matched against the Premium Register's "
+                                    "'Document No.' and 'Base Doc No.' using the same fuzzy digit-run matching as "
+                                    "Premium Register, plus the branch/class code embedded in the reference. A "
+                                    "policy shared by several coinsurers fans a claim out to every one of their "
+                                    "files, each showing their own Share % and their portion of Claim Paid/O/S.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=560, justify="left").grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
+
+        ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=3, column=0, sticky="w", **pad)
+        self.claims_output_dir_var = tk.StringVar(value=self.claims_output_dir)
+        ttk.Entry(source_box, textvariable=self.claims_output_dir_var).grid(row=3, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_claims_output_dir).grid(row=3, column=2, **pad)
+
+        self.claims_load_email_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(source_box, text="Look up recipient emails from a lookup file",
+                         variable=self.claims_load_email_var).grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(6, 2))
+
+        ttk.Label(source_box, text="Email Lookup File (.xlsx/.csv, optional)", style="Panel.TLabel").grid(row=5, column=0, sticky="w", **pad)
+        self.claims_email_lookup_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.claims_email_lookup_file_var).grid(row=5, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_claims_email_lookup_file).grid(row=5, column=2, **pad)
+        ttk.Label(source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
+                                    "Rows are matched to each output file's coinsurer name by exact match "
+                                    "(the pooled OFC file looks up the literal key 'OFC'). If left blank, drafted "
+                                    "emails will be flagged \"missing email\" for manual entry.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=560, justify="left").grid(row=6, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 2))
+
+        self.claims_match_btn = ttk.Button(source_box, text="Load & Match Claims", style="Accent.TButton", width=24,
+                                            command=self.load_and_match_claims)
+        self.claims_match_btn.grid(row=7, column=0, sticky="w", padx=10, pady=(10, 4))
+
+        self.claims_match_progress = perf_utils.ProgressBarPanel(source_box)
+        self.claims_match_progress.frame.grid(row=8, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 8))
+
+        self.claims_match_summary_var = tk.StringVar(value="")
+        ttk.Label(source_box, textvariable=self.claims_match_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 10, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
+
+        # ---- Section: Log ----
+        log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
+        log_box.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+        self.claims_setup_log = scrolledtext.ScrolledText(log_box, height=12, font=("Consolas", 9),
+                                                            bg="#FBFCFD", relief="flat", borderwidth=0)
+        self.claims_setup_log.pack(fill="both", expand=True)
+
+    def _build_claims_groups_tab(self):
+        f = self.tab_claims_groups
+
+        top = ttk.Frame(f)
+        top.pack(fill="x", padx=12, pady=(12, 8))
+        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
+                   command=self.generate_claims_register_reports).pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Open Output Folder", command=self.open_claims_register_output_folder, width=20).pack(side="left")
+        self.claims_results_summary_var = tk.StringVar(value="Run 'Load & Match Claims' on tab 1 to see one row per coinsurer here.")
+        ttk.Label(top, textvariable=self.claims_results_summary_var, style="Muted.TLabel").pack(side="right")
+
+        hint = ttk.Label(f, text="One workbook is generated per coinsurer (covering every matched claim they share); every "
+                                  "coinsurer with \"OFC\" in its name is pooled into a single shared \"OFC\" file. Claims that "
+                                  "couldn't be matched to a policy - or whose matched policy had no coinsurer at all - are "
+                                  "written to a separate \"Unmatched Claims\" file for manual review.",
+                          style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
+        hint.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self.claims_reports_progress = perf_utils.ProgressBarPanel(f)
+        self.claims_reports_progress.frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        tree_frame = ttk.Frame(f)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        columns = ("company", "num_claims", "paid_total", "os_total")
+        self.claims_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+        self.claims_results_tree.heading("company", text="Coinsurer (output file)")
+        self.claims_results_tree.heading("num_claims", text="Claims")
+        self.claims_results_tree.heading("paid_total", text="Share of Claim Paid")
+        self.claims_results_tree.heading("os_total", text="Share of Claim O/S")
+        self.claims_results_tree.column("company", width=380)
+        self.claims_results_tree.column("num_claims", width=80, anchor="center")
+        self.claims_results_tree.column("paid_total", width=170, anchor="e")
+        self.claims_results_tree.column("os_total", width=170, anchor="e")
+        self.claims_results_tree.tag_configure("oddrow", background="#F6F8FB")
+        self.claims_results_tree.tag_configure("evenrow", background="white")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.claims_results_tree.yview)
+        self.claims_results_tree.configure(yscrollcommand=vsb.set)
+        self.claims_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    def _build_claims_emails_tab(self):
+        f = self.tab_claims_emails
+
+        top = ttk.Frame(f)
+        top.pack(fill="x", padx=12, pady=(12, 8))
+        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_claims_register_emails, width=18).pack(side="left", padx=(0, 12))
+        self.claims_dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.claims_dry_run_var).pack(side="left", padx=(0, 12))
+        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_claims_register_emails, width=14).pack(side="left")
+
+        sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email - shared across every GIMS module)  ", padding=10)
+        sig_frame.pack(fill="x", padx=12, pady=(0, 8))
+        sig_frame.columnconfigure(0, weight=1)
+        self.claims_signature_text = tk.Text(sig_frame, height=3, font=("Segoe UI", 10), relief="solid", borderwidth=1, wrap="word")
+        self.claims_signature_text.grid(row=0, column=0, sticky="ew")
+        self.claims_signature_text.insert("1.0", eg.load_signature())
+
+        sig_btn_holder = tk.Frame(sig_frame, bg=self.COLOR_PANEL)
+        sig_btn_holder.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        sig_btn = self._make_action_button(sig_btn_holder, "Save Signature", self.save_claims_register_signature,
+                                            kind="quiet", compact=True)
+        sig_btn.pack(expand=True)
+
+        body = ttk.Frame(f)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        body.columnconfigure(0, weight=0)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        ttk.Label(left, text="Coinsurer Files", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        list_frame = ttk.Frame(left)
+        list_frame.pack(fill="both", expand=True)
+        columns = ("company", "claims", "email", "status")
+        self.claims_email_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=26)
+        self.claims_email_tree.heading("company", text="Coinsurer")
+        self.claims_email_tree.heading("claims", text="Claims")
+        self.claims_email_tree.heading("email", text="Email")
+        self.claims_email_tree.heading("status", text="Status")
+        self.claims_email_tree.column("company", width=210)
+        self.claims_email_tree.column("claims", width=60, anchor="center")
+        self.claims_email_tree.column("email", width=170)
+        self.claims_email_tree.column("status", width=150)
+        tree_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.claims_email_tree.yview)
+        self.claims_email_tree.configure(yscrollcommand=tree_scroll.set)
+        self.claims_email_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        self.claims_email_tree.bind("<<TreeviewSelect>>", self.on_select_claims_register_email)
+
+        right = ttk.Labelframe(body, text="  Email Preview  ", padding=14)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(3, weight=1)
+
+        ttk.Label(right, text="To (recipient email)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self.claims_email_to_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.claims_email_to_var, font=("Segoe UI", 10))\
+            .grid(row=1, column=0, sticky="ew", pady=(0, 12))
+
+        ttk.Label(right, text="Subject", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self.claims_subject_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.claims_subject_var, font=("Segoe UI", 10))\
+            .grid(row=2, column=0, sticky="ew")
+
+        body_wrap = ttk.Frame(right)
+        body_wrap.grid(row=3, column=0, sticky="nsew", pady=(14, 10))
+        body_wrap.columnconfigure(0, weight=1)
+        body_wrap.rowconfigure(1, weight=1)
+        ttk.Label(body_wrap, text="Body", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.claims_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.claims_body_text.grid(row=1, column=0, sticky="nsew", pady=(2, 0))
+
+        btn_row = ttk.Frame(right)
+        btn_row.grid(row=4, column=0, sticky="w")
+
+        save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_claims_register_email_edit, kind="accent")
+        save_btn.pack(side="left", padx=(0, 8))
+
+        send_one_btn = self._make_action_button(btn_row, "Send This Email", self.send_individual_claims_register_email, kind="success")
+        send_one_btn.pack(side="left")
+
+    # ---------- Claims Register actions ----------
+    def browse_claims_intimation_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        if path:
+            self.claims_intimation_file_var.set(path)
+
+    def browse_claims_premium_register_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        if path:
+            self.claims_premium_register_file_var.set(path)
+
+    def browse_claims_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.claims_output_dir_var.set(path)
+
+    def browse_claims_email_lookup_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel/CSV files", "*.xlsx *.xls *.csv")])
+        if path:
+            self.claims_email_lookup_file_var.set(path)
+
+    def log_claims(self, msg):
+        self.claims_setup_log.insert("end", str(msg) + "\n")
+        self.claims_setup_log.see("end")
+
+    def load_and_match_claims(self):
+        intimation_path = self.claims_intimation_file_var.get().strip()
+        register_path = self.claims_premium_register_file_var.get().strip()
+        if not intimation_path or not os.path.exists(intimation_path):
+            messagebox.showerror("Error", "Please select a valid Claim Intimation Register file.")
+            return
+        if not register_path or not os.path.exists(register_path):
+            messagebox.showerror("Error", "Please select a valid IGI Premium Register file.")
+            return
+
+        self.claims_setup_log.delete("1.0", "end")
+        self.claims_match_summary_var.set("")
+        self.status_var.set("Loading and matching claims...")
+        self.claims_match_progress.start(total=None, text="Loading files...")
+
+        def worker(report):
+            report(f"Loading Claim Intimation Register: {os.path.basename(intimation_path)}...")
+            claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path)
+            report(f"  {len(claims_df):,} claim row(s) loaded. Policy reference column detected as '{pmd_col}'.")
+
+            report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
+            reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path)
+            report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Document No column='{doc_col}'"
+                   + (f", Base Doc No column='{base_doc_col}'" if base_doc_col else " (no Base Doc No column found - matching against Document No only)."))
+
+            colmap = crp.get_claim_colmap(claims_df)
+            claim_paid_col = colmap.get("Claim Paid")
+            claim_os_col = colmap.get("Claim O/S")
+            insured_col = colmap.get("Insured Name")
+
+            report(f"\nMatching {len(claims_df):,} claim(s) against {len(reg_df):,} register row(s)...")
+            report.progress(0, len(claims_df), text=f"Matching 0 / {len(claims_df):,} claim(s)")
+            matched_df, unmatched_df = crp.match_claims(
+                claims_df, pmd_col, reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col,
+                claim_paid_col=claim_paid_col, claim_os_col=claim_os_col, report=report,
+            )
+            groups, totals, breakdowns = crp.build_coinsurer_buckets(matched_df, insured_col=insured_col)
+            return claims_df, matched_df, unmatched_df, groups, totals, breakdowns
+
+        def on_done(result):
+            claims_df, matched_df, unmatched_df, groups, totals, breakdowns = result
+            self.claims_matched_df = matched_df
+            self.claims_unmatched_df = unmatched_df
+            self.claims_groups = groups
+            self.claims_totals = totals
+            self.claims_breakdowns = breakdowns
+
+            n_claims = len(claims_df)
+            n_matched_pairs = len(matched_df)
+            n_unique_matched = matched_df["Policy/PMD #"].nunique() if len(matched_df) else 0
+            n_unmatched = len(unmatched_df)
+
+            self.log_claims(f"\n{n_unique_matched} of {n_claims} claim(s) matched to a coinsurer "
+                             f"({n_matched_pairs} claim-coinsurer pair(s) across {len(groups)} coinsurer(s) - "
+                             f"a claim shared by several coinsurers counts once per coinsurer).")
+            if n_unmatched:
+                self.log_claims(f"{n_unmatched} claim(s) need manual review:")
+                reason_counts = unmatched_df["Reason"].value_counts()
+                for reason, count in reason_counts.items():
+                    self.log_claims(f"   {count}x  {reason}")
+
+            self.claims_results_tree.delete(*self.claims_results_tree.get_children())
+            for i, (bucket_label, _g) in enumerate(groups.items()):
+                t = totals[bucket_label]
+                tag = "evenrow" if i % 2 == 0 else "oddrow"
+                self.claims_results_tree.insert("", "end", values=(
+                    bucket_label, t["num_claims"], f"{t['total_share_paid']:,.0f}", f"{t['total_share_os']:,.0f}"
+                ), tags=(tag,))
+            self.claims_results_summary_var.set(f"{len(groups)} coinsurer file(s) identified")
+
+            summary_text = f"Matched {n_unique_matched}/{n_claims} claims \u2192 {len(groups)} coinsurer file(s). {n_unmatched} unmatched."
+            self.claims_match_summary_var.set(summary_text)
+            self.claims_match_progress.finish(summary_text)
+            self.status_var.set(f"{len(groups)} coinsurer files identified. See tab 2.")
+
+        def on_error(exc):
+            self.claims_match_progress.finish("Failed - see the Activity Log for details.")
+            self.log_claims(f"\nERROR: {exc}")
+            messagebox.showerror("Matching failed", str(exc))
+            self.status_var.set("Claims matching failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log_claims(msg),
+            on_progress_value=self.claims_match_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.claims_match_btn],
+        )
+
+    def generate_claims_register_reports(self):
+        if not self.claims_groups:
+            messagebox.showwarning("Nothing to generate", "Run 'Load & Match Claims' first (tab 1).")
+            return
+
+        output_dir = self.claims_output_dir_var.get().strip()
+        if not output_dir:
+            messagebox.showerror("No output folder", "Set an output folder on tab 1 first.")
+            return
+        os.makedirs(output_dir, exist_ok=True)
+
+        groups = self.claims_groups
+        breakdowns = self.claims_breakdowns
+        unmatched_df = self.claims_unmatched_df
+        self.status_var.set(f"Generating {len(groups)} Claims Register workbook(s)...")
+        total_files = len(groups) + (1 if unmatched_df is not None and len(unmatched_df) else 0)
+        self.claims_reports_progress.start(total=total_files, text=f"0 / {total_files} workbook(s) generated")
+
+        def worker(report):
+            filename_lookup = {}
+            generated = []
+            errors = []
+            i = 0
+            for bucket_label, claims_sub_df in groups.items():
+                i += 1
+                report(f"[{i}/{total_files}] {bucket_label} ({len(claims_sub_df):,} claim(s))")
+                report.progress(i - 1, total_files, text=f"Generating: {bucket_label} ({i}/{total_files})")
+                try:
+                    breakdown = breakdowns.get(bucket_label)
+                    fp = crg.build_coinsurer_workbook(bucket_label, claims_sub_df, breakdown, output_dir, report=report)
+                    generated.append(fp)
+                    filename_lookup[bucket_label] = os.path.basename(fp)
+                except Exception as e:
+                    errors.append(f"{bucket_label}: {e}")
+                report.progress(i, total_files, text=f"{i} / {total_files} workbook(s) generated")
+
+            if unmatched_df is not None and len(unmatched_df):
+                i += 1
+                report(f"[{i}/{total_files}] Unmatched Claims ({len(unmatched_df):,} claim(s))")
+                report.progress(i - 1, total_files, text=f"Generating: Unmatched Claims ({i}/{total_files})")
+                try:
+                    fp = crg.build_unmatched_workbook(unmatched_df, output_dir, report=report)
+                    if fp:
+                        generated.append(fp)
+                except Exception as e:
+                    errors.append(f"Unmatched Claims: {e}")
+                report.progress(i, total_files, text=f"{i} / {total_files} workbook(s) generated")
+
+            return generated, filename_lookup, errors
+
+        def on_done(result):
+            generated, filename_lookup, errors = result
+            self.claims_filename_lookup = filename_lookup
+            self.claims_reports_progress.finish(f"Done: {len(generated)} / {total_files} workbook(s) generated.")
+            msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
+            if errors:
+                msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
+            messagebox.showinfo("Done", msg)
+            self.status_var.set(f"Generated {len(generated)} Claims Register workbook(s).")
+
+        def on_error(exc):
+            self.claims_reports_progress.finish("Failed - see the Activity Log for details.")
+            messagebox.showerror("Report generation failed", str(exc))
+            self.status_var.set("Report generation failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.claims_reports_progress.update,
+            on_progress=lambda msg: self.log_claims(msg),
+            on_done=on_done, on_error=on_error,
+        )
+
+    def open_claims_register_output_folder(self):
+        output_dir = self.claims_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate reports first.")
+
+    def draft_claims_register_emails(self):
+        if not self.claims_groups:
+            messagebox.showwarning("Nothing to draft", "Run 'Load & Match Claims' first (tab 1).")
+            return
+
+        self.claims_email_lookup, self.claims_poc_lookup = {}, {}
+        if self.claims_load_email_var.get():
+            lookup_path = self.claims_email_lookup_file_var.get().strip()
+            if lookup_path and os.path.exists(lookup_path):
+                try:
+                    self.claims_email_lookup, self.claims_poc_lookup = ra.load_email_lookup_from_file(lookup_path)
+                    self.log_claims(f"\nLoaded {len(self.claims_email_lookup)} coinsurer email mapping(s) "
+                                     f"from '{os.path.basename(lookup_path)}'.")
+                except Exception as e:
+                    self.log_claims(f"\nWARNING: could not load email lookup: {e}")
+            else:
+                self.log_claims("\nNo email lookup file selected - all drafts will show 'Missing email'.")
+
+        signature = self.claims_signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)  # shared signature store across every GIMS module
+
+        self.claims_drafts = cre.build_claims_register_email_drafts(
+            self.claims_groups, self.claims_totals, self.claims_email_lookup,
+            poc_lookup=self.claims_poc_lookup, signature=signature,
+        )
+        self.claims_email_tree.delete(*self.claims_email_tree.get_children())
+        for d in self.claims_drafts:
+            self.claims_email_tree.insert("", "end", values=(
+                d["company_name"], d["num_claims"], d["email"] or "(missing)", d["status"]
+            ))
+        self.status_var.set(f"Drafted {len(self.claims_drafts)} Claims Register emails.")
+
+    def save_claims_register_signature(self):
+        signature = self.claims_signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)
+        self.status_var.set("Signature saved (shared across every GIMS module). Click Draft Emails again to refresh existing drafts.")
+
+    def on_select_claims_register_email(self, event):
+        sel = self.claims_email_tree.selection()
+        if not sel:
+            return
+        idx = self.claims_email_tree.index(sel[0])
+        d = self.claims_drafts[idx]
+        self.claims_email_to_var.set(d.get("email") or "")
+        self.claims_subject_var.set(d["subject"])
+        self.claims_body_text.delete("1.0", "end")
+        self.claims_body_text.insert("1.0", d["body"])
+
+    def save_claims_register_email_edit(self):
+        sel = self.claims_email_tree.selection()
+        if not sel:
+            messagebox.showinfo("No coinsurer selected", "Select a coinsurer from the list on the left first.")
+            return
+        idx = self.claims_email_tree.index(sel[0])
+        new_email = self.claims_email_to_var.get().strip()
+        self.claims_drafts[idx]["email"] = new_email or None
+        self.claims_drafts[idx]["subject"] = self.claims_subject_var.get()
+        self.claims_drafts[idx]["body"] = self.claims_body_text.get("1.0", "end").strip()
+
+        status = "Ready" if new_email else "Missing email - needs manual entry"
+        row_id = self.claims_email_tree.get_children()[idx]
+        self.claims_email_tree.set(row_id, "email", new_email or "(missing)")
+        self.claims_email_tree.set(row_id, "status", status)
+
+        self.status_var.set(f"Updated draft for {self.claims_drafts[idx]['company_name']}.")
+
+    def send_all_claims_register_emails(self):
+        if not self.claims_drafts:
+            messagebox.showwarning("Nothing to send", "Draft emails first.")
+            return
+
+        filename_lookup = self.claims_filename_lookup
+        missing = [d["company_name"] for d in self.claims_drafts
+                   if d["company_name"] not in filename_lookup]
+        if missing:
+            proceed = messagebox.askyesno(
+                "Reports not generated",
+                f"{len(missing)} of {len(self.claims_drafts)} file(s) have no generated Excel workbook yet, "
+                f"so those emails would go out with no attachment:\n\n"
+                + "\n".join(missing[:10]) + (f"\n...and {len(missing) - 10} more" if len(missing) > 10 else "")
+                + "\n\nGo to tab 2 and click 'Generate Excel Reports' first, "
+                  "or continue anyway without attachments?\n\nContinue anyway?"
+            )
+            if not proceed:
+                return
+
+        dry_run = self.claims_dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", f"Send {len(self.claims_drafts)} emails via Outlook now? This cannot be undone."):
+                return
+
+        output_dir = self.claims_output_dir_var.get().strip()
+
+        def worker():
+            results = cre.send_claims_register_emails(
+                self.claims_drafts, output_dir, filename_lookup, dry_run=dry_run
+            )
+            sent = sum(1 for r in results if r["sent"])
+            failed = len(results) - sent
+            missing_email = sum(1 for d in self.claims_drafts if not d.get("email"))
+            crlog.log_run(
+                num_claims_loaded=(len(self.claims_matched_df["Policy/PMD #"].unique()) + len(self.claims_unmatched_df)) if self.claims_matched_df is not None else 0,
+                num_matched_claims=self.claims_matched_df["Policy/PMD #"].nunique() if self.claims_matched_df is not None else 0,
+                num_unmatched_claims=len(self.claims_unmatched_df) if self.claims_unmatched_df is not None else 0,
+                num_groups=len(self.claims_groups), num_files_generated=len(filename_lookup),
+                num_sent=sent, num_failed=failed, num_missing_email=missing_email, dry_run=dry_run,
+            )
+            for i, r in enumerate(results):
+                self.claims_email_tree.set(self.claims_email_tree.get_children()[i], "status",
+                                            "Sent" if r["sent"] else f"Failed: {r['send_message']}")
+            messagebox.showinfo("Done", f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
+            self.status_var.set(f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_individual_claims_register_email(self):
+        sel = self.claims_email_tree.selection()
+        if not sel:
+            messagebox.showinfo("No coinsurer selected", "Click a coinsurer in the list on the left first.")
+            return
+        idx = self.claims_email_tree.index(sel[0])
+
+        self.save_claims_register_email_edit()
+        d = self.claims_drafts[idx]
+
+        if not d.get("email"):
+            messagebox.showerror("Missing email", "Enter a recipient email address in the 'To' field before sending.")
+            return
+
+        output_dir = self.claims_output_dir_var.get().strip()
+        fname = self.claims_filename_lookup.get(d["company_name"])
+        attachment_path = os.path.join(output_dir, fname) if fname and os.path.exists(os.path.join(output_dir, fname)) else None
+        if attachment_path is None:
+            if not messagebox.askyesno(
+                "No report generated",
+                f"No Excel workbook has been generated yet for {d['company_name']}. "
+                f"Send this email without an attachment?\n\n"
+                f"(Go to tab 2 and click 'Generate Excel Reports' first if you'd rather attach one.)"
+            ):
+                return
+
+        dry_run = self.claims_dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", f"Send this email to {d['email']} ({d['company_name']}) now?"):
+                return
+
+        row_id = self.claims_email_tree.get_children()[idx]
+
+        def worker():
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
+            self.claims_email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
             prefix = "[DRY RUN] " if dry_run else ""
             messagebox.showinfo("Done", f"{prefix}{message}")
             self.status_var.set(f"{prefix}{message}")
