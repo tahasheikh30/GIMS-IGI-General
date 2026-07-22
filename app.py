@@ -303,6 +303,15 @@ class BalanceApp(tk.Tk):
                         bordercolor=self.COLOR_PANEL_ALT, arrowsize=13, width=13)
         style.map("Vertical.TScrollbar", background=[("active", self.COLOR_ACCENT)])
 
+        # Sidebar's own scrollbar needs dark colors to sit on the navy
+        # sidebar instead of the light default above (which was designed
+        # for the light content canvas) - same thumb/trough relationship,
+        # just recolored for a dark surface.
+        style.configure("Sidebar.Vertical.TScrollbar", background=self.COLOR_SIDEBAR_HOVER,
+                        troughcolor=self.COLOR_SIDEBAR, bordercolor=self.COLOR_SIDEBAR,
+                        arrowsize=11, width=10)
+        style.map("Sidebar.Vertical.TScrollbar", background=[("active", self.COLOR_ACCENT)])
+
     # ---------- UI construction ----------
     def _build_ui(self):
         self._build_header()
@@ -380,10 +389,54 @@ class BalanceApp(tk.Tk):
         Premium, Loss Ratio, Renewal) and 'Coinsurance' (its existing
         three sub-items). The active section is shown with a gold accent
         bar, full-white bold text, and a clearly brighter "pill"
-        background, so the current page is unmistakable at a glance."""
-        sidebar = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=254)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
+        background, so the current page is unmistakable at a glance.
+
+        The module list itself is wrapped in a canvas+scrollbar (the same
+        pattern every other scrollable page in the app already uses - see
+        _enable_mousewheel) since expanding every collapsible menu (e.g.
+        Coinsurance's nested Claims submenu) can make the list taller than
+        a shorter window, and it needs to scroll rather than clip. The
+        small footer strip stays pinned to the very bottom of the sidebar,
+        outside the scrollable area, so it's always visible regardless of
+        scroll position."""
+        sidebar_outer = tk.Frame(parent, bg=self.COLOR_SIDEBAR, width=254)
+        sidebar_outer.pack(side="left", fill="y")
+        sidebar_outer.pack_propagate(False)
+
+        # Footer packed first (side="bottom") so it permanently claims its
+        # own slot at the bottom of the sidebar; the scrollable area below
+        # is packed to fill whatever space is left above it.
+        footer = tk.Frame(sidebar_outer, bg=self.COLOR_SIDEBAR_SUBBG)
+        footer.pack(side="bottom", fill="x")
+        tk.Frame(footer, bg=self.COLOR_SIDEBAR_GUIDE, height=1).pack(fill="x", side="top")
+        tk.Label(footer, text="GIMS \u00b7 Finance Automation Suite", font=("Segoe UI", 8),
+                 bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_DIM,
+                 anchor="w").pack(fill="x", padx=24, pady=10)
+
+        scroll_area = tk.Frame(sidebar_outer, bg=self.COLOR_SIDEBAR)
+        scroll_area.pack(side="top", fill="both", expand=True)
+
+        canvas = tk.Canvas(scroll_area, bg=self.COLOR_SIDEBAR, highlightthickness=0)
+        vscroll = ttk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview,
+                                 style="Sidebar.Vertical.TScrollbar")
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        sidebar = tk.Frame(canvas, bg=self.COLOR_SIDEBAR)
+        sidebar_window = canvas.create_window((0, 0), window=sidebar, anchor="nw")
+
+        def _on_sidebar_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        sidebar.bind("<Configure>", _on_sidebar_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(sidebar_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
 
         tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=24).pack(fill="x")
         tk.Label(sidebar, text="M O D U L E S", font=("Segoe UI", 8, "bold"), bg=self.COLOR_SIDEBAR,
@@ -404,7 +457,16 @@ class BalanceApp(tk.Tk):
             [
                 ("coinsurance_pc_email", "Premium/Claims Email Automation"),
                 ("coinsurance_premium_register", "Premium Register"),
-                ("coinsurance_claims_register", "Claims Register"),
+                # Nested submenu marker (None, label, [(key, label), ...]) -
+                # "Claims" is itself a further collapsible menu, currently
+                # holding the one page that used to be the plain "Claims
+                # Register" leaf item, renamed to "Claims Intimation" and
+                # nested one level deeper. The page's own key/wiring
+                # (coinsurance_claims_register -> its nav_pages entry) is
+                # unchanged - only where it sits in the sidebar changed.
+                (None, "Claims", [
+                    ("coinsurance_claims_register", "Claims Intimation"),
+                ]),
             ],
             before=bottom_anchor,
         )
@@ -427,16 +489,9 @@ class BalanceApp(tk.Tk):
             before=finance_header,
         )
 
-        # Bottom-anchored footer strip - a quiet, permanent "floor" under
-        # the nav that keeps the dark panel from just trailing off into
-        # empty space, and doubles as a natural home for a build/version
-        # marker without competing with the module list above it.
-        footer = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
-        footer.pack(side="bottom", fill="x")
-        tk.Frame(footer, bg=self.COLOR_SIDEBAR_GUIDE, height=1).pack(fill="x", side="top")
-        tk.Label(footer, text="GIMS \u00b7 Finance Automation Suite", font=("Segoe UI", 8),
-                 bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_DIM,
-                 anchor="w").pack(fill="x", padx=24, pady=10)
+        # A little breathing room below the last menu so it doesn't sit
+        # flush against the bottom edge of the scrollable area.
+        tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=12).pack(fill="x")
 
         # Hairline seam between the dark sidebar and the light content
         # canvas - crisper than letting the two surfaces butt directly
@@ -461,6 +516,11 @@ class BalanceApp(tk.Tk):
         Returns the header frame widget, so an earlier-built menu can use
         it as its own `before` anchor and keep menus stacked in the order
         they were built.
+
+        sub_items entries are normally a plain (key, label) leaf tuple.
+        An entry can instead be (None, label, nested_items) to nest a
+        FURTHER collapsible submenu one level deeper (e.g. "Claims"
+        nested inside "Coinsurance") - see _build_nested_submenu.
         """
         header = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, cursor="hand2")
         header.pack(fill="x", before=before)
@@ -492,10 +552,15 @@ class BalanceApp(tk.Tk):
         submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
         submenu_frame.pack(fill="x", pady=(2, 6))  # starts expanded
 
-        for key, label in sub_items:
-            self.nav_items[key] = self._make_nav_item(
-                submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
-            )
+        for entry in sub_items:
+            if entry[0] is None:
+                _, nested_label, nested_items = entry
+                self._build_nested_submenu(submenu_frame, nested_label, nested_items)
+            else:
+                key, label = entry
+                self.nav_items[key] = self._make_nav_item(
+                    submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
+                )
 
         def toggle_menu(event=None):
             if submenu_block.winfo_ismapped():
@@ -512,13 +577,76 @@ class BalanceApp(tk.Tk):
 
         return header
 
-    def _hover_menu_header(self, header, header_accent, header_inner, header_label, entering):
-        bg = self.COLOR_SIDEBAR_HOVER if entering else self.COLOR_SIDEBAR
+    def _hover_menu_header(self, header, header_accent, header_inner, header_label, entering, base_bg=None):
+        base_bg = base_bg or self.COLOR_SIDEBAR
+        bg = self.COLOR_SIDEBAR_HOVER if entering else base_bg
         for w in (header, header_inner, header_label):
             w.configure(bg=bg)
         header_accent.configure(bg=bg)
 
-    def _make_nav_item(self, parent, key, text, indent=False, before=None, base_bg=None):
+    def _build_nested_submenu(self, parent_container, label_text, nested_items):
+        """A second-level collapsible menu nested inside a top-level
+        collapsible menu's own recessed block (e.g. 'Claims' nested inside
+        'Coinsurance') - same expand/collapse behavior as
+        _build_collapsible_menu, one level deeper: its own header sits at
+        the same indent as a normal leaf item, and its leaf items sit in a
+        further-indented, further-nested block below it.
+
+        Unlike _build_collapsible_menu, this doesn't take a `before`
+        anchor - it's built once, in order, directly into
+        `parent_container` (the parent menu's own submenu_frame), so a
+        plain pack() (append at the end) is always correct as long as
+        nothing is added to parent_container after this call for the
+        current sub_items list.
+        """
+        header = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG, cursor="hand2")
+        header.pack(fill="x")
+
+        header_accent = tk.Frame(header, bg=self.COLOR_SIDEBAR_SUBBG, width=4)
+        header_accent.pack(side="left", fill="y")
+
+        header_inner = tk.Frame(header, bg=self.COLOR_SIDEBAR_SUBBG)
+        header_inner.pack(side="left", fill="both", expand=True, padx=(24, 14), pady=12)
+
+        header_label = tk.Label(header_inner, text=label_text, font=("Segoe UI", 10, "bold"),
+                                 bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_ACTIVE, anchor="w")
+        header_label.pack(side="left", fill="both", expand=True)
+
+        caret = tk.Label(header_inner, text="\u25BE", font=("Segoe UI", 8),
+                          bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_DIM)
+        caret.pack(side="right")
+
+        inner_block = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG)
+        inner_block.pack(fill="x")
+        guide = tk.Frame(inner_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
+        guide.place(x=37, y=2, relheight=1.0, height=-8)
+
+        inner_frame = tk.Frame(inner_block, bg=self.COLOR_SIDEBAR_SUBBG)
+        inner_frame.pack(fill="x", pady=(2, 6))  # starts expanded
+
+        for key, label in nested_items:
+            self.nav_items[key] = self._make_nav_item(
+                inner_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG, extra_indent=16
+            )
+
+        def toggle_menu(event=None):
+            if inner_block.winfo_ismapped():
+                inner_block.pack_forget()
+                caret.configure(text="\u25B8")
+            else:
+                inner_block.pack(fill="x")
+                caret.configure(text="\u25BE")
+
+        for w in (header, header_accent, header_inner, caret, header_label):
+            w.bind("<Button-1>", toggle_menu)
+            w.bind("<Enter>", lambda e: self._hover_menu_header(
+                header, header_accent, header_inner, header_label, True, base_bg=self.COLOR_SIDEBAR_SUBBG))
+            w.bind("<Leave>", lambda e: self._hover_menu_header(
+                header, header_accent, header_inner, header_label, False, base_bg=self.COLOR_SIDEBAR_SUBBG))
+
+        return header
+
+    def _make_nav_item(self, parent, key, text, indent=False, before=None, base_bg=None, extra_indent=0):
         base_bg = base_bg or self.COLOR_SIDEBAR
         wrapper = tk.Frame(parent, bg=base_bg, cursor="hand2")
         pack_kwargs = {"fill": "x"}
@@ -530,12 +658,17 @@ class BalanceApp(tk.Tk):
         accent.pack(side="left", fill="y")
 
         inner = tk.Frame(wrapper, bg=base_bg)
+        # extra_indent pushes a leaf item further right for each
+        # additional level of nesting below the first (e.g. "Claims
+        # Intimation" sitting under the nested "Claims" submenu, rather
+        # than directly under "Coinsurance") - 0 for a normal sub-item.
+        left_pad = (24 + extra_indent, 14) if indent else (16, 14)
         inner.pack(side="left", fill="both", expand=True,
-                    padx=(24, 14) if indent else (16, 14), pady=13 if indent else 15)
+                    padx=left_pad, pady=13 if indent else 15)
 
         label = tk.Label(inner, text=text, font=("Segoe UI", 10 if indent else 11),
                           bg=base_bg, fg=self.COLOR_SIDEBAR_TEXT, anchor="w",
-                          wraplength=190 if indent else None, justify="left")
+                          wraplength=(190 - extra_indent) if indent else None, justify="left")
         label.pack(side="left", fill="both", expand=True)
 
         def on_click(event=None, k=key):
