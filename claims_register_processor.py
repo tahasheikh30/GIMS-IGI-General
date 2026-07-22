@@ -56,6 +56,21 @@ premium_register_processor.match_one(). Per spec, ALL claims are matched
 regardless of Status (Outstanding/Paid/No Loss) - a coinsurer still owes
 their share on a claim IGI has already paid out, so Status is preserved
 as an output column but never used to filter which claims get matched.
+
+PERFORMANCE: this module was written after the rest of GIMS already went
+through the O(items x rows) / iterrows() cleanup documented in
+PERFORMANCE_NOTES.md, and had picked up the same class of issue on its
+own: _build_policy_index() and match_claims() were both iterating the
+register/claims dataframes with .iterrows(), which materializes a full
+pandas Series (every column, not just the one or two actually needed) on
+every single row - the dominant cost of both functions on a real
+9,000-24,000 row register / ~1,900 row claim file. Both now read column
+values directly instead. build_coinsurer_buckets() had the same shape of
+issue one level down: its per-insured breakdown re-ran pd.to_numeric()
+inside a groupby().agg() lambda, so the same Share of Claim Paid/O-S
+values were re-parsed once per insured, for every coinsurer's file - now
+parsed once up front. See the docstrings on each function below for the
+specific before/after.
 """
 import os
 import re
@@ -69,6 +84,20 @@ from premium_register_processor import (
     MIN_RUN_MATCH, MIN_RATIO_FALLBACK,
 )
 from difflib import SequenceMatcher
+
+try:
+    from perf_utils import fast_read_excel_rows, estimate_row_count
+    _PERF_AVAILABLE = True
+except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
+    _PERF_AVAILABLE = False
+
+# Above this row count, the full-sheet read switches from pandas' own
+# read_excel() to openpyxl's read_only streaming reader - same threshold
+# and rationale as data_processor.py / receivable_processor.py. The
+# header-row preview scan (find_header_row / _pick_best_sheet) already
+# only reads a cheap 25-row preview regardless of file size, so this only
+# changes how the FULL sheet gets pulled in afterwards.
+FAST_READ_ROW_THRESHOLD = 100000
 
 # ---------------------------------------------------------------------------
 # Blocking keys - a LOCAL variant of premium_register_processor._block_keys,
@@ -175,12 +204,44 @@ REASON_NO_COINSURER = "Matched policy has no coinsurer on it (100% IGI - nothing
 # Loading
 # ---------------------------------------------------------------------------
 
-def load_claim_intimation_file(filepath, sheet_name=None):
+def _read_full_sheet(xls, filepath, sheet_name, report=None):
+    """
+    Read the full sheet's raw rows (header=None). Above
+    FAST_READ_ROW_THRESHOLD rows, switches to openpyxl's read_only
+    streaming reader (perf_utils.fast_read_excel_rows) instead of
+    pandas' own read_excel() - the same optimization already applied to
+    Outstanding Premium's and the Receivable module's loaders, now
+    extended to Claims Register.
+
+    Only takes the fast path for a genuine .xlsx read directly off disk.
+    A legacy .xls file that went through _read_workbook_any_engine's
+    LibreOffice conversion is read through the already-open `xls`
+    (pd.ExcelFile) instead - the streaming reader needs the converted
+    file's own path, not the original .xls path, and that conversion is
+    a one-off cost regardless (every real Premium Register / Claim
+    Intimation sample seen so far is comfortably under this threshold).
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if _PERF_AVAILABLE and ext == ".xlsx":
+        est_rows = estimate_row_count(filepath, sheet_name)
+        if est_rows and est_rows > FAST_READ_ROW_THRESHOLD:
+            if report:
+                report(f"Large file detected (~{est_rows:,} rows) - using the fast streaming reader.")
+            rows, _n = fast_read_excel_rows(filepath, sheet_name, report=report)
+            return pd.DataFrame(rows)
+    return pd.read_excel(xls, sheet_name=sheet_name, header=None)
+
+
+def load_claim_intimation_file(filepath, sheet_name=None, report=None):
     """
     Load the Claim Intimation Register. Only the reference-number column
     (aliased to "Policy/PMD Number") is required for matching - every
     other original column is left exactly as-is and carried through to
     the output untouched.
+
+    report: optional callable(str) - only used to surface the "large
+        file, using the fast reader" note on a genuinely huge file; safe
+        to leave as None otherwise.
 
     Returns (df, pmd_col) where pmd_col is the ORIGINAL column name that
     was matched for "Policy/PMD Number".
@@ -194,7 +255,7 @@ def load_claim_intimation_file(filepath, sheet_name=None):
         preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview, alias_lookup)
 
-    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+    raw = _read_full_sheet(xls, filepath, sheet_name, report=report)
     columns = raw.iloc[header_row].tolist()
     data = raw.iloc[header_row + 1:].reset_index(drop=True)
     data.columns = _dedupe_columns(columns)
@@ -227,12 +288,15 @@ def get_claim_colmap(claims_df):
     return inv
 
 
-def load_premium_register_file(filepath, sheet_name=None):
+def load_premium_register_file(filepath, sheet_name=None, report=None):
     """
     Load the Premium Register. Identifies "Ins" (the coinsurer/company
     name for that row's share), "Document No", "Base Doc No", "Leader",
     and "Share". Returns (df, ins_col, doc_col, base_doc_col, leader_col,
     share_col).
+
+    report: optional callable(str) - see _read_full_sheet; safe to leave
+        as None.
     """
     alias_lookup = _build_alias_lookup(REGISTER_ALIASES)
     xls = _read_workbook_any_engine(filepath)
@@ -243,7 +307,7 @@ def load_premium_register_file(filepath, sheet_name=None):
         preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview, alias_lookup)
 
-    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+    raw = _read_full_sheet(xls, filepath, sheet_name, report=report)
     columns = raw.iloc[header_row].tolist()
     data = raw.iloc[header_row + 1:].reset_index(drop=True)
     data.columns = _dedupe_columns(columns)
@@ -274,12 +338,23 @@ def _build_policy_index(register_df, doc_col, base_doc_col, window=BLOCK_WINDOW)
     """{block_key: set(row_index)} built from BOTH Document No and (if
     present) Base Doc No of every register row, so a claim's own
     reference can land a match whichever of the two it actually refers
-    to."""
+    to.
+
+    PERFORMANCE: reads each column's own values directly via zip(), not
+    register_df.iterrows(). iterrows() boxes EVERY column of a register
+    row into a full pandas Series on each iteration, even though this
+    function only ever reads one column value per pass - on a real
+    9,000-24,000 row, many-column register, that per-row Series
+    materialization was the dominant cost of building this index.
+    Reading the target column's own values straight out of the Series
+    (register_df[col]) skips that entirely and is a plain, fast
+    column-at-a-time scan.
+    """
     index = {}
     cols = [doc_col] + ([base_doc_col] if base_doc_col else [])
-    for idx, row in register_df.iterrows():
-        for col in cols:
-            for key in _block_keys(row[col], window):
+    for col in cols:
+        for idx, value in zip(register_df.index, register_df[col]):
+            for key in _block_keys(value, window):
                 index.setdefault(key, set()).add(idx)
     return index
 
@@ -442,6 +517,14 @@ def match_claims(claims_df, pmd_col, register_df, ins_col, doc_col, base_doc_col
     report: optional callable(str) - if it's a perf_utils.Reporter,
         row-level progress also drives the numeric progress bar via
         perf_utils.RowProgress. Safe to leave as None.
+
+    PERFORMANCE: the main loop used to be claims_df.iterrows() with a
+    per-row claim_row.to_dict() call. iterrows() boxes every column of
+    the claim row into a full Series on each pass (again, most of which
+    is never read - only pmd_col is used for matching), and to_dict() on
+    that boxed Series repeats work that pandas can do once, in bulk, far
+    more cheaply via claims_df.to_dict("records"). Both are now done
+    once, up front, instead of once per claim.
     """
     index = _build_policy_index(register_df, doc_col, base_doc_col)
     # Precompute the register's own digits-only AND letters-only strings
@@ -467,10 +550,14 @@ def match_claims(claims_df, pmd_col, register_df, ins_col, doc_col, base_doc_col
     claim_paid_series = pd.to_numeric(claims_df[claim_paid_col], errors="coerce") if claim_paid_col and claim_paid_col in claims_df.columns else None
     claim_os_series = pd.to_numeric(claims_df[claim_os_col], errors="coerce") if claim_os_col and claim_os_col in claims_df.columns else None
 
-    for i, (idx, claim_row) in enumerate(claims_df.iterrows(), start=1):
-        result = match_one_claim(claim_row[pmd_col], register_df, ins_col, doc_col, base_doc_col, leader_col, share_col, index,
+    # Bulk, one-shot equivalents of what iterrows() + per-row .to_dict()
+    # used to do inside the loop - see the function docstring above.
+    claim_records = claims_df.to_dict("records")
+    pmd_values = claims_df[pmd_col]
+
+    for i, (idx, pmd_value, base) in enumerate(zip(claims_df.index, pmd_values, claim_records), start=1):
+        result = match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, leader_col, share_col, index,
                                   doc_digits=doc_digits, base_digits=base_digits, doc_alpha=doc_alpha, base_alpha=base_alpha)
-        base = claim_row.to_dict()
 
         if result["status"] == "Matched":
             claim_paid = claim_paid_series.at[idx] if claim_paid_series is not None else None
@@ -542,26 +629,38 @@ def build_coinsurer_buckets(matched_df, company_col="Coinsurer Name",
           share_paid_total / share_os_total, sorted largest paid-share
           first) - feeds that bucket's Summary sheet chart. Empty/omitted
           if insured_col isn't found in matched_df.
+
+    PERFORMANCE: paid_col/os_col are converted to numeric ONCE, over the
+    whole dataframe, before any grouping happens. The previous version
+    ran pd.to_numeric(...).fillna(0) inside a per-INSURED-group lambda
+    passed to .agg() - so for a coinsurer with, say, 40 distinct insureds,
+    the same Share of Claim Paid/O-S values got re-parsed 40 separate
+    times (once per insured group), on every one of the coinsurer's
+    output files. A plain "sum" aggregation over an already-numeric
+    column runs as a single vectorized pandas groupby; a Python lambda
+    re-invoked per group does not.
     """
     df = matched_df.copy()
     if len(df) == 0:
         return {}, {}, {}
     df["_bucket"] = _bucket_series(df, company_col)
+    df["_paid_numeric"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0) if paid_col in df.columns else 0.0
+    df["_os_numeric"] = pd.to_numeric(df[os_col], errors="coerce").fillna(0) if os_col in df.columns else 0.0
 
     groups, totals, breakdowns = {}, {}, {}
     for bucket, sub in df.groupby("_bucket", sort=False):
-        groups[bucket] = sub.drop(columns=["_bucket"]).reset_index(drop=True)
+        groups[bucket] = sub.drop(columns=["_bucket", "_paid_numeric", "_os_numeric"]).reset_index(drop=True)
         totals[bucket] = {
             "num_claims": int(len(sub)),
-            "total_share_paid": pd.to_numeric(sub[paid_col], errors="coerce").fillna(0).sum() if paid_col in sub.columns else 0.0,
-            "total_share_os": pd.to_numeric(sub[os_col], errors="coerce").fillna(0).sum() if os_col in sub.columns else 0.0,
+            "total_share_paid": sub["_paid_numeric"].sum(),
+            "total_share_os": sub["_os_numeric"].sum(),
         }
         if insured_col and insured_col in sub.columns:
             g = (
                 sub.groupby(insured_col)
-                .agg(share_paid_total=(paid_col, lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                     share_os_total=(os_col, lambda s: pd.to_numeric(s, errors="coerce").fillna(0).sum()),
-                     num_claims=(paid_col, "size"))
+                .agg(share_paid_total=("_paid_numeric", "sum"),
+                     share_os_total=("_os_numeric", "sum"),
+                     num_claims=("_paid_numeric", "size"))
                 .reset_index()
                 .rename(columns={insured_col: "Insured Name"})
                 .sort_values("share_paid_total", ascending=False)

@@ -2896,11 +2896,11 @@ class BalanceApp(tk.Tk):
 
         def worker(report):
             report(f"Loading Claim Intimation Register: {os.path.basename(intimation_path)}...")
-            claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path)
+            claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path, report=report)
             report(f"  {len(claims_df):,} claim row(s) loaded. Policy reference column detected as '{pmd_col}'.")
 
             report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
-            reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path)
+            reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path, report=report)
             report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Document No column='{doc_col}'"
                    + (f", Base Doc No column='{base_doc_col}'" if base_doc_col else " (no Base Doc No column found - matching against Document No only)."))
 
