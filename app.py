@@ -1162,10 +1162,20 @@ class BalanceApp(tk.Tk):
         header.pack(fill="x", padx=20, pady=(20, 6))
         ttk.Label(header, text="Bank Position", font=("Segoe UI Semibold", 18, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
-        ttk.Label(header, text="Daily conventional + Islamic bank balances, remittances, and expected "
-                                "receivables/payments for the CFO - built on top of yesterday's file so "
-                                "Kibor rates, T-Bills, and the Investment portfolio carry forward untouched.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+        bankpos_subtitle = ttk.Label(
+            header, text="Daily conventional + Islamic bank balances, remittances, and expected "
+                          "receivables/payments for the CFO - built on top of yesterday's file so "
+                          "Kibor rates, T-Bills, and the Investment portfolio carry forward untouched.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        bankpos_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        # No fixed wraplength - this text is long enough to overflow the
+        # window at any reasonable guess. Track the header's own width
+        # instead (same pattern as _resize_empty_label in the Loss Ratio
+        # page) so it always wraps correctly, at any window size.
+        def _wrap_bankpos_subtitle(event):
+            bankpos_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_bankpos_subtitle)
 
         notebook = ttk.Notebook(parent)
         notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
