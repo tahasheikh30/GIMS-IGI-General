@@ -118,7 +118,15 @@ class BalanceApp(tk.Tk):
         self.email_lookup = {}
         self.poc_lookup = {}
         self.drafts = []
-        self.output_dir = os.path.join(os.getcwd(), "output")
+        # Base folder is named after the module; every "Generate Excel
+        # Reports" click writes into a fresh dated/timed subfolder under
+        # it (see _new_run_folder), rather than every run's files landing
+        # together in one flat folder. self.output_dir tracks whichever
+        # folder is "current" for Draft/Send Emails (tab 3) to attach
+        # from - the base folder until the first generation, then that
+        # generation's own subfolder from then on.
+        self.output_dir_base = os.path.join(os.getcwd(), "Outstanding Premium")
+        self.output_dir = self.output_dir_base
 
         self.active_nav = None
         self.loss_group_files = []  # list of filepaths selected in Group mode
@@ -134,6 +142,7 @@ class BalanceApp(tk.Tk):
         self.receivable_email_lookup = {}
         self.receivable_poc_lookup = {}
         self.receivable_drafts = []
+        self.receivable_last_run_dir = None  # set to the current generation's own dated/timed subfolder once generated
 
         self.premreg_leader_file = ""
         self.premreg_register_file = ""
@@ -150,7 +159,8 @@ class BalanceApp(tk.Tk):
         self.claims_email_lookup = {}
         self.claims_poc_lookup = {}
         self.claims_drafts = []
-        self.claims_output_dir = os.path.join(os.getcwd(), "claims_register_output")
+        self.claims_output_dir = os.path.join(os.getcwd(), "Claims Register")
+        self.claims_last_run_dir = None  # set to the current generation's own dated/timed subfolder once generated
 
         # Bank Position module state
         self.bankpos_statement_paths = {}     # bank_key -> filepath
@@ -158,7 +168,7 @@ class BalanceApp(tk.Tk):
         self.bankpos_balance_vars = {}        # template_row_key -> tk.StringVar (conventional + islamic)
         self.bankpos_remittances = []         # list of dicts: reinsurer, insured_name, amount, currency
         self.bankpos_previous_file_var = None  # set in _build_bank_position_page
-        self.bankpos_output_dir = os.path.join(os.getcwd(), "bank_position_output")
+        self.bankpos_output_dir = os.path.join(os.getcwd(), "Bank Position")
         self.bankpos_last_warnings = []
 
         self._load_logos()
@@ -338,6 +348,19 @@ class BalanceApp(tk.Tk):
         def _update(event):
             label.configure(wraplength=max(200, event.width - side_padding))
         container.bind("<Configure>", _update, add="+")
+
+    @staticmethod
+    def _new_run_folder(base_dir):
+        """Create and return a fresh, uniquely-named subfolder under a
+        module's own base output folder (e.g. 'Outstanding Premium/2026-07-22
+        14-35-02'), named for the date and time of this generation. Every
+        'Generate Excel Reports'-style click gets its own folder this way,
+        rather than every run's files landing together in one shared flat
+        folder - each module's base folder (named after the module) ends
+        up holding one dated/timed subfolder per generation."""
+        run_dir = os.path.join(base_dir, datetime.now().strftime("%Y-%m-%d %H-%M-%S"))
+        os.makedirs(run_dir, exist_ok=True)
+        return run_dir
 
     # ---------- UI construction ----------
     def _build_ui(self):
@@ -1266,10 +1289,16 @@ class BalanceApp(tk.Tk):
 
         group_name = self.loss_group_name_var.get().strip() or ("LOSS RATIO SUMMARY" if mode == "individual" else "GROUP SUMMARY")
         default_name = "LossRatio_Group_Summary.xlsx" if mode == "group" else f"LossRatio_{rg.safe_filename(rows[0]['Company Name'])}.xlsx"
+        # Default save location is a fresh dated/timed subfolder under this
+        # module's own base folder, same "module folder -> one subfolder
+        # per generation" pattern used everywhere else in the app - the
+        # person can still browse elsewhere in the dialog if they prefer.
+        default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Loss Ratio"))
         output_path = filedialog.asksaveasfilename(
             title="Save Loss Ratio Report As",
             defaultextension=".xlsx",
             filetypes=[("Excel files", "*.xlsx")],
+            initialdir=default_dir,
             initialfile=default_name,
         )
         if not output_path:
@@ -1870,9 +1899,13 @@ class BalanceApp(tk.Tk):
         major_payments = _register_items_for_generator(bpr.CATEGORY_PAYMENT)
         major_receivables = _register_items_for_generator(bpr.CATEGORY_RECEIVABLE)
 
-        output_dir = self.bankpos_output_dir_var.get().strip()
-        os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, f"Bank_Position_{date.today().strftime('%d%m%Y')}.xlsx")
+        base_output_dir = self.bankpos_output_dir_var.get().strip()
+        # Fresh dated/timed subfolder under the configured base folder for
+        # this generation, same pattern as every other module - Send
+        # (below) always attaches from self.bankpos_last_output_file, so
+        # no other tracking is needed here.
+        output_dir = self._new_run_folder(base_output_dir)
+        output_file = os.path.join(output_dir, f"Bank_Position_{date.today().strftime('%d%m%Y_%H%M%S')}.xlsx")
 
         self.status_var.set("Generating Bank Position report...")
         self.bankpos_progress.start(total=None, text="Generating...")
@@ -2145,10 +2178,12 @@ class BalanceApp(tk.Tk):
             self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
 
             default_name = prg.build_output_filename(leader_file)
+            default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Premium Register"))
             output_path = filedialog.asksaveasfilename(
                 title="Save Premium Register Match Results As",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
+                initialdir=default_dir,
                 initialfile=default_name,
             )
             if not output_path:
@@ -2258,7 +2293,7 @@ class BalanceApp(tk.Tk):
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_file).grid(row=0, column=2, **pad)
 
         ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
-        self.receivable_output_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "receivable_output"))
+        self.receivable_output_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "Premium Claims Receivable"))
         ttk.Entry(source_box, textvariable=self.receivable_output_dir_var).grid(row=1, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_output_dir).grid(row=1, column=2, **pad)
 
@@ -2575,11 +2610,16 @@ class BalanceApp(tk.Tk):
             messagebox.showwarning("Nothing to generate", "Run Analyze / Build Groups first (tab 1).")
             return
 
-        output_dir = self.receivable_output_dir_var.get().strip()
-        if not output_dir:
+        base_output_dir = self.receivable_output_dir_var.get().strip()
+        if not base_output_dir:
             messagebox.showerror("No output folder", "Set an output folder on tab 1 first.")
             return
-        os.makedirs(output_dir, exist_ok=True)
+        # Fresh dated/timed subfolder under the configured base folder for
+        # this generation - tracked separately from the entry field so
+        # repeated generations don't nest inside each other, and so Send
+        # Emails (tab 3) attaches from this specific run's own files.
+        output_dir = self._new_run_folder(base_output_dir)
+        self.receivable_last_run_dir = output_dir
 
         colmap = self.receivable_colmap
         if colmap["mode"] == "dual":
@@ -2646,7 +2686,7 @@ class BalanceApp(tk.Tk):
         )
 
     def open_receivable_output_folder(self):
-        output_dir = self.receivable_output_dir_var.get().strip()
+        output_dir = self.receivable_last_run_dir or self.receivable_output_dir_var.get().strip()
         if output_dir and os.path.exists(output_dir):
             os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
         else:
@@ -2743,7 +2783,7 @@ class BalanceApp(tk.Tk):
             if not messagebox.askyesno("Confirm", f"Send {len(self.receivable_drafts)} emails via Outlook now? This cannot be undone."):
                 return
 
-        output_dir = self.receivable_output_dir_var.get().strip()
+        output_dir = self.receivable_last_run_dir or self.receivable_output_dir_var.get().strip()
 
         def worker():
             results = rve.send_receivable_emails(
@@ -2780,7 +2820,7 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Missing email", "Enter a recipient email address in the 'To' field before sending.")
             return
 
-        output_dir = self.receivable_output_dir_var.get().strip()
+        output_dir = self.receivable_last_run_dir or self.receivable_output_dir_var.get().strip()
         filename_lookup = getattr(self, "receivable_filename_lookup", {})
         fname = filename_lookup.get(d["company_name"])
         attachment_path = os.path.join(output_dir, fname) if fname and os.path.exists(os.path.join(output_dir, fname)) else None
@@ -3172,11 +3212,15 @@ class BalanceApp(tk.Tk):
             messagebox.showwarning("Nothing to generate", "Run 'Load & Match Claims' first (tab 1).")
             return
 
-        output_dir = self.claims_output_dir_var.get().strip()
-        if not output_dir:
+        base_output_dir = self.claims_output_dir_var.get().strip()
+        if not base_output_dir:
             messagebox.showerror("No output folder", "Set an output folder on tab 1 first.")
             return
-        os.makedirs(output_dir, exist_ok=True)
+        # Fresh dated/timed subfolder under the configured base folder for
+        # this generation - tracked separately so repeated generations
+        # don't nest, and so Send Emails (tab 3) attaches from this run.
+        output_dir = self._new_run_folder(base_output_dir)
+        self.claims_last_run_dir = output_dir
 
         groups = self.claims_groups
         breakdowns = self.claims_breakdowns
@@ -3240,7 +3284,7 @@ class BalanceApp(tk.Tk):
         )
 
     def open_claims_register_output_folder(self):
-        output_dir = self.claims_output_dir_var.get().strip()
+        output_dir = self.claims_last_run_dir or self.claims_output_dir_var.get().strip()
         if output_dir and os.path.exists(output_dir):
             os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
         else:
@@ -3337,7 +3381,7 @@ class BalanceApp(tk.Tk):
             if not messagebox.askyesno("Confirm", f"Send {len(self.claims_drafts)} emails via Outlook now? This cannot be undone."):
                 return
 
-        output_dir = self.claims_output_dir_var.get().strip()
+        output_dir = self.claims_last_run_dir or self.claims_output_dir_var.get().strip()
 
         def worker():
             results = cre.send_claims_register_emails(
@@ -3375,7 +3419,7 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Missing email", "Enter a recipient email address in the 'To' field before sending.")
             return
 
-        output_dir = self.claims_output_dir_var.get().strip()
+        output_dir = self.claims_last_run_dir or self.claims_output_dir_var.get().strip()
         fname = self.claims_filename_lookup.get(d["company_name"])
         attachment_path = os.path.join(output_dir, fname) if fname and os.path.exists(os.path.join(output_dir, fname)) else None
         if attachment_path is None:
@@ -3878,11 +3922,14 @@ class BalanceApp(tk.Tk):
         if self.qualifying is None or len(self.qualifying) == 0:
             messagebox.showwarning("Nothing to generate", "Run Analyze first (tab 1).")
             return
-        os.makedirs(self.output_dir, exist_ok=True)
 
         clients = list(self.qualifying.index)
         filtered_df = self.filtered_df
-        output_dir = self.output_dir
+        # Fresh dated/timed subfolder under the module's own base folder for
+        # this generation - self.output_dir is updated to point at it so
+        # Draft/Send Emails (tab 3) attach from this run's own files.
+        output_dir = self._new_run_folder(self.output_dir_base)
+        self.output_dir = output_dir
         self.status_var.set(f"Generating {len(clients)} report(s)...")
         self.reports_progress.start(total=len(clients), text=f"0 / {len(clients)} report(s) generated")
 
