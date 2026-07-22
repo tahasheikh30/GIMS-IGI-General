@@ -312,6 +312,33 @@ class BalanceApp(tk.Tk):
                         arrowsize=11, width=10)
         style.map("Sidebar.Vertical.TScrollbar", background=[("active", self.COLOR_ACCENT)])
 
+    def _bind_dynamic_wraplength(self, label, container, side_padding=56):
+        """Keep `label`'s wraplength synced to `container`'s own current
+        width (e.g. a Labelframe section that stretches with the window),
+        instead of a fixed guess like wraplength=560 - which wraps
+        correctly at the width it was tuned for, but leaves a description
+        paragraph needlessly narrow (or, on a smaller window, still
+        overflowing) at any other width. add="+" on the bind so several
+        description labels can each track the same container without one
+        binding overwriting another's.
+
+        side_padding must cover everything eating into the container's
+        raw width before text can actually render: a ttk.Labelframe's own
+        `padding` (currently 14 per side = 28) PLUS the label's own grid
+        `padx` (currently 10 per side = 20), for ~48px total at today's
+        call sites - the default here is 56 for a small safety margin.
+        `container.winfo_width()` (what the <Configure> event reports) is
+        the frame's outer allocated width, which does NOT already have
+        its own padding subtracted, so skipping this would leave the
+        wraplength wider than the actually-visible text area and text
+        would run past the right edge instead of wrapping - the current
+        call sites all share this same Labelframe(padding=14) + grid
+        padx=10 shape; pass a different side_padding if a future caller's
+        container/grid padding differs from this."""
+        def _update(event):
+            label.configure(wraplength=max(200, event.width - side_padding))
+        container.bind("<Configure>", _update, add="+")
+
     # ---------- UI construction ----------
     def _build_ui(self):
         self._build_header()
@@ -2227,11 +2254,13 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.receivable_output_dir_var).grid(row=1, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_output_dir).grid(row=1, column=2, **pad)
 
-        ttk.Label(source_box, text="Leader Ref Number is required on Premium Receivable rows only \u2014 it's the other "
-                                    "company's own policy reference, so it's expected to be blank on Claims Receivable "
-                                    "rows and is never flagged there.",
-                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
-                  wraplength=560, justify="left").grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
+        receivable_leader_ref_note = ttk.Label(
+            source_box, text="Leader Ref Number is required on Premium Receivable rows only \u2014 it's the other "
+                              "company's own policy reference, so it's expected to be blank on Claims Receivable "
+                              "rows and is never flagged there.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        receivable_leader_ref_note.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
+        self._bind_dynamic_wraplength(receivable_leader_ref_note, source_box)
 
         self.receivable_load_email_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(source_box, text="Look up recipient emails from a lookup file",
@@ -2241,11 +2270,13 @@ class BalanceApp(tk.Tk):
         self.receivable_email_lookup_file_var = tk.StringVar()
         ttk.Entry(source_box, textvariable=self.receivable_email_lookup_file_var).grid(row=4, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_receivable_email_lookup_file).grid(row=4, column=2, **pad)
-        ttk.Label(source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
-                                    "Rows are matched to the master file's 'Company' field by exact name. "
-                                    "If left blank, drafted emails will be flagged \"missing email\" for manual entry.",
-                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
-                  wraplength=560, justify="left").grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 2))
+        receivable_email_lookup_note = ttk.Label(
+            source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
+                              "Rows are matched to the master file's 'Company' field by exact name. "
+                              "If left blank, drafted emails will be flagged \"missing email\" for manual entry.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        receivable_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
+        self._bind_dynamic_wraplength(receivable_email_lookup_note, source_box)
 
         ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
                    command=self.load_receivable_data).grid(row=6, column=0, sticky="w", padx=10, pady=(10, 4))
@@ -2838,13 +2869,15 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.claims_premium_register_file_var).grid(row=1, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_claims_premium_register_file).grid(row=1, column=2, **pad)
 
-        ttk.Label(source_box, text="The claim's own 'Policy/PMD #' is matched against the Premium Register's "
-                                    "'Document No.' and 'Base Doc No.' using the same fuzzy digit-run matching as "
-                                    "Premium Register, plus the branch/class code embedded in the reference. A "
-                                    "policy shared by several coinsurers fans a claim out to every one of their "
-                                    "files, each showing their own Share % and their portion of Claim Paid/O/S.",
-                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
-                  wraplength=560, justify="left").grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 2))
+        claims_matching_note = ttk.Label(
+            source_box, text="The claim's own 'Policy/PMD #' is matched against the Premium Register's "
+                              "'Document No.' and 'Base Doc No.' using the same fuzzy digit-run matching as "
+                              "Premium Register, plus the branch/class code embedded in the reference. A "
+                              "policy shared by several coinsurers fans a claim out to every one of their "
+                              "files, each showing their own Share % and their portion of Claim Paid/O/S.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        claims_matching_note.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
+        self._bind_dynamic_wraplength(claims_matching_note, source_box)
 
         ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=3, column=0, sticky="w", **pad)
         self.claims_output_dir_var = tk.StringVar(value=self.claims_output_dir)
@@ -2859,12 +2892,14 @@ class BalanceApp(tk.Tk):
         self.claims_email_lookup_file_var = tk.StringVar()
         ttk.Entry(source_box, textvariable=self.claims_email_lookup_file_var).grid(row=5, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_claims_email_lookup_file).grid(row=5, column=2, **pad)
-        ttk.Label(source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
-                                    "Rows are matched to each output file's coinsurer name by exact match "
-                                    "(the pooled OFC file looks up the literal key 'OFC'). If left blank, drafted "
-                                    "emails will be flagged \"missing email\" for manual entry.",
-                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
-                  wraplength=560, justify="left").grid(row=6, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 2))
+        claims_email_lookup_note = ttk.Label(
+            source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
+                              "Rows are matched to each output file's coinsurer name by exact match "
+                              "(the pooled OFC file looks up the literal key 'OFC'). If left blank, drafted "
+                              "emails will be flagged \"missing email\" for manual entry.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        claims_email_lookup_note.grid(row=6, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
+        self._bind_dynamic_wraplength(claims_email_lookup_note, source_box)
 
         self.claims_match_btn = ttk.Button(source_box, text="Load & Match Claims", style="Accent.TButton", width=24,
                                             command=self.load_and_match_claims)
