@@ -2960,6 +2960,44 @@ class BalanceApp(tk.Tk):
         ttk.Label(source_box, textvariable=self.claims_match_summary_var, foreground=self.COLOR_SUCCESS,
                   font=("Segoe UI", 10, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
 
+        # ---- Section: Date Filter ----
+        # Scopes a run to a selected period even though the Claim Intimation
+        # Register (and the Premium Register it's matched against) can span
+        # a much wider date range. Filtering happens on the CLAIM's own date
+        # field, BEFORE matching - so the matched/unmatched counts, the
+        # per-coinsurer buckets, and every generated Excel workbook only
+        # ever cover claims inside the selected window, rather than the
+        # window being applied after the fact. The Premium Register itself
+        # is never date-filtered - it's only used as a lookup table to
+        # resolve each in-range claim's coinsurer(s), so it still needs to
+        # be searched over its own full range regardless of the period
+        # selected here.
+        date_filter_box = ttk.Labelframe(canvas_frame, text="  Date Filter (optional)  ", padding=14)
+        date_filter_box.pack(fill="x", padx=12, pady=8)
+
+        ttk.Label(date_filter_box,
+                  text="Leave From/To blank to process the whole register. When set, only claims whose date "
+                       "falls within this range are matched and written to the output workbooks - the source "
+                       "files themselves are untouched and can still cover a much wider period.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
+
+        date_filter_row = ttk.Frame(date_filter_box)
+        date_filter_row.pack(fill="x")
+
+        ttk.Label(date_filter_row, text="Date field", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.claims_date_field_var = tk.StringVar(value="Intimation Date")
+        ttk.Combobox(date_filter_row, textvariable=self.claims_date_field_var,
+                     values=["Intimation Date", "Loss Date"], state="readonly", width=14).pack(side="left", padx=(0, 20))
+
+        ttk.Label(date_filter_row, text="From (YYYY-MM-DD)", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.claims_date_from_var = tk.StringVar()
+        ttk.Entry(date_filter_row, textvariable=self.claims_date_from_var, width=14).pack(side="left", padx=(0, 20))
+
+        ttk.Label(date_filter_row, text="To (YYYY-MM-DD)", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.claims_date_to_var = tk.StringVar()
+        ttk.Entry(date_filter_row, textvariable=self.claims_date_to_var, width=14).pack(side="left")
+
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
         log_box.pack(fill="both", expand=True, padx=12, pady=(8, 12))
@@ -3118,6 +3156,19 @@ class BalanceApp(tk.Tk):
         self.claims_setup_log.insert("end", str(msg) + "\n")
         self.claims_setup_log.see("end")
 
+    def _parse_claims_filter_date(self, var, label):
+        """Parse one of the Date Filter entry fields. Returns a date object,
+        or None if the field was left blank. Raises ValueError with a
+        message ready to show the user if the text isn't a valid
+        YYYY-MM-DD date."""
+        text = var.get().strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"{label} must be in YYYY-MM-DD format (or left blank), got '{text}'.")
+
     def load_and_match_claims(self):
         intimation_path = self.claims_intimation_file_var.get().strip()
         register_path = self.claims_premium_register_file_var.get().strip()
@@ -3127,6 +3178,17 @@ class BalanceApp(tk.Tk):
         if not register_path or not os.path.exists(register_path):
             messagebox.showerror("Error", "Please select a valid IGI Premium Register file.")
             return
+
+        try:
+            date_filter_from = self._parse_claims_filter_date(self.claims_date_from_var, "Date Filter 'From'")
+            date_filter_to = self._parse_claims_filter_date(self.claims_date_to_var, "Date Filter 'To'")
+        except ValueError as e:
+            messagebox.showerror("Invalid date filter", str(e))
+            return
+        if date_filter_from and date_filter_to and date_filter_from > date_filter_to:
+            messagebox.showerror("Invalid date filter", "Date Filter 'From' must not be after 'To'.")
+            return
+        date_filter_field = self.claims_date_field_var.get()  # "Intimation Date" or "Loss Date"
 
         self.claims_setup_log.delete("1.0", "end")
         self.claims_match_summary_var.set("")
@@ -3138,15 +3200,36 @@ class BalanceApp(tk.Tk):
             claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path, report=report)
             report(f"  {len(claims_df):,} claim row(s) loaded. Policy reference column detected as '{pmd_col}'.")
 
-            report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
-            reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path, report=report)
-            report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Document No column='{doc_col}'"
-                   + (f", Base Doc No column='{base_doc_col}'" if base_doc_col else " (no Base Doc No column found - matching against Document No only)."))
-
             colmap = crp.get_claim_colmap(claims_df)
             claim_paid_col = colmap.get("Claim Paid")
             claim_os_col = colmap.get("Claim O/S")
             insured_col = colmap.get("Insured Name")
+
+            # Date Filter - scopes this run (matching, output workbooks,
+            # everything downstream) to the selected period, BEFORE any
+            # matching happens, even though the source register can cover
+            # a much wider date range. The Premium Register is deliberately
+            # left unfiltered below - it's only a lookup table for
+            # resolving coinsurers, so it still needs its full range.
+            if date_filter_from or date_filter_to:
+                date_col = colmap.get(date_filter_field)
+                if not date_col:
+                    report(f"\nWARNING: Date Filter requested on '{date_filter_field}', but that column "
+                           f"wasn't found in the Claim Intimation Register - filter skipped, processing the "
+                           f"full file instead.")
+                else:
+                    before_count = len(claims_df)
+                    claims_df, num_no_date = crp.filter_claims_by_date(
+                        claims_df, date_col, start_date=date_filter_from, end_date=date_filter_to)
+                    range_text = f"{date_filter_from or '(any)'} to {date_filter_to or '(any)'}"
+                    report(f"\nDate Filter applied on '{date_filter_field}' ({date_col}), range {range_text}: "
+                           f"{before_count:,} -> {len(claims_df):,} claim(s) kept"
+                           + (f", {num_no_date:,} row(s) excluded for a missing/unparseable date." if num_no_date else "."))
+
+            report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
+            reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path, report=report)
+            report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Document No column='{doc_col}'"
+                   + (f", Base Doc No column='{base_doc_col}'" if base_doc_col else " (no Base Doc No column found - matching against Document No only)."))
 
             report(f"\nMatching {len(claims_df):,} claim(s) against {len(reg_df):,} register row(s)...")
             report.progress(0, len(claims_df), text=f"Matching 0 / {len(claims_df):,} claim(s)")

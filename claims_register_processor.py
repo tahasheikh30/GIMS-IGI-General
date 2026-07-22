@@ -288,6 +288,52 @@ def get_claim_colmap(claims_df):
     return inv
 
 
+def filter_claims_by_date(claims_df, date_col, start_date=None, end_date=None):
+    """
+    Restrict claims_df to rows whose date_col falls within [start_date,
+    end_date] (either bound may be None to leave that side open). This is
+    what lets a run be scoped to a selected period even though the source
+    Claim Intimation Register itself covers a much wider date range -
+    filtering happens here, BEFORE matching, so everything downstream
+    (the matched/unmatched counts, the per-coinsurer buckets, and every
+    generated Excel workbook) only ever sees claims inside the window,
+    rather than filtering the output after the fact.
+
+    date_col: the ORIGINAL column name in claims_df to filter on (i.e.
+        get_claim_colmap(claims_df)["Intimation Date"] or ["Loss Date"] -
+        whichever the caller lets the user choose), NOT the canonical name.
+    start_date / end_date: date objects (or anything pandas can parse via
+        pd.Timestamp), or None.
+
+    A row whose date_col is blank or unparseable is EXCLUDED whenever a
+    filter is active - there's no reliable way to know if it belongs
+    inside the window or not, and silently including it either way would
+    make the reported claim count wrong in one direction or the other.
+    If both start_date and end_date are None, claims_df is returned
+    unchanged (no rows excluded for a missing date either, since no
+    filter was actually requested).
+
+    Returns (filtered_df, num_excluded_no_date) - the second value lets
+    the caller log how many rows were dropped specifically for having no
+    usable date, separately from rows dropped for being outside the range.
+    """
+    if start_date is None and end_date is None:
+        return claims_df, 0
+
+    parsed = pd.to_datetime(claims_df[date_col], errors="coerce")
+    has_date = parsed.notna()
+
+    in_range = pd.Series(True, index=claims_df.index)
+    if start_date is not None:
+        in_range &= parsed >= pd.Timestamp(start_date)
+    if end_date is not None:
+        in_range &= parsed <= pd.Timestamp(end_date)
+
+    keep = has_date & in_range
+    num_excluded_no_date = int((~has_date).sum())
+    return claims_df.loc[keep].reset_index(drop=True), num_excluded_no_date
+
+
 def load_premium_register_file(filepath, sheet_name=None, report=None):
     """
     Load the Premium Register. Identifies "Ins" (the coinsurer/company
