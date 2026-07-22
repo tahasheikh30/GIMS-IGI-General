@@ -272,10 +272,23 @@ class BalanceApp(tk.Tk):
         style.configure("Treeview", font=("Segoe UI", 10), rowheight=28,
                         background="white", fieldbackground="white",
                         bordercolor=self.COLOR_BORDER, borderwidth=0)
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10, "bold"),
-                        background=self.COLOR_PRIMARY, foreground="white", relief="flat",
-                        padding=(10, 8))
-        style.map("Treeview.Heading", background=[("active", self.COLOR_PRIMARY_DARK)])
+        if using_native:
+            # Native Windows themes (vista/xpnative) don't reliably honor a
+            # custom Treeview.Heading background - it silently keeps the
+            # OS's own light heading chrome no matter what's set here. The
+            # old unconditional config below still forced foreground="white"
+            # on top of that untouched light background, which is exactly
+            # what made every column header unreadable (white-on-white) on
+            # native themes. So on native themes, only bold/size the
+            # heading font and leave its colors alone, the same treatment
+            # already given to buttons a few lines up.
+            style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10, "bold"),
+                            padding=(10, 8))
+        else:
+            style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10, "bold"),
+                            background=self.COLOR_PRIMARY, foreground="white", relief="flat",
+                            padding=(10, 8))
+            style.map("Treeview.Heading", background=[("active", self.COLOR_PRIMARY_DARK)])
         style.map("Treeview", background=[("selected", self.COLOR_ACCENT)], foreground=[("selected", "white")])
         style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])  # drop the sunken native border
 
