@@ -483,7 +483,15 @@ class BalanceApp(tk.Tk):
             sidebar, "Coinsurance",
             [
                 ("coinsurance_pc_email", "Premium/Claims Email Automation"),
-                ("coinsurance_premium_register", "Premium Register"),
+                # "Premium" nested submenu - holds the page that used to be
+                # the plain "Premium Register" leaf item, renamed to
+                # "Policy Check" and nested one level deeper. The page's
+                # own key/wiring (coinsurance_premium_register -> its
+                # nav_pages entry) is unchanged - only where it sits in
+                # the sidebar changed, same treatment as "Claims" below.
+                (None, "Premium", [
+                    ("coinsurance_premium_register", "Policy Check"),
+                ]),
                 # Nested submenu marker (None, label, [(key, label), ...]) -
                 # "Claims" is itself a further collapsible menu, currently
                 # holding the one page that used to be the plain "Claims
@@ -1969,7 +1977,7 @@ class BalanceApp(tk.Tk):
         # --- Page header ---
         header = ttk.Frame(body)
         header.pack(fill="x", padx=PAD_X, pady=(20, 6))
-        ttk.Label(header, text="Premium Register", font=("Segoe UI Semibold", 18, "bold"),
+        ttk.Label(header, text="Policy Check", font=("Segoe UI Semibold", 18, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
         ttk.Label(header, text="Match a co-insurance leader's own policy numbers against IGI's Premium "
                                 "Register, and pull in the matched IGI Policy Number automatically.",
