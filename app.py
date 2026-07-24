@@ -1431,9 +1431,11 @@ class BalanceApp(tk.Tk):
 
         # --- Section 1: Previous day's file ---
         s1 = self._loss_section_card(body, "1", "Previous Day's File", PAD_X)
-        ttk.Label(s1, text="Today's file is built on top of this one - every section not covered below "
+        bankpos_s1_note = ttk.Label(s1, text="Today's file is built on top of this one - every section not covered below "
                             "(Kibor rates, T-Bills, Investment portfolio, Annex-A) is carried forward exactly as-is.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        bankpos_s1_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(bankpos_s1_note, s1, side_padding=10)
         prev_row = ttk.Frame(s1)
         prev_row.pack(fill="x")
         self.bankpos_previous_file_var = tk.StringVar()
@@ -1443,12 +1445,14 @@ class BalanceApp(tk.Tk):
 
         # --- Section 2: Statement uploads + passwords ---
         s2 = self._loss_section_card(body, "2", "Statement Uploads (optional, per bank)", PAD_X, expand_bottom=True)
-        ttk.Label(s2, text="The live portal balance you type in the Today's Balances tab is always preferred - "
+        bankpos_s2_note = ttk.Label(s2, text="The live portal balance you type in the Today's Balances tab is always preferred - "
                             "statements here are used to pre-fill a starting value and for the receivables "
                             "reconciliation in the Remittances & Register tab. If a statement is password-protected, "
                             "save its password once and it unlocks automatically from then on (stored in Windows' "
                             "own credential store, not in a plain file).",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 12))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        bankpos_s2_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(bankpos_s2_note, s2, side_padding=10)
 
         self.bankpos_slot_widgets = {}
         for bank_key, display_name in self.BANKPOS_STATEMENT_BANKS:
@@ -1489,10 +1493,12 @@ class BalanceApp(tk.Tk):
         PAD_X = 16
 
         s3 = self._loss_section_card(body, "3", "Today's Balances", PAD_X, expand_bottom=True)
-        ttk.Label(s3, text="Read straight off each bank's portal dashboard - this is preferred over the statement's "
+        bankpos_s3_note = ttk.Label(s3, text="Read straight off each bank's portal dashboard - this is preferred over the statement's "
                             "closing balance, which is always at least a day old. Load the previous file (tab 1) first "
                             "to populate this list with the real account names and yesterday's starting values.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        bankpos_s3_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(bankpos_s3_note, s3, side_padding=10)
 
         balances_cols = ttk.Frame(s3)
         balances_cols.pack(fill="both", expand=True)
@@ -1522,10 +1528,12 @@ class BalanceApp(tk.Tk):
 
         # --- Section 4: Remittances ---
         s4 = self._loss_section_card(body, "4", "Outward Remittances", PAD_X)
-        ttk.Label(s4, text="Manual entry, per current process. Note: the template has a fixed 3-row capacity for "
+        bankpos_s4_note = ttk.Label(s4, text="Manual entry, per current process. Note: the template has a fixed 3-row capacity for "
                             "this section - a 4th+ remittance on the same day will be flagged for manual addition "
                             "rather than silently dropped or risking corruption of the sheet below it.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        bankpos_s4_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(bankpos_s4_note, s4, side_padding=10)
 
         remit_form = ttk.Frame(s4)
         remit_form.pack(fill="x", pady=(0, 8))
@@ -1555,11 +1563,13 @@ class BalanceApp(tk.Tk):
 
         # --- Section 5: Expected Items Register (Major Payments/Receivables) ---
         s5 = self._loss_section_card(body, "5", "Expected Items Register (Major Payments/Receivables)", PAD_X, expand_bottom=True)
-        ttk.Label(s5, text="Log anything expected before it lands - reconciliation below auto-clears it once a "
+        bankpos_s5_note = ttk.Label(s5, text="Log anything expected before it lands - reconciliation below auto-clears it once a "
                             "matching credit/debit shows up in a parsed statement, and flags anything still open "
                             "past its expected date as overdue. A match is only ever auto-accepted when there's "
                             "exactly one candidate; anything ambiguous is left for you to confirm.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760, justify="left").pack(anchor="w", pady=(0, 10))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        bankpos_s5_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(bankpos_s5_note, s5, side_padding=10)
 
         reg_form = ttk.Frame(s5)
         reg_form.pack(fill="x", pady=(0, 8))
@@ -2025,7 +2035,7 @@ class BalanceApp(tk.Tk):
 
         # --- Section 1: Input files ---
         s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
-        ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
+        premreg_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
                             "the file has banner/title rows above it. If a file has several sheets (e.g. a "
                             "co-insurance leader's own settlement workbook, with separate tabs for Premium "
                             "Payable, Claim Rec, Prem Rec, monthly snapshots, etc.), the right sheet is found "
@@ -2034,8 +2044,9 @@ class BalanceApp(tk.Tk):
                             "policy-number file if no sheet name is a clear match. Column naming (e.g. \"NUMS\" "
                             "vs \"Policy No.\" vs \"Leader#\") varies by company and is matched via alias lists "
                             "in premium_register_processor.py.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9), wraplength=760,
-                  justify="left").pack(anchor="w", pady=(0, 12))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premreg_s1_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(premreg_s1_note, s1, side_padding=10)
 
         leader_row = self._premreg_file_row(
             s1, "Leader's Policy File",
@@ -2055,10 +2066,12 @@ class BalanceApp(tk.Tk):
 
         # --- Section 2: Run matching ---
         s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
-        ttk.Label(s2, text="Every original column from the leader's file is preserved, plus the matched "
+        premreg_s2_note = ttk.Label(s2, text="Every original column from the leader's file is preserved, plus the matched "
                             "IGI Policy Number, the matched register reference, a match score, and a "
                             "Matched/Not Matched status.",
-                  foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premreg_s2_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(premreg_s2_note, s2, side_padding=10)
         run_btn = self._make_action_button(s2, "Run Matching", self._run_premium_register_match, kind="accent")
         run_btn.pack(anchor="w")
         self.premreg_summary_var = tk.StringVar(value="")
