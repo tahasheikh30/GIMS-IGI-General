@@ -244,6 +244,87 @@ def _read_full_sheet(xls, filepath, sheet_name, report=None):
     return pd.read_excel(xls, sheet_name=sheet_name, header=None)
 
 
+def _find_continuation_sheets(xls, primary_sheet, expected_ncols, alias_lookup, max_scan=25, min_score=1):
+    """
+    Legacy .xls workbooks are capped at 65,536 rows PER SHEET - a register
+    or claims file bigger than that (confirmed against a real Premium
+    Register export) gets split across Sheet1/Sheet2/Sheet3/... by
+    whatever produced the file, with the real header row living ONLY on
+    the first sheet and every later sheet being a bare continuation of
+    the same table (no header row of its own, same column count). Reading
+    only the one sheet _pick_best_sheet() picks (the only one that scores
+    anything against the alias list, since it's the only one with a
+    header) silently drops every row on every later sheet - confirmed:
+    Sheet1 (65,520 rows) was being read while Sheet2/Sheet3/Sheet4
+    (65,520 + 65,520 + 7,657 = 138,697 more rows) were dropped entirely,
+    which is exactly why a Base Doc No a person could see with their own
+    eyes in the file came back "Not matched" - the row it lived on was
+    never even read.
+
+    Returns an ordered list of sheet names (in workbook order, excluding
+    primary_sheet) that look like pure-data continuations of
+    primary_sheet: same raw column count, and NO row in the first
+    `max_scan` rows scores as a header against alias_lookup (a sheet that
+    DOES score is presumably a genuinely different table with its own
+    header - e.g. an unrelated "List"/"Ageing"/"PIVOT" tab - and must
+    never be merged in as if it were more rows of the same table).
+    """
+    continuations = []
+    for sn in xls.sheet_names:
+        if sn == primary_sheet:
+            continue
+        preview = pd.read_excel(xls, sheet_name=sn, header=None, nrows=max_scan)
+        if preview.shape[1] != expected_ncols:
+            continue
+        _, score = find_header_row(preview, alias_lookup, max_scan=max_scan, min_score=min_score, return_score=True)
+        if score == 0:
+            continuations.append(sn)
+    return continuations
+
+
+def _read_full_table_with_continuations(filepath, xls, sheet_name, header_row, alias_lookup, report=None):
+    """
+    Read one sheet's real header + data rows (same as the inline logic
+    every loader used to have), then transparently append any further
+    sheets in the same workbook that look like pure continuations of it
+    (see _find_continuation_sheets's docstring for why this matters) -
+    same deduped column list, no header row of their own.
+
+    Returns (data_df, source_sheet_note) where source_sheet_note is a
+    short string describing which sheet(s) were actually read (for
+    data.attrs["source_sheet"]) - just the one sheet name if nothing was
+    merged, or "Sheet1 (+ 3 continuation sheet(s): Sheet2, Sheet3,
+    Sheet4)"-style text if continuation sheets were found and merged.
+    """
+    raw = _read_full_sheet(xls, filepath, sheet_name, report=report)
+    columns = _dedupe_columns(raw.iloc[header_row].tolist())
+    primary_data = raw.iloc[header_row + 1:].reset_index(drop=True)
+    primary_data.columns = columns
+
+    continuation_sheets = _find_continuation_sheets(xls, sheet_name, len(columns), alias_lookup)
+
+    if not continuation_sheets:
+        return primary_data.dropna(how="all").reset_index(drop=True), sheet_name
+
+    if report:
+        report(f"  Detected {len(continuation_sheets)} additional data-only sheet(s) with the same "
+               f"columns as '{sheet_name}' ({', '.join(continuation_sheets)}) - this is typical of a "
+               f"legacy .xls file split across sheets at Excel's old 65,536-row-per-sheet limit. "
+               f"Merging them in as more rows of the same table rather than reading '{sheet_name}' alone.")
+
+    frames = [primary_data]
+    for sn in continuation_sheets:
+        cont_raw = _read_full_sheet(xls, filepath, sn, report=report)
+        cont_data = cont_raw.reset_index(drop=True)
+        cont_data.columns = columns
+        frames.append(cont_data)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.dropna(how="all").reset_index(drop=True)
+    note = f"{sheet_name} (+ {len(continuation_sheets)} continuation sheet(s): {', '.join(continuation_sheets)})"
+    return combined, note
+
+
 def load_claim_intimation_file(filepath, sheet_name=None, report=None):
     """
     Load the Claim Intimation Register. Only the reference-number column
@@ -267,12 +348,8 @@ def load_claim_intimation_file(filepath, sheet_name=None, report=None):
         preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview, alias_lookup)
 
-    raw = _read_full_sheet(xls, filepath, sheet_name, report=report)
-    columns = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].reset_index(drop=True)
-    data.columns = _dedupe_columns(columns)
-    data = data.dropna(how="all").reset_index(drop=True)
-    data.attrs["source_sheet"] = sheet_name
+    data, source_sheet_note = _read_full_table_with_continuations(filepath, xls, sheet_name, header_row, alias_lookup, report=report)
+    data.attrs["source_sheet"] = source_sheet_note
 
     colmap = _map_columns_to_canonical(data.columns, alias_lookup)
     inv = {}
@@ -373,12 +450,8 @@ def load_premium_register_file(filepath, sheet_name=None, report=None):
         preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview, alias_lookup)
 
-    raw = _read_full_sheet(xls, filepath, sheet_name, report=report)
-    columns = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].reset_index(drop=True)
-    data.columns = _dedupe_columns(columns)
-    data = data.dropna(how="all").reset_index(drop=True)
-    data.attrs["source_sheet"] = sheet_name
+    data, source_sheet_note = _read_full_table_with_continuations(filepath, xls, sheet_name, header_row, alias_lookup, report=report)
+    data.attrs["source_sheet"] = source_sheet_note
 
     colmap = _map_columns_to_canonical(data.columns, alias_lookup)
     inv = {}
