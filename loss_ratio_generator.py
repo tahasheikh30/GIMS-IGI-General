@@ -52,6 +52,26 @@ AMBER_THRESHOLD = 70.0  # fixed secondary tier, e.g. flag anything >= 70%
 HEADERS = ["CLIENT", "GP", "CLAIM", "COMMISSION", "LR"]
 
 
+def _write_text_safe(cell):
+    """
+    Guard against Excel/DDE formula injection. openpyxl auto-classifies
+    ANY string cell value starting with "=" (also "+", "-", "@" in some
+    Excel configurations) as a live formula. Company Name here comes
+    straight from an uploaded Excel or PDF source file
+    (loss_ratio_processor.py) - untrusted input - so a value like
+    '=cmd|"/c calc.exe"!A0' would otherwise be written out as a live,
+    auto-executing formula in the report handed to Finance/the CFO.
+    Forcing the cell's data_type back to plain text after the fact
+    neutralizes this with zero visible change to legitimate values -
+    same pattern already used by every other GIMS generator (see
+    report_generator.py / receivable_generator.py /
+    premium_register_generator.py / claims_register_generator.py).
+    """
+    if cell.data_type == "f":
+        cell.data_type = "s"
+    return cell
+
+
 def build_loss_ratio_workbook(rows, mode, output_path, group_name="LOSS RATIO SUMMARY", red_threshold_pct=100.0):
     """
     rows: list of company row dicts from loss_ratio_processor (Company Name,
@@ -73,6 +93,7 @@ def build_loss_ratio_workbook(rows, mode, output_path, group_name="LOSS RATIO SU
     ws.merge_cells("B2:F2")
     banner = ws["B2"]
     banner.value = group_name
+    _write_text_safe(banner)  # group_name is free-typed by the user - guard against formula injection
     banner.font = FONT_BOLD
     banner.fill = GREEN_FILL
     banner.alignment = Alignment(horizontal="center", vertical="top")
@@ -123,7 +144,9 @@ def _write_company_row(ws, r, row, red_threshold_pct):
     claim = row["Incurred Loss"]
     comm = row["Commission Accrual"]
 
-    ws.cell(row=r, column=2, value=row["Company Name"]).font = FONT_NORMAL
+    name_cell = ws.cell(row=r, column=2, value=row["Company Name"])
+    _write_text_safe(name_cell)  # Company Name is untrusted - comes straight from the uploaded source file
+    name_cell.font = FONT_NORMAL
     ws.cell(row=r, column=3, value=gp)
     ws.cell(row=r, column=4, value=claim)
     ws.cell(row=r, column=5, value=comm)

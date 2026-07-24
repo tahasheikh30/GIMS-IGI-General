@@ -126,6 +126,30 @@ SUMMARY_MAJOR_RECEIVABLES_START_ROW = 24
 SUMMARY_MAJOR_RECEIVABLES_CAPACITY = 2
 
 
+def _write_text_safe(cell):
+    """
+    Guard against Excel/DDE formula injection. openpyxl auto-classifies
+    ANY string cell value starting with "=" as a live formula. Every
+    free-text field written by this module - remittance
+    reinsurer/insured name/currency, and Expected Items Register
+    counterparty/bank name - is typed or pasted in by hand (e.g. copied
+    straight out of a broker email), so a value like
+    '=cmd|"/c calc.exe"!A0' would otherwise be written out as a live,
+    auto-executing formula in the report that goes straight to the CFO.
+    Forcing the cell's data_type back to plain text after the fact
+    neutralizes this with zero visible change to legitimate values -
+    same pattern already used by every other GIMS generator (see
+    report_generator.py / receivable_generator.py /
+    premium_register_generator.py / claims_register_generator.py /
+    loss_ratio_generator.py). Intentional formula cells (e.g. the
+    remittances F/G columns, the Summary cross-sheet references) are
+    never passed through this - only genuinely free-typed text fields are.
+    """
+    if cell.data_type == "f":
+        cell.data_type = "s"
+    return cell
+
+
 class BankPositionGenerationWarning:
     """Non-fatal issue worth surfacing to whoever reviews the file before
     it goes to the CFO (e.g. overflow beyond a fixed block's capacity)."""
@@ -182,10 +206,16 @@ def _write_remittances(ws, remittances, warnings):
 
     for i, r in enumerate(remittances):
         row = REMITTANCES_START_ROW + i
-        ws.cell(row=row, column=1).value = r.get("reinsurer", "")
-        ws.cell(row=row, column=2).value = r.get("insured_name", "")
+        reinsurer_cell = ws.cell(row=row, column=1)
+        reinsurer_cell.value = r.get("reinsurer", "")
+        _write_text_safe(reinsurer_cell)
+        insured_cell = ws.cell(row=row, column=2)
+        insured_cell.value = r.get("insured_name", "")
+        _write_text_safe(insured_cell)
         ws.cell(row=row, column=4).value = r["amount"]
-        ws.cell(row=row, column=5).value = r.get("currency", "PKR")
+        currency_cell = ws.cell(row=row, column=5)
+        currency_cell.value = r.get("currency", "PKR")
+        _write_text_safe(currency_cell)
         ws.cell(row=row, column=6).value = f"=D{row}"
         ws.cell(row=row, column=7).value = f"=F{row}/$D${USD_RATE_CELL[1:]}"
 
@@ -224,9 +254,13 @@ def _write_summary_named_amount_block(ws, items, start_row, capacity, name_key, 
     _clear_row_range(ws, start_row, start_row + capacity - 1, cols=[2, 3, 4, 5])
     for i, item in enumerate(items):
         row = start_row + i
-        ws.cell(row=row, column=2).value = item.get(name_key, "")
+        name_cell = ws.cell(row=row, column=2)
+        name_cell.value = item.get(name_key, "")
+        _write_text_safe(name_cell)
         ws.cell(row=row, column=3).value = item.get("amount", 0)
-        ws.cell(row=row, column=4).value = item.get(extra_key, "")
+        extra_cell = ws.cell(row=row, column=4)
+        extra_cell.value = item.get(extra_key, "")
+        _write_text_safe(extra_cell)
         exp_date = item.get("expected_date")
         if exp_date is not None:
             ws.cell(row=row, column=5).value = exp_date if isinstance(exp_date, (date, datetime)) else exp_date

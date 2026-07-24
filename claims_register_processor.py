@@ -162,7 +162,15 @@ def _block_keys(value, window):
 
 CLAIM_ALIASES = {
     "Claim Ref Number": ["claim/benefit ref #", "claim/benefit ref", "claim ref number", "claim ref #", "claim number", "claim/benefit ref no"],
-    "Policy/PMD Number": ["policy/pmd #", "policy pmd #", "policy no", "policy number", "pmd #", "policy/pmd number"],
+    # "policy /pmd#" (space before the slash, none before "#") is the
+    # exact real header text seen on a real coinsurance settlement
+    # statement's own "IGI Claims" sheet - the "tidier" spacing already
+    # listed here ("policy/pmd #") does NOT match it, since alias
+    # matching is exact-string after normalization, not fuzzy - so this
+    # variant needed adding explicitly rather than assuming the existing
+    # entries covered it.
+    "Policy/PMD Number": ["policy/pmd #", "policy /pmd#", "policy/pmd#", "policy /pmd #",
+                           "policy pmd #", "policy no", "policy number", "pmd #", "policy/pmd number"],
     "Insured Name": ["insured/participant", "insured", "insured name", "participant"],
     "Business Class": ["business class", "class", "class of business"],
     "Cause of Loss": ["cause of loss", "cause of  loss"],

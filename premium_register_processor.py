@@ -55,6 +55,34 @@ LEADER_FILE_ALIASES = {
     "Leader Policy Number": [
         "nums", "num", "policy no", "policy number", "leader policy no",
         "leader policy number", "leader ref no", "leader reference",
+        # "Docref" - confirmed against a real settlement statement (Indus
+        # Motor Company Ltd's coinsurance leader, "Premium Payable" sheet):
+        # this partner's own column name for the exact same thing NUMS is
+        # elsewhere - their own reference number for the transaction, in
+        # a format ("2024/06/GroupEEEOE00035") that lines up structurally
+        # with what IGI's own Premium Register stores back in its own
+        # "Leader#" column for this same partner. Verified end-to-end:
+        # 2,457 of 2,464 rows matched (99.7%) - the remainder are blank
+        # department subtotal rows ("TOTAL ENGINEERING" etc.), which
+        # correctly and harmlessly fall through to "Not Matched" the same
+        # way any other leader file's non-data rows already do.
+        "docref",
+        # "Policy/PMD #" - the same coinsurance company (or another
+        # partner using the same settlement-statement convention) may
+        # export their own premium/policy-payable sheet with this header
+        # instead of "Docref" - it's the same field CLAIM_ALIASES already
+        # recognizes on the claims side of this kind of statement (see
+        # claims_register_processor.CLAIM_ALIASES's "Policy/PMD Number"),
+        # just needed here too for the premium side. Several
+        # punctuation/spacing variants are listed since real exports are
+        # inconsistent about where the space falls around the slash and
+        # the "#" - confirmed directly against a real file: the actual
+        # header text there is "Policy /PMD#" (space BEFORE the slash,
+        # none before "#"), which doesn't match the more "tidy" spacing
+        # any alias list in this codebase had before - that specific
+        # variant is included below, not just the tidier-looking ones.
+        "policy/pmd #", "policy /pmd#", "policy/pmd#", "policy /pmd #",
+        "policy pmd #", "policy/pmd number", "pmd #",
     ],
 }
 
@@ -431,6 +459,46 @@ BLOCK_WINDOW = 4           # blocking key length (sliding window over each digit
 FALLBACK_WINDOW = 3        # used only if no candidates turn up at BLOCK_WINDOW (short numbers)
 _DIGIT_RUN_RE = re.compile(r"\d+")
 
+# ---------------------------------------------------------------------------
+# Block-purge cap - fixes a confirmed performance blow-up.
+#
+# A 4-digit sliding-window key that happens to be a calendar year (e.g.
+# "2025") is common to a huge fraction of the register, since almost
+# every real reference embeds a date somewhere. Verified against a
+# synthetic-but-realistic ~24,000-row register spanning a handful of
+# policy years: a handful of these year-shaped keys each collided with
+# 2,000-4,000 register rows, and every leader row that happened to share
+# one had to be fuzzy-scored (SequenceMatcher) against that entire
+# bloated candidate pool - 100-200ms per leader row, which alone was
+# enough to take a single "Run Matching" click from seconds to tens of
+# minutes on an ordinary production-sized file.
+#
+# This is the exact same collision problem already diagnosed and fixed
+# in claims_register_processor.py for ITS OWN blocking - but that
+# module's fix (raising the minimum indexable digit-run length to 5, and
+# dropping the sliding window entirely) can't just be copy-pasted here:
+# THIS module's matching specifically depends on the sliding window to
+# catch a short embedded number glued inside a longer, dirtier digit run
+# with no separator (see _block_keys' docstring above) - a leader's own
+# 5-digit serial can appear embedded inside our register's own longer
+# run. Raising the minimum run length would lose exactly the matches
+# this module exists to catch.
+#
+# Instead, MAX_BLOCK_SIZE purges any block key AFTER the index is built
+# that turned out to match more than this many register rows - i.e. a
+# key so generic (a bare year, a common short prefix) that it provides
+# essentially zero discriminating power anyway, at the cost of dominating
+# match time. This keeps the sliding window (and therefore the embedded-
+# substring matching) fully intact: a genuine match's real discriminating
+# substring - the policy/endorsement's own short numeric core - is
+# virtually never shared by hundreds of unrelated register rows, so it
+# survives the purge untouched. Since _block_keys() already emits one key
+# per window position (multiple keys per reference), losing one overly
+# generic key (e.g. the embedded year) still leaves the specific ones in
+# place to do the real matching - nothing needs to fall back to
+# FALLBACK_WINDOW just because one of several keys got purged.
+MAX_BLOCK_SIZE = 300
+
 
 def _block_keys(value, window):
     """
@@ -460,14 +528,25 @@ def _block_keys(value, window):
     return keys
 
 
-def build_match_index(register_df, leader_ref_col, window=BLOCK_WINDOW):
+def build_match_index(register_df, leader_ref_col, window=BLOCK_WINDOW, max_block_size=MAX_BLOCK_SIZE):
     """{block_key: set(row_index)} built from every register row's Leader
     Ref Number - the blocking step that keeps matching fast and, in
-    practice, is also what actually narrows in on the right candidate(s)."""
+    practice, is also what actually narrows in on the right candidate(s).
+
+    max_block_size: after the index is built, any key whose candidate set
+        grew larger than this is dropped entirely - see MAX_BLOCK_SIZE's
+        docstring above for why (a key that common is providing no real
+        filtering, only cost, and the reference it came from will almost
+        always still have OTHER, more specific keys surviving in the
+        index). Pass None/0 to disable purging and restore the original,
+        unbounded behavior."""
     index = {}
     for idx, val in register_df[leader_ref_col].items():
         for key in _block_keys(val, window):
             index.setdefault(key, set()).add(idx)
+    if max_block_size:
+        for key in [k for k, candidates in index.items() if len(candidates) > max_block_size]:
+            del index[key]
     return index
 
 
