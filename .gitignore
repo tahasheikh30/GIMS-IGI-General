@@ -5,3 +5,8 @@ build/
 GIMS.spec
 receivable_run_history.json
 receivable_output/
+
+# Generated result folders
+Claims Register/
+Outstanding Premium/
+Premium Register/
