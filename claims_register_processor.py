@@ -16,27 +16,31 @@ MATCHING mirrors premium_register_processor.py's approach exactly (same
 fuzzy digit-run blocking + longest-complete-run scoring, since reference
 number formats between two different Crystal Reports exports are never
 identical character-for-character), reusing its blocking/scoring helpers
-directly rather than re-implementing them. One addition on top: a claim's
-"Policy/PMD #" is matched against BOTH the Premium Register's "Document
-No." and "Base Doc No." columns (a claim can reference either the specific
-transaction or the original policy it renewed from), and the Premium
-Register carries the SAME Document No. on multiple rows - one row per
+directly rather than re-implementing them. The PRIMARY matching column is
+the Premium Register's "Base Doc No." column - a claim's "Policy/PMD #" is
+matched against it first; the register's "Document No." column is an
+OPTIONAL secondary column still checked as a fallback (a claim can
+reference either the original policy it renewed from, or the specific
+transaction), but "Base Doc No." is what's used both to accept a match and
+to fan a claim out to every coinsurer sharing that policy. The Premium
+Register carries the SAME Base Doc No. on multiple rows - one row per
 company sharing that policy (see PREMIUM REGISTER STRUCTURE below) - so
 once a query resolves to a best-matching row, every row sharing that row's
-own Document No. is pulled in as a sibling. That's what produces the
+own Base Doc No. is pulled in as a sibling. That's what produces the
 coinsurer fan-out.
 
 PREMIUM REGISTER STRUCTURE (confirmed against a real sample):
-  - "Document No." / "Base Doc No." - the specific transaction, and the
-    original policy it was issued/renewed from. A claim's "Policy/PMD #"
-    can reference either one.
+  - "Base Doc No." - the primary matching/fan-out column: the original
+    policy a transaction was issued/renewed from. "Document No." - the
+    specific transaction - is an optional secondary column still checked
+    as a fallback. A claim's "Policy/PMD #" can reference either one.
   - "Ins" - the company on THIS row's share of the policy. IGI's own
     share AND every coinsurer's share each get their own row under the
-    same Document No.
+    same Base Doc No.
   - "Leader" - "Yes" on IGI's own row, "No" on every coinsurer's row.
   - "Share" - that row's own percentage share of the policy.
   A policy with several coinsurers therefore has several "No" rows all
-  sharing one Document No. - matching a claim to that Document No. and
+  sharing one Base Doc No. - matching a claim to that Base Doc No. and
   collecting every "No" row under it identifies ALL of that claim's
   coinsurers at once, not just one.
 
@@ -345,9 +349,17 @@ def filter_claims_by_date(claims_df, date_col, start_date=None, end_date=None):
 def load_premium_register_file(filepath, sheet_name=None, report=None):
     """
     Load the Premium Register. Identifies "Ins" (the coinsurer/company
-    name for that row's share), "Document No", "Base Doc No", "Leader",
+    name for that row's share), "Base Doc No", "Document No", "Leader",
     and "Share". Returns (df, ins_col, doc_col, base_doc_col, leader_col,
-    share_col).
+    share_col) - NOTE: per the current matching rule, "doc_col" here
+    holds the "Base Doc No" column (the PRIMARY matching/fan-out column)
+    and "base_doc_col" holds "Document No" (an OPTIONAL secondary
+    matching column) - i.e. the two are swapped relative to their plain
+    English names, so that every downstream consumer (match_one_claim,
+    _build_policy_index, match_claims) - which already treats its first
+    doc-column argument as primary and its second as an optional
+    fallback - automatically matches/fans-out on Base Doc No without
+    needing its own logic changed.
 
     report: optional callable(str) - see _read_full_sheet; safe to leave
         as None.
@@ -372,7 +384,7 @@ def load_premium_register_file(filepath, sheet_name=None, report=None):
     inv = {}
     for orig, canon in colmap.items():
         inv.setdefault(canon, orig)
-    required = ["Ins", "Document No", "Leader", "Share"]
+    required = ["Ins", "Base Doc No", "Leader", "Share"]
     missing = [c for c in required if c not in inv]
     if missing:
         raise ValueError(
@@ -380,8 +392,11 @@ def load_premium_register_file(filepath, sheet_name=None, report=None):
             f"Recognized headers were: {list(data.columns)}. Add the real header text to "
             "REGISTER_ALIASES in claims_register_processor.py."
         )
-    base_doc_col = inv.get("Base Doc No")  # optional - falls back to Document No matching alone if absent
-    return data, inv["Ins"], inv["Document No"], base_doc_col, inv["Leader"], inv["Share"]
+    # Document No is now the optional secondary matching column - falls
+    # back to Base Doc No matching alone if absent (see the module/
+    # function docstrings above for why the two are swapped here).
+    document_no_col = inv.get("Document No")
+    return data, inv["Ins"], inv["Base Doc No"], document_no_col, inv["Leader"], inv["Share"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,10 +404,11 @@ def load_premium_register_file(filepath, sheet_name=None, report=None):
 # ---------------------------------------------------------------------------
 
 def _build_policy_index(register_df, doc_col, base_doc_col, window=BLOCK_WINDOW):
-    """{block_key: set(row_index)} built from BOTH Document No and (if
-    present) Base Doc No of every register row, so a claim's own
-    reference can land a match whichever of the two it actually refers
-    to.
+    """{block_key: set(row_index)} built from doc_col (the PRIMARY
+    matching column - Base Doc No, see load_premium_register_file) and,
+    if present, base_doc_col (the optional secondary column - Document
+    No) of every register row, so a claim's own reference can land a
+    match whichever of the two it actually refers to.
 
     PERFORMANCE: reads each column's own values directly via zip(), not
     register_df.iterrows(). iterrows() boxes EVERY column of a register

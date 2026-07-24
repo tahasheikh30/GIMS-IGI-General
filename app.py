@@ -3260,8 +3260,8 @@ class BalanceApp(tk.Tk):
 
             report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
             reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path, report=report)
-            report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Document No column='{doc_col}'"
-                   + (f", Base Doc No column='{base_doc_col}'" if base_doc_col else " (no Base Doc No column found - matching against Document No only)."))
+            report(f"  {len(reg_df):,} row(s) loaded. Coinsurer column='{ins_col}', Base Doc No column (primary)='{doc_col}'"
+                   + (f", Document No column (secondary)='{base_doc_col}'" if base_doc_col else " (no Document No column found - matching against Base Doc No only)."))
 
             report(f"\nMatching {len(claims_df):,} claim(s) against {len(reg_df):,} register row(s)...")
             report.progress(0, len(claims_df), text=f"Matching 0 / {len(claims_df):,} claim(s)")
