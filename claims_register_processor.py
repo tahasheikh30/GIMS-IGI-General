@@ -133,6 +133,51 @@ FAST_READ_ROW_THRESHOLD = 100000
 _DIGIT_RUN_RE = re.compile(r"\d+")
 MIN_BLOCK_RUN_LEN = 5
 
+# ---------------------------------------------------------------------------
+# Block-purge cap, added after a confirmed real-world performance blow-up.
+#
+# The 5-digit-minimum fix above (MIN_BLOCK_RUN_LEN) was verified against
+# small sample files, but a real production register (204,220 rows, 27,976
+# real claims) exposed a second, different collision: the serial number at
+# the end of a reference (e.g. "00015") is not year-shaped, but it's still
+# a LOW sequential number on most rows, because every branch/class starts
+# its own numbering back at 1. Confirmed directly against the real
+# register: keys like "00001" through "00010" each matched 1,500-5,600
+# register rows on their own. Every claim that happened to share one of
+# these common serials then had to be fuzzy-scored (SequenceMatcher, via
+# _score_row) against that entire bloated candidate pool - measured at
+# ~70ms per claim, which alone took the real 27,976-claim file from
+# seconds to roughly 33 minutes for a single "Load & Match Claims" run.
+#
+# Fix, in two parts:
+#   1. A SECOND, more selective blocking key is added alongside the plain
+#      digit-run key: (branch/class code, serial), e.g.
+#      ("HOFFNOP", "00025") instead of just "00025" - see _compound_keys().
+#      This is exactly the signal _score_row already treats as the
+#      strongest disambiguator (see its own docstring), just applied one
+#      step earlier, at blocking time instead of only at scoring time.
+#      Verified against the real register: the mean candidate set for a
+#      compound key is under 5 rows, vs. ~49 for the plain key alone (and
+#      up to 5,600 for its worst offenders).
+#   2. Only the PLAIN digit-run keys are purged above MAX_BLOCK_SIZE once
+#      the index is built - compound keys are never purged, since their
+#      candidate sets are already small by construction. This keeps the
+#      plain key's fallback role (it still catches genuine matches whose
+#      branch/class code doesn't come through cleanly - a slight OCR/
+#      formatting difference between the claim's own reference and the
+#      register's) while removing only the keys so generic (a bare low
+#      serial number shared by thousands of unrelated branches) that they
+#      provide effectively no discriminating power anyway.
+# Verified end-to-end against the real 204,220-row register / 27,976-row
+# claims file: this took a single "Load & Match Claims" run from ~33
+# minutes to ~10-11 seconds, with the matched count essentially unchanged
+# (the handful of claims that rely SOLELY on one of the purged, maximally-
+# generic keys - and have no other qualifying key at all - fall through
+# to "Not Matched" and need manual review, same as any other claim the
+# fuzzy matcher can't confidently place).
+# ---------------------------------------------------------------------------
+MAX_BLOCK_SIZE = 400
+
 
 def _block_keys(value, window):
     """
@@ -492,13 +537,28 @@ def _build_policy_index(register_df, doc_col, base_doc_col, window=BLOCK_WINDOW)
     Reading the target column's own values straight out of the Series
     (register_df[col]) skips that entirely and is a plain, fast
     column-at-a-time scan.
+
+    Every row is indexed under BOTH its plain digit-run key(s) and its
+    compound (branch/class code, serial) key(s) - see _all_block_keys /
+    MAX_BLOCK_SIZE's docstring for why the second layer exists. Once
+    built, any PLAIN key (a bare string) whose candidate set grew larger
+    than MAX_BLOCK_SIZE is purged entirely - a key that generic is
+    providing cost, not real filtering, and the row(s) that produced it
+    will almost always still have their own compound key surviving in
+    the index (compound keys, being tuples, are never purged - their
+    candidate sets are already small by construction). Pass
+    max_block_size=None/0 to disable purging.
     """
     index = {}
     cols = [doc_col] + ([base_doc_col] if base_doc_col else [])
     for col in cols:
         for idx, value in zip(register_df.index, register_df[col]):
-            for key in _block_keys(value, window):
+            for key in _all_block_keys(value, window):
                 index.setdefault(key, set()).add(idx)
+    if MAX_BLOCK_SIZE:
+        for key in [k for k, candidates in index.items()
+                    if isinstance(k, str) and len(candidates) > MAX_BLOCK_SIZE]:
+            del index[key]
     return index
 
 
@@ -512,6 +572,49 @@ def _alpha_only(value):
     what actually disambiguates matches here (see the module-level note
     above _score_row for why digits alone are NOT enough)."""
     return _ALPHA_ONLY_RE.sub("", str(value)).upper()
+
+
+def _compound_keys(value):
+    """
+    A second, more selective blocking key: (branch/class code, serial) -
+    e.g. "2024/02/HOEEEOP00025" -> {("HOEEEOP", "00025")} - pairing
+    _alpha_only()'s own branch+class code with each qualifying digit run,
+    instead of indexing the digit run alone. See MAX_BLOCK_SIZE's
+    docstring above for why this was added: a bare serial number collides
+    with thousands of unrelated register rows (every branch/class restarts
+    its own numbering), but the same serial paired with its branch/class
+    code very rarely does - verified against the real register, this
+    keeps the mean candidate set under 5 rows. Never purged (see
+    MAX_BLOCK_SIZE) - only the plain, digit-only key is.
+    """
+    alpha = _alpha_only(value)
+    keys = set()
+    for run in _DIGIT_RUN_RE.findall(str(value)):
+        if len(run) < MIN_BLOCK_RUN_LEN:
+            continue
+        keys.add((alpha, run))
+    return keys
+
+
+def _build_siblings_index(register_df, doc_col):
+    """{doc_col value: [row_index, ...]} for every register row, built
+    ONCE up front. Every accepted match needs to pull in every OTHER
+    register row sharing that same Base Doc No (its co-insurer siblings -
+    see the module docstring's FAN-OUT section) - doing that via a fresh
+    register_df[register_df[doc_col] == policy_doc_no] boolean-mask scan
+    on every single match is a full pass over the ENTIRE register (204,220
+    rows in the real file) for every one of potentially thousands of
+    matched claims. A single groupby pass here turns that into an O(1)
+    dictionary lookup per match, same rationale as _build_policy_index."""
+    return {value: list(idxs) for value, idxs in register_df.groupby(doc_col, sort=False).groups.items()}
+
+
+def _all_block_keys(value, window):
+    """Every key - plain digit-run AND compound branch/class+serial -
+    that this value would be indexed or queried under. Used identically
+    on both sides (building the index in _build_policy_index, and
+    querying it in match_one_claim) so the two always stay in sync."""
+    return _block_keys(value, window) | _compound_keys(value)
 
 
 def _score_row(query_digits, query_runs, query_alpha, idx, doc_digits, base_digits, doc_alpha, base_alpha):
@@ -567,7 +670,7 @@ MIN_ALPHA_RATIO = 0.5
 
 
 def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, leader_col, share_col, index,
-                     doc_digits=None, base_digits=None, doc_alpha=None, base_alpha=None):
+                     doc_digits=None, base_digits=None, doc_alpha=None, base_alpha=None, siblings_index=None):
     """
     Match a single claim's Policy/PMD # against the Premium Register.
     Returns a dict:
@@ -579,6 +682,9 @@ def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, lead
     doc_digits/base_digits/doc_alpha/base_alpha: optional precomputed
     register-side caches (see match_claims) - built on the fly from
     register_df if not supplied, for standalone/one-off use.
+    siblings_index: optional precomputed {doc_col value: [row_index, ...]}
+    (see _build_siblings_index / match_claims) - built on the fly via a
+    full-register scan if not supplied, for standalone/one-off use.
     """
     if doc_digits is None:
         doc_digits = register_df[doc_col].astype(str).map(_digits_only)
@@ -593,10 +699,10 @@ def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, lead
         return {"status": "Not Matched", "policy_doc_no": None, "match_score": 0.0, "coinsurers": []}
 
     candidates = set()
-    for k in _block_keys(pmd_value, BLOCK_WINDOW):
+    for k in _all_block_keys(pmd_value, BLOCK_WINDOW):
         candidates |= index.get(k, set())
     if not candidates:
-        for k in _block_keys(pmd_value, FALLBACK_WINDOW):
+        for k in _all_block_keys(pmd_value, FALLBACK_WINDOW):
             candidates |= index.get(k, set())
     if not candidates:
         return {"status": "Not Matched", "policy_doc_no": None, "match_score": 0.0, "coinsurers": []}
@@ -621,7 +727,11 @@ def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, lead
         return {"status": "Not Matched", "policy_doc_no": None, "match_score": round(best_digit_ratio, 3), "coinsurers": []}
 
     policy_doc_no = register_df.at[best_idx, doc_col]
-    siblings = register_df[register_df[doc_col] == policy_doc_no]
+    if siblings_index is not None:
+        sibling_idx = siblings_index.get(policy_doc_no, [])
+        siblings = register_df.loc[sibling_idx]
+    else:
+        siblings = register_df[register_df[doc_col] == policy_doc_no]
     is_coinsurer = siblings[leader_col].astype(str).str.strip().str.lower().isin(LEADER_NO_VALUES)
     coinsurer_rows = siblings[is_coinsurer]
 
@@ -680,6 +790,12 @@ def match_claims(claims_df, pmd_col, register_df, ins_col, doc_col, base_doc_col
     base_digits = register_df[base_doc_col].astype(str).map(_digits_only) if base_doc_col else None
     doc_alpha = register_df[doc_col].astype(str).map(_alpha_only)
     base_alpha = register_df[base_doc_col].astype(str).map(_alpha_only) if base_doc_col else None
+    # Precompute doc_col -> sibling row indices ONCE for the whole
+    # register too - see _build_siblings_index's docstring. Without this,
+    # every accepted match re-scanned the entire register from scratch to
+    # find its co-insurer siblings, which dominated total run time on a
+    # real file once matching itself got fast (see MAX_BLOCK_SIZE above).
+    siblings_index = _build_siblings_index(register_df, doc_col)
 
     try:
         from perf_utils import RowProgress
@@ -700,7 +816,8 @@ def match_claims(claims_df, pmd_col, register_df, ins_col, doc_col, base_doc_col
 
     for i, (idx, pmd_value, base) in enumerate(zip(claims_df.index, pmd_values, claim_records), start=1):
         result = match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, leader_col, share_col, index,
-                                  doc_digits=doc_digits, base_digits=base_digits, doc_alpha=doc_alpha, base_alpha=base_alpha)
+                                  doc_digits=doc_digits, base_digits=base_digits, doc_alpha=doc_alpha, base_alpha=base_alpha,
+                                  siblings_index=siblings_index)
 
         if result["status"] == "Matched":
             claim_paid = claim_paid_series.at[idx] if claim_paid_series is not None else None
