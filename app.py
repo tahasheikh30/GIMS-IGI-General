@@ -2949,17 +2949,6 @@ class BalanceApp(tk.Tk):
         claims_email_lookup_note.grid(row=6, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(claims_email_lookup_note, source_box)
 
-        self.claims_match_btn = ttk.Button(source_box, text="Load & Match Claims", style="Accent.TButton", width=24,
-                                            command=self.load_and_match_claims)
-        self.claims_match_btn.grid(row=7, column=0, sticky="w", padx=10, pady=(10, 4))
-
-        self.claims_match_progress = perf_utils.ProgressBarPanel(source_box)
-        self.claims_match_progress.frame.grid(row=8, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 8))
-
-        self.claims_match_summary_var = tk.StringVar(value="")
-        ttk.Label(source_box, textvariable=self.claims_match_summary_var, foreground=self.COLOR_SUCCESS,
-                  font=("Segoe UI", 10, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
-
         # ---- Section: Date Filter ----
         # Scopes a run to a selected period even though the Claim Intimation
         # Register (and the Premium Register it's matched against) can span
@@ -2997,6 +2986,35 @@ class BalanceApp(tk.Tk):
         ttk.Label(date_filter_row, text="To (YYYY-MM-DD)", style="Panel.TLabel").pack(side="left", padx=(0, 6))
         self.claims_date_to_var = tk.StringVar()
         ttk.Entry(date_filter_row, textvariable=self.claims_date_to_var, width=14).pack(side="left")
+
+        # ---- Section: Load & Match (kept below the Date Filter, so any
+        # filter is already set before the user loads the data) - a proper
+        # bordered Labelframe matching Data Source / Date Filter above it,
+        # rather than a bare unstyled frame that read as a stray, floating
+        # button with no visual home of its own. Uses the compact button
+        # variant and tight spacing throughout so the card hugs its
+        # content instead of reserving a lot of empty space below the
+        # button for a progress bar / summary line that are blank most
+        # of the time.
+        load_box = ttk.Labelframe(canvas_frame, text="  Load & Match  ", padding=(14, 12))
+        load_box.pack(fill="x", padx=12, pady=8)
+
+        ttk.Label(load_box, text="Loads both files above, applies the Date Filter (if set), and runs the "
+                                  "coinsurer matching in one step.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+
+        self.claims_match_btn = self._make_action_button(load_box, "Load & Match Claims", self.load_and_match_claims,
+                                                           kind="accent", compact=True)
+        self.claims_match_btn.pack(anchor="w")
+
+        self.claims_match_progress = perf_utils.ProgressBarPanel(load_box)
+        self.claims_match_progress.frame.pack(fill="x", pady=(8, 0))
+
+        self.claims_match_summary_var = tk.StringVar(value="")
+        self.claims_match_summary_label = ttk.Label(load_box, textvariable=self.claims_match_summary_var,
+                                                      foreground=self.COLOR_SUCCESS, font=("Segoe UI", 10, "bold"))
+        self.claims_match_summary_label.pack(anchor="w")
+        self.claims_match_summary_label.pack_forget()  # hidden until there's a real summary to show (see on_done below)
 
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
@@ -3192,6 +3210,7 @@ class BalanceApp(tk.Tk):
 
         self.claims_setup_log.delete("1.0", "end")
         self.claims_match_summary_var.set("")
+        self.claims_match_summary_label.pack_forget()
         self.status_var.set("Loading and matching claims...")
         self.claims_match_progress.start(total=None, text="Loading files...")
 
@@ -3273,6 +3292,7 @@ class BalanceApp(tk.Tk):
 
             summary_text = f"Matched {n_unique_matched}/{n_claims} claims \u2192 {len(groups)} coinsurer file(s). {n_unmatched} unmatched."
             self.claims_match_summary_var.set(summary_text)
+            self.claims_match_summary_label.pack(anchor="w", pady=(8, 0))
             self.claims_match_progress.finish(summary_text)
             self.status_var.set(f"{len(groups)} coinsurer files identified. See tab 2.")
 
