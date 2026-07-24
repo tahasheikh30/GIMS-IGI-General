@@ -3306,7 +3306,14 @@ class BalanceApp(tk.Tk):
             summary_text = f"Matched {n_unique_matched}/{n_claims} claims \u2192 {len(groups)} coinsurer file(s). {n_unmatched} unmatched."
             self.claims_match_summary_var.set(summary_text)
             self.claims_match_summary_label.pack(anchor="w", pady=(8, 0))
+            # The summary label above already shows the final result, so
+            # the progress bar's own "Done" card is redundant the moment
+            # it appears - collapse it immediately instead of leaving it
+            # (and the vertical space it reserves) visible for its normal
+            # ~2.6s auto-hide delay, which otherwise leaves a blank gap
+            # between the button and the summary text.
             self.claims_match_progress.finish(summary_text)
+            self.claims_match_progress.hide()
             self.status_var.set(f"{len(groups)} coinsurer files identified. See tab 2.")
 
         def on_error(exc):
