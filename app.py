@@ -2652,29 +2652,27 @@ class BalanceApp(tk.Tk):
         self.receivable_reports_progress.start(total=len(groups), text=f"0 / {len(groups)} workbook(s) generated")
 
         def worker(report):
-            filename_lookup = {}
-            generated = []
-            errors = []
-            for i, (bucket_label, g) in enumerate(groups.items(), start=1):
-                n_rows = len(g["premium_rows"]) + len(g["claims_rows"])
-                report(f"[{i}/{len(groups)}] {bucket_label} ({n_rows:,} row(s))")
-                report.progress(i - 1, len(groups), text=f"Generating: {bucket_label} ({i}/{len(groups)})")
-                try:
-                    if breakdowns is not None:
-                        breakdown = breakdowns.get(bucket_label)
-                    else:
-                        breakdown = rvp.client_breakdown_for_bucket(source_df, bucket_label)
-                    fp = rvg.build_company_workbook(
-                        bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
-                        premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
-                        report=report,
-                    )
-                    generated.append(fp)
-                    filename_lookup[bucket_label] = os.path.basename(fp)
-                except Exception as e:
-                    errors.append(f"{bucket_label}: {e}")
-                report.progress(i, len(groups), text=f"{i} / {len(groups)} workbook(s) generated")
-            return generated, filename_lookup, errors
+            # build_company_workbooks_parallel spreads workbook generation
+            # across CPU cores (each company's file is fully independent -
+            # its own DataFrame slice in, its own .xlsx out) when the batch
+            # is large enough to be worth it, and transparently falls back
+            # to the original one-at-a-time loop otherwise (a small batch,
+            # a single-core machine, or a process pool that fails to start
+            # for some environment-specific reason) - see its own
+            # docstring in receivable_generator.py. Per-bucket client
+            # breakdowns are still taken from the precomputed
+            # analyze_buckets() result when available, same as before.
+            resolved_breakdowns = breakdowns
+            if resolved_breakdowns is None:
+                resolved_breakdowns = {
+                    bucket_label: rvp.client_breakdown_for_bucket(source_df, bucket_label)
+                    for bucket_label in groups
+                }
+            return rvg.build_company_workbooks_parallel(
+                groups, resolved_breakdowns, output_dir,
+                premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
+                report=report,
+            )
 
         def on_done(result):
             generated, filename_lookup, errors = result
@@ -3353,36 +3351,23 @@ class BalanceApp(tk.Tk):
         self.claims_reports_progress.start(total=total_files, text=f"0 / {total_files} workbook(s) generated")
 
         def worker(report):
-            filename_lookup = {}
-            generated = []
-            errors = []
-            i = 0
-            for bucket_label, claims_sub_df in groups.items():
-                i += 1
-                report(f"[{i}/{total_files}] {bucket_label} ({len(claims_sub_df):,} claim(s))")
-                report.progress(i - 1, total_files, text=f"Generating: {bucket_label} ({i}/{total_files})")
-                try:
-                    breakdown = breakdowns.get(bucket_label)
-                    fp = crg.build_coinsurer_workbook(bucket_label, claims_sub_df, breakdown, output_dir, report=report)
-                    generated.append(fp)
-                    filename_lookup[bucket_label] = os.path.basename(fp)
-                except Exception as e:
-                    errors.append(f"{bucket_label}: {e}")
-                report.progress(i, total_files, text=f"{i} / {total_files} workbook(s) generated")
-
-            if unmatched_df is not None and len(unmatched_df):
-                i += 1
-                report(f"[{i}/{total_files}] Unmatched Claims ({len(unmatched_df):,} claim(s))")
-                report.progress(i - 1, total_files, text=f"Generating: Unmatched Claims ({i}/{total_files})")
-                try:
-                    fp = crg.build_unmatched_workbook(unmatched_df, output_dir, report=report)
-                    if fp:
-                        generated.append(fp)
-                except Exception as e:
-                    errors.append(f"Unmatched Claims: {e}")
-                report.progress(i, total_files, text=f"{i} / {total_files} workbook(s) generated")
-
-            return generated, filename_lookup, errors
+            # build_coinsurer_workbooks_parallel spreads workbook generation
+            # across CPU cores - each coinsurer's file is fully independent
+            # (its own DataFrame slice in, its own .xlsx out), and this
+            # module's bucket sizes are far more skewed than Receivable's
+            # (one real coinsurer can carry tens of thousands of matched
+            # claim-coinsurer rows while most carry a handful) - see its
+            # own docstring in claims_register_generator.py. The Unmatched
+            # Claims workbook (if any) is folded into this SAME batch as
+            # one more independent task, so it runs concurrently with
+            # every coinsurer's workbook instead of as a separate,
+            # strictly-sequential step afterward that would otherwise
+            # leave every other CPU core idle while it alone was written.
+            # Falls back to the original one-at-a-time loop on a
+            # single-core machine, a tiny batch, or if the process pool
+            # can't start for some environment-specific reason.
+            return crg.build_coinsurer_workbooks_parallel(
+                groups, breakdowns, output_dir, report=report, unmatched_df=unmatched_df)
 
         def on_done(result):
             generated, filename_lookup, errors = result

@@ -35,7 +35,7 @@ from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
 try:
-    from perf_utils import style_budget_ok, ThrottledReporter
+    from perf_utils import style_budget_ok, ThrottledReporter, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     def style_budget_ok(n_rows):
         return True
@@ -49,6 +49,22 @@ except ImportError:  # perf_utils.py not yet added to this checkout, degrade gra
 
         def final(self, *a, **k):
             pass
+
+    class StyleIndexCache:
+        """Plain, always-correct fallback if perf_utils isn't available -
+        no caching, just sets each style attribute directly every time
+        (the original, slower-but-safe behavior)."""
+        def apply(self, cell, font=None, border=None, fill=None, alignment=None, number_format=None):
+            if font is not None:
+                cell.font = font
+            if border is not None:
+                cell.border = border
+            if fill is not None:
+                cell.fill = fill
+            if alignment is not None:
+                cell.alignment = alignment
+            if number_format is not None:
+                cell.number_format = number_format
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -182,10 +198,20 @@ def _write_sheet(ws, df, amount_col, drop_cols=None, report=None):
         return
 
     n_rows = len(df)
-    apply_style = style_budget_ok(n_rows)
     date_cols = {col for col in columns if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col])}
     clean_df = _prepare_for_excel(df[columns], date_cols)
     reporter = ThrottledReporter(report, min_rows=25000) if report else None
+    # StyleIndexCache makes per-cell font/border/number_format application
+    # cheap (see its own docstring in perf_utils.py) - the entire sheet
+    # only ever needs 3 distinct style combinations (amount columns, date
+    # columns, everything else), each registered once and reused for
+    # every remaining cell, instead of openpyxl re-hashing the same
+    # Font+Border+number_format combination on every single cell. This
+    # replaces the old style_budget_ok() row-count gate that used to skip
+    # font/border entirely above 50,000 rows - with the cache, applying
+    # full styling costs almost nothing extra even on a very large sheet,
+    # so there's no longer a reason to skip it.
+    style_cache = StyleIndexCache()
 
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
@@ -208,26 +234,18 @@ def _write_sheet(ws, df, amount_col, drop_cols=None, report=None):
             # border its neighbors have.
             if val is None:
                 continue
-            # Number format is never cosmetic (an unformatted amount or
-            # date serial is unreadable/misleading), so it's always kept.
             if col == amount_col:
-                cell.number_format = NUM_FORMAT
+                number_format = NUM_FORMAT
             elif col in date_cols:
-                cell.number_format = DATE_FORMAT
-            # Font + border ARE purely cosmetic and are the dominant cost
-            # on a huge sheet (millions of style objects), so they're
-            # skipped past the row-count budget.
-            if apply_style:
-                cell.font = BODY_FONT
-                cell.border = BORDER
+                number_format = DATE_FORMAT
+            else:
+                number_format = None
+            style_cache.apply(cell, font=BODY_FONT, border=BORDER, number_format=number_format)
         if reporter:
             reporter.maybe(i - 1, total=n_rows, label="rows written")
 
     if reporter:
         reporter.final(n_rows, label="rows written")
-    if not apply_style and report:
-        report(f"  Note: {n_rows:,} rows exceeds the styling budget - per-cell font/border "
-               f"was skipped for speed (values and number formats are unaffected).")
 
     for j, col in enumerate(columns, start=1):
         width = max(14, min(30, len(str(col)) + 4))
@@ -507,24 +525,21 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     if n_clients == 0:
         ws.cell(row=first_data_row, column=2, value="No client data available.").font = EMPTY_FONT
     else:
+        style_cache = StyleIndexCache()
+        ALIGN_NAME = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+        ALIGN_AMOUNT = Alignment(horizontal="right", vertical="center", indent=1)
         for i, row in enumerate(client_breakdown_df.itertuples(index=False), start=first_data_row):
             stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
             name_cell = ws.cell(row=i, column=2, value=str(row[0]))
-            name_cell.font = BODY_FONT
             # Wrap rather than clip - even at the wider column B, a handful
             # of client names run long enough to still overflow a single
             # line, so this lets those wrap onto a second line instead of
             # being cut off.
-            name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+            style_cache.apply(name_cell, font=BODY_FONT, border=BORDER, fill=stripe, alignment=ALIGN_NAME)
             prem_cell = ws.cell(row=i, column=3, value=float(row[1]))
-            prem_cell.number_format = NUM_FORMAT
-            prem_cell.alignment = Alignment(horizontal="right", vertical="center", indent=1)
+            style_cache.apply(prem_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
             claim_cell = ws.cell(row=i, column=4, value=float(row[2]))
-            claim_cell.number_format = NUM_FORMAT
-            claim_cell.alignment = Alignment(horizontal="right", vertical="center", indent=1)
-            for cell in (name_cell, prem_cell, claim_cell):
-                cell.border = BORDER
-                cell.fill = stripe
+            style_cache.apply(claim_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
             ws.row_dimensions[i].height = 26
 
         # Bold formula-driven Total row, so it always reflects the table above
@@ -695,6 +710,120 @@ def build_company_workbook(bucket_label, premium_rows, claims_rows, client_break
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
+
+
+def _build_one_workbook_worker(args):
+    """
+    Module-level (picklable) worker for build_company_workbooks_parallel -
+    a ProcessPoolExecutor worker function has to be a plain module-level
+    function, not a closure/lambda/method, since worker processes import
+    this module fresh and call it by reference rather than by value.
+    Returns (bucket_label, filepath, error_str_or_None) rather than
+    raising, so one bucket's failure (e.g. a genuinely malformed group)
+    doesn't take down the whole batch or need special multiprocessing
+    exception plumbing - the caller decides what to do with a per-bucket
+    error the same way the existing sequential loop in app.py already does.
+    """
+    bucket_label, premium_rows, claims_rows, breakdown, output_dir, premium_amount_col, claims_amount_col, run_date = args
+    try:
+        fp = build_company_workbook(bucket_label, premium_rows, claims_rows, breakdown, output_dir,
+                                     premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
+                                     run_date=run_date)
+        return bucket_label, fp, None
+    except Exception as e:
+        return bucket_label, None, str(e)
+
+
+def build_company_workbooks_parallel(groups, breakdowns, output_dir, premium_amount_col, claims_amount_col,
+                                      run_date=None, max_workers=None, report=None):
+    """
+    Generate every bucket's workbook using a process pool instead of one
+    at a time - each company's workbook is entirely independent of every
+    other (its own DataFrame slice in, its own .xlsx file out), so this
+    is an "embarrassingly parallel" batch: openpyxl's own per-file cost
+    (building the cell/style/chart XML and writing it to disk - see
+    perf_utils.StyleIndexCache's docstring for why that cost is CPU-bound,
+    not I/O-bound) is spread across every CPU core instead of running
+    entirely on one, which is what actually matters for a real machine
+    generating dozens to hundreds of company files in one "Generate Excel
+    Reports" click.
+
+    Falls back to plain sequential generation (calling
+    build_company_workbook in a loop, exactly as before this function
+    existed) whenever parallelism wouldn't help or isn't safely available:
+      - fewer than 2 CPU cores detected (nothing to parallelize across)
+      - fewer than MIN_BUCKETS_FOR_PARALLEL buckets (process start-up /
+        pickling overhead would outweigh the benefit on a small run)
+      - ProcessPoolExecutor fails to start at all for any reason (e.g. a
+        locked-down environment that disallows spawning subprocesses) -
+        caught broadly and degrades to sequential rather than failing
+        the whole report generation over an infrastructure problem.
+
+    report: optional callable(str) - progress is reported per completed
+        workbook (bucket_label), same granularity as the sequential loop
+        it replaces, so the calling UI's progress bar behaves the same
+        way regardless of which path actually ran.
+
+    Returns (generated_filepaths, filename_lookup, errors) - same shape
+    the app.py "Generate Excel Reports" worker already builds by hand
+    around a plain loop, so this is a drop-in replacement for that loop.
+    """
+    import os as _os
+    bucket_labels = list(groups.keys())
+    n_cpus = _os.cpu_count() or 1
+    MIN_BUCKETS_FOR_PARALLEL = 8  # below this, process start-up overhead isn't worth it
+    use_parallel = n_cpus >= 2 and len(bucket_labels) >= MIN_BUCKETS_FOR_PARALLEL
+
+    generated, filename_lookup, errors = [], {}, []
+
+    if use_parallel:
+        try:
+            import concurrent.futures
+            workers = max(1, min(max_workers or n_cpus, n_cpus, len(bucket_labels)))
+            if report:
+                report(f"Generating {len(bucket_labels)} workbook(s) across {workers} worker process(es)...")
+            tasks = [
+                (bucket_label, groups[bucket_label]["premium_rows"], groups[bucket_label]["claims_rows"],
+                 breakdowns.get(bucket_label), output_dir, premium_amount_col, claims_amount_col, run_date)
+                for bucket_label in bucket_labels
+            ]
+            done_count = 0
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                for bucket_label, fp, err in executor.map(_build_one_workbook_worker, tasks):
+                    done_count += 1
+                    if err:
+                        errors.append(f"{bucket_label}: {err}")
+                    else:
+                        generated.append(fp)
+                        filename_lookup[bucket_label] = os.path.basename(fp)
+                    if report:
+                        report(f"[{done_count}/{len(bucket_labels)}] {bucket_label}")
+                        if hasattr(report, "progress"):
+                            report.progress(done_count, len(bucket_labels),
+                                             text=f"{done_count} / {len(bucket_labels)} workbook(s) generated")
+            return generated, filename_lookup, errors
+        except Exception as e:
+            # Infrastructure-level failure (pool couldn't start at all) -
+            # fall through to the sequential path below rather than
+            # losing the whole report generation over it.
+            if report:
+                report(f"Parallel generation unavailable ({e}) - falling back to sequential generation.")
+            generated, filename_lookup, errors = [], {}, []
+
+    for i, bucket_label in enumerate(bucket_labels, start=1):
+        g = groups[bucket_label]
+        breakdown = breakdowns.get(bucket_label)
+        if report:
+            report(f"[{i}/{len(bucket_labels)}] {bucket_label}")
+        try:
+            fp = build_company_workbook(bucket_label, g["premium_rows"], g["claims_rows"], breakdown, output_dir,
+                                         premium_amount_col=premium_amount_col, claims_amount_col=claims_amount_col,
+                                         run_date=run_date)
+            generated.append(fp)
+            filename_lookup[bucket_label] = os.path.basename(fp)
+        except Exception as e:
+            errors.append(f"{bucket_label}: {e}")
+    return generated, filename_lookup, errors
 
 
 if __name__ == "__main__":
