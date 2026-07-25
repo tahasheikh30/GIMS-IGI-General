@@ -36,7 +36,7 @@ from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
 try:
-    from perf_utils import style_budget_ok, ThrottledReporter
+    from perf_utils import style_budget_ok, ThrottledReporter, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     def style_budget_ok(n_rows):
         return True
@@ -50,6 +50,22 @@ except ImportError:  # perf_utils.py not yet added to this checkout, degrade gra
 
         def final(self, *a, **k):
             pass
+
+    class StyleIndexCache:
+        """Plain, always-correct fallback if perf_utils isn't available -
+        no caching, just sets each style attribute directly every time
+        (the original, slower-but-safe behavior)."""
+        def apply(self, cell, font=None, border=None, fill=None, alignment=None, number_format=None):
+            if font is not None:
+                cell.font = font
+            if border is not None:
+                cell.border = border
+            if fill is not None:
+                cell.fill = fill
+            if alignment is not None:
+                cell.alignment = alignment
+            if number_format is not None:
+                cell.number_format = number_format
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -154,10 +170,21 @@ def _write_data_sheet(ws, df, highlight_new_cols=None, report=None):
             ws.column_dimensions[get_column_letter(j)].width = max(14, min(28, len(str(col)) + 4))
         return
 
-    apply_style = style_budget_ok(n_rows)
     date_cols = {c for c in columns if pd.api.types.is_datetime64_any_dtype(df[c])}
     clean_df = _prepare_for_excel(df, date_cols)
     reporter = ThrottledReporter(report, min_rows=25000) if report else None
+    # StyleIndexCache (see its docstring in perf_utils.py) makes per-cell
+    # font/border/fill/number_format application cheap regardless of row
+    # count, by registering each distinct style combination once and
+    # reusing its internal openpyxl style index directly for every later
+    # cell that needs the identical combination - this replaces the old
+    # style_budget_ok() row-count gate that used to skip font/border
+    # entirely above 50,000 rows. Confirmed via cProfile against a real
+    # coinsurer bucket that this per-cell style hashing (not the pandas
+    # iteration, not the save() itself) was the dominant cost of
+    # generating an output file.
+    style_cache = StyleIndexCache()
+    HIGHLIGHT_FILL = PatternFill("solid", start_color="E2EFDA", end_color="E2EFDA")
 
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
@@ -167,18 +194,17 @@ def _write_data_sheet(ws, df, highlight_new_cols=None, report=None):
                 continue
             if col in ("Coinsurer Share of Claim Paid", "Coinsurer Share of Claim O/S", "Claim Paid", "Claim O/S",
                        "Act. Loss", "Suminsured/Covered"):
-                cell.number_format = NUM_FORMAT
+                number_format = NUM_FORMAT
             elif col == "Coinsurer Share %":
-                cell.number_format = "0.00"
+                number_format = "0.00"
             elif col == "Match Score":
-                cell.number_format = "0.000"
+                number_format = "0.000"
             elif col in date_cols:
-                cell.number_format = DATE_FORMAT
-            if apply_style:
-                cell.border = BORDER
-                cell.font = BODY_FONT
-                if col in highlight_new_cols:
-                    cell.fill = PatternFill("solid", start_color="E2EFDA", end_color="E2EFDA")
+                number_format = DATE_FORMAT
+            else:
+                number_format = None
+            fill = HIGHLIGHT_FILL if col in highlight_new_cols else None
+            style_cache.apply(cell, font=BODY_FONT, border=BORDER, fill=fill, number_format=number_format)
         if reporter:
             reporter.maybe(i - 1, total=n_rows, label="rows written")
     if reporter:
@@ -212,6 +238,7 @@ def _write_unmatched_sheet(ws, df, report=None):
     date_cols = {c for c in columns if pd.api.types.is_datetime64_any_dtype(df[c])}
     clean_df = _prepare_for_excel(df, date_cols)
     reporter = ThrottledReporter(report, min_rows=25000) if report else None
+    style_cache = StyleIndexCache()
 
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
@@ -219,11 +246,8 @@ def _write_unmatched_sheet(ws, df, report=None):
             _write_text_safe(cell)
             if val is None:
                 continue
-            cell.border = BORDER
-            cell.font = UNMATCHED_FONT
-            cell.fill = UNMATCHED_FILL
-            if col in date_cols:
-                cell.number_format = DATE_FORMAT
+            number_format = DATE_FORMAT if col in date_cols else None
+            style_cache.apply(cell, font=UNMATCHED_FONT, border=BORDER, fill=UNMATCHED_FILL, number_format=number_format)
         if reporter:
             reporter.maybe(i - 1, total=n_rows, label="rows written")
     if reporter:
@@ -413,22 +437,19 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
     if n_insureds == 0:
         ws.cell(row=first_data_row, column=2, value="No claim data available.").font = EMPTY_FONT
     else:
+        style_cache = StyleIndexCache()
+        ALIGN_NAME = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+        ALIGN_RIGHT = Alignment(horizontal="right", vertical="center", indent=1)
         for i, row in enumerate(breakdown_df.itertuples(index=False), start=first_data_row):
             stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
             name_cell = ws.cell(row=i, column=2, value=str(row[0]))
-            name_cell.font = BODY_FONT
-            name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+            style_cache.apply(name_cell, font=BODY_FONT, border=BORDER, fill=stripe, alignment=ALIGN_NAME)
             paid_c = ws.cell(row=i, column=3, value=float(row[1]))
-            paid_c.number_format = NUM_FORMAT
-            paid_c.alignment = Alignment(horizontal="right", vertical="center", indent=1)
+            style_cache.apply(paid_c, border=BORDER, fill=stripe, alignment=ALIGN_RIGHT, number_format=NUM_FORMAT)
             os_c = ws.cell(row=i, column=4, value=float(row[2]))
-            os_c.number_format = NUM_FORMAT
-            os_c.alignment = Alignment(horizontal="right", vertical="center", indent=1)
+            style_cache.apply(os_c, border=BORDER, fill=stripe, alignment=ALIGN_RIGHT, number_format=NUM_FORMAT)
             n_c = ws.cell(row=i, column=5, value=int(row[3]))
-            n_c.alignment = Alignment(horizontal="right", vertical="center", indent=1)
-            for cell in (name_cell, paid_c, os_c, n_c):
-                cell.border = BORDER
-                cell.fill = stripe
+            style_cache.apply(n_c, border=BORDER, fill=stripe, alignment=ALIGN_RIGHT)
             ws.row_dimensions[i].height = 26
 
         total_label = ws.cell(row=total_row, column=2, value="TOTAL")
@@ -527,6 +548,131 @@ def build_coinsurer_workbook(bucket_label, claims_df, breakdown_df, output_dir, 
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
+
+
+def build_coinsurer_workbooks_parallel(groups, breakdowns, output_dir, run_date=None, max_workers=None, report=None,
+                                        unmatched_df=None):
+    """
+    Generate every coinsurer's workbook using a process pool instead of
+    one at a time - see receivable_generator.build_company_workbooks_parallel
+    for the full rationale (same technique, same fallback conditions).
+
+    This module's own bucket sizes are typically far more skewed than the
+    Receivable module's: confirmed against a real 27,976-claim run, one
+    coinsurer bucket alone (58,423 matched claim-coinsurer rows, out of
+    274,000 total across 98 coinsurers) took roughly a minute to write on
+    its own, purely from openpyxl's own per-cell object construction cost
+    at that scale (millions of individual cells) - a cost that's now
+    genuinely at the floor of what openpyxl's normal (non-streaming) mode
+    can do, since this module's Summary sheet needs real merged cells and
+    embedded charts, which openpyxl's much faster "write_only" streaming
+    mode does not support mixed into the same workbook as those features
+    (confirmed directly: attempting to mix a write-only worksheet into a
+    normal, chart-containing workbook silently drops every row written to
+    it - not attempted here for exactly that reason). Running every
+    bucket concurrently instead of one after another means the WHOLE
+    BATCH's wall-clock time is bound by whichever single bucket is
+    largest, not the sum of all of them - on a real multi-core machine,
+    generating 98 files where 91 are small and 7 are huge should take
+    roughly as long as the biggest handful of those, not 98 files' worth
+    of sequential time.
+
+    unmatched_df: optional - if given (and non-empty), the "Unmatched
+        Claims" workbook is submitted to the SAME process pool as one
+        more independent task, so it runs concurrently with every
+        coinsurer's workbook instead of being generated afterward as a
+        separate, strictly-sequential step (which would otherwise leave
+        every other CPU core idle while it alone was being written).
+
+    Returns (generated_filepaths, filename_lookup, errors) - same shape
+    the app.py "Generate Excel Reports" worker already builds around a
+    plain loop, so this is a drop-in replacement for that loop. The
+    unmatched-claims filepath (if any) is included in generated_filepaths
+    but not filename_lookup (it isn't looked up by bucket_label the way
+    coinsurer files are).
+    """
+    import os as _os
+    bucket_labels = list(groups.keys())
+    include_unmatched = unmatched_df is not None and len(unmatched_df) > 0
+    total_tasks = len(bucket_labels) + (1 if include_unmatched else 0)
+    n_cpus = _os.cpu_count() or 1
+    MIN_BUCKETS_FOR_PARALLEL = 4  # even 2-3 buckets can be worth it here, given how skewed bucket sizes are
+    use_parallel = n_cpus >= 2 and total_tasks >= MIN_BUCKETS_FOR_PARALLEL
+
+    generated, filename_lookup, errors = [], {}, []
+
+    if use_parallel:
+        try:
+            import concurrent.futures
+            workers = max(1, min(max_workers or n_cpus, n_cpus, total_tasks))
+            if report:
+                report(f"Generating {total_tasks} workbook(s) across {workers} worker process(es)...")
+            tasks = [
+                ("coinsurer", bucket_label, groups[bucket_label], breakdowns.get(bucket_label), output_dir, run_date)
+                for bucket_label in bucket_labels
+            ]
+            if include_unmatched:
+                tasks.append(("unmatched", None, unmatched_df, None, output_dir, run_date))
+            done_count = 0
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                for label, fp, err in executor.map(_build_one_generic_workbook_worker, tasks):
+                    done_count += 1
+                    if err:
+                        errors.append(f"{label}: {err}")
+                    elif fp:
+                        generated.append(fp)
+                        if label != "Unmatched Claims":
+                            filename_lookup[label] = os.path.basename(fp)
+                    if report:
+                        report(f"[{done_count}/{total_tasks}] {label}")
+                        if hasattr(report, "progress"):
+                            report.progress(done_count, total_tasks,
+                                             text=f"{done_count} / {total_tasks} workbook(s) generated")
+            return generated, filename_lookup, errors
+        except Exception as e:
+            if report:
+                report(f"Parallel generation unavailable ({e}) - falling back to sequential generation.")
+            generated, filename_lookup, errors = [], {}, []
+
+    for i, bucket_label in enumerate(bucket_labels, start=1):
+        claims_sub_df = groups[bucket_label]
+        breakdown = breakdowns.get(bucket_label)
+        if report:
+            report(f"[{i}/{total_tasks}] {bucket_label}")
+        try:
+            fp = build_coinsurer_workbook(bucket_label, claims_sub_df, breakdown, output_dir, run_date=run_date)
+            generated.append(fp)
+            filename_lookup[bucket_label] = os.path.basename(fp)
+        except Exception as e:
+            errors.append(f"{bucket_label}: {e}")
+    if include_unmatched:
+        if report:
+            report(f"[{total_tasks}/{total_tasks}] Unmatched Claims")
+        try:
+            fp = build_unmatched_workbook(unmatched_df, output_dir, run_date=run_date)
+            if fp:
+                generated.append(fp)
+        except Exception as e:
+            errors.append(f"Unmatched Claims: {e}")
+    return generated, filename_lookup, errors
+
+
+def _build_one_generic_workbook_worker(args):
+    """Module-level (picklable) worker used by build_coinsurer_workbooks_parallel
+    for BOTH task kinds (a coinsurer's own workbook, or the shared
+    Unmatched Claims workbook) so both can be submitted to the same
+    process pool and run concurrently rather than the unmatched workbook
+    being a separate, strictly-sequential step afterward."""
+    kind, bucket_label, df, breakdown_df, output_dir, run_date = args
+    try:
+        if kind == "coinsurer":
+            fp = build_coinsurer_workbook(bucket_label, df, breakdown_df, output_dir, run_date=run_date)
+            return bucket_label, fp, None
+        else:
+            fp = build_unmatched_workbook(df, output_dir, run_date=run_date)
+            return "Unmatched Claims", fp, None
+    except Exception as e:
+        return (bucket_label or "Unmatched Claims"), None, str(e)
 
 
 def build_unmatched_workbook(unmatched_df, output_dir, run_date=None, report=None):
