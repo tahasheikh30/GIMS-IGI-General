@@ -25,7 +25,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 try:
-    from perf_utils import style_budget_ok, ThrottledReporter
+    from perf_utils import style_budget_ok, ThrottledReporter, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     def style_budget_ok(n_rows):
         return True
@@ -39,6 +39,22 @@ except ImportError:  # perf_utils.py not yet added to this checkout, degrade gra
 
         def final(self, *a, **k):
             pass
+
+    class StyleIndexCache:
+        """Plain, always-correct fallback if perf_utils isn't available -
+        no caching, just sets each style attribute directly every time
+        (the original, slower-but-safe behavior)."""
+        def apply(self, cell, font=None, border=None, fill=None, alignment=None, number_format=None):
+            if font is not None:
+                cell.font = font
+            if border is not None:
+                cell.border = border
+            if fill is not None:
+                cell.fill = fill
+            if alignment is not None:
+                cell.alignment = alignment
+            if number_format is not None:
+                cell.number_format = number_format
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -116,7 +132,6 @@ def _write_raw_data_into(ws, raw_df, report=None):
     normal, small-file use."""
     columns = list(raw_df.columns)
     n_rows = len(raw_df)
-    apply_style = style_budget_ok(n_rows)
 
     # Columns that are genuinely datetime-typed get a clean date-only format
     # (no "00:00:00" time component cluttering every cell).
@@ -130,6 +145,13 @@ def _write_raw_data_into(ws, raw_df, report=None):
 
     clean_df = _prepare_for_excel(raw_df, date_cols)
     reporter = ThrottledReporter(report, min_rows=25000) if report else None
+    # StyleIndexCache (see its docstring in perf_utils.py) makes per-cell
+    # font/number_format application cheap regardless of row count, by
+    # reusing openpyxl's own internal style index instead of re-hashing
+    # the same Font object on every cell - this replaces the old
+    # style_budget_ok() row-count gate that used to skip the body font
+    # entirely above 50,000 rows.
+    style_cache = StyleIndexCache()
 
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         for j, (col, val) in enumerate(zip(columns, row), start=1):
@@ -143,23 +165,15 @@ def _write_raw_data_into(ws, raw_df, report=None):
             # Real transaction data routinely has blank cells, so this
             # matters in production even though the original small test
             # data never happened to trigger it.
-            if val is not None and apply_style:
-                cell.font = BODY_FONT
-                if col in date_cols:
-                    cell.number_format = "DD-MMM-YYYY"
-            elif val is not None and col in date_cols:
-                # Number format is not cosmetic (a raw date serial without
-                # it is unreadable), so it's kept even past the style
-                # budget - only the per-cell Font object is skipped.
-                cell.number_format = "DD-MMM-YYYY"
+            if val is None:
+                continue
+            number_format = "DD-MMM-YYYY" if col in date_cols else None
+            style_cache.apply(cell, font=BODY_FONT, number_format=number_format)
         if reporter:
             reporter.maybe(i - 1, total=n_rows, label="rows written")
 
     if reporter:
         reporter.final(n_rows, label="rows written")
-    if not apply_style and report:
-        report(f"  Note: {n_rows:,} rows exceeds the styling budget - per-cell font formatting "
-               f"was skipped for speed (values and number formats are unaffected).")
 
     for j, col in enumerate(columns, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(14, min(30, len(str(col)) + 4))
@@ -258,6 +272,96 @@ def write_client_report(client_name, pivot_df, output_dir, extra_info=None, raw_
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
+
+
+def _build_one_client_report_worker(args):
+    """Module-level (picklable) worker for write_client_reports_parallel -
+    see receivable_generator.py's _build_one_workbook_worker for the full
+    rationale (a ProcessPoolExecutor worker has to be a plain module-level
+    function to be picklable, especially for Windows' spawn method).
+    Computes the client's own Department x Year pivot INSIDE the worker
+    process (cheap - a single pandas pivot_table call) rather than
+    pickling a precomputed pivot_df across the process boundary, so the
+    only large object actually sent to each worker is that one client's
+    own raw rows."""
+    import data_processor as dp
+    client_name, raw_rows, output_dir = args
+    try:
+        pivot_df = dp.client_pivot_table_from_rows(raw_rows)
+        fp = write_client_report(client_name, pivot_df, output_dir, raw_df=raw_rows)
+        return client_name, fp, None
+    except Exception as e:
+        return client_name, None, str(e)
+
+
+def write_client_reports_parallel(clients, rows_by_client, output_dir, max_workers=None, report=None):
+    """
+    Generate every qualifying client's static (non-native-pivot) report
+    using a process pool instead of one at a time - only used on the
+    FALLBACK path (no Excel/pywin32 available, or a client's native
+    PivotTable build failed), since the NATIVE pivot path drives a single
+    shared Excel COM instance across every client and isn't safe to
+    parallelize the same way (COM automation isn't built for concurrent
+    access from multiple processes the way plain openpyxl writing is -
+    see app.py's generate_reports for where each path is chosen).
+
+    Each client's report is otherwise fully independent - its own raw
+    rows in, its own .xlsx out - so this is the same "embarrassingly
+    parallel" batch as receivable_generator.build_company_workbooks_parallel
+    and claims_register_generator.build_coinsurer_workbooks_parallel, with
+    the same fallback conditions (fewer than 2 CPU cores, a small batch,
+    or a process pool that fails to start for any reason all degrade to
+    the original sequential loop).
+
+    Returns (generated_filepaths, errors) - errors is a list of
+    "{client_name}: {message}" strings for any client that failed, so one
+    bad client's data doesn't take down the whole batch.
+    """
+    import os as _os
+    n_cpus = _os.cpu_count() or 1
+    MIN_CLIENTS_FOR_PARALLEL = 8
+    use_parallel = n_cpus >= 2 and len(clients) >= MIN_CLIENTS_FOR_PARALLEL
+
+    generated, errors = [], []
+
+    if use_parallel:
+        try:
+            import concurrent.futures
+            workers = max(1, min(max_workers or n_cpus, n_cpus, len(clients)))
+            if report:
+                report(f"Generating {len(clients)} report(s) across {workers} worker process(es)...")
+            tasks = [(client, rows_by_client.get(client), output_dir) for client in clients]
+            done_count = 0
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                for client_name, fp, err in executor.map(_build_one_client_report_worker, tasks):
+                    done_count += 1
+                    if err:
+                        errors.append(f"{client_name}: {err}")
+                    else:
+                        generated.append(fp)
+                    if report:
+                        report(f"[{done_count}/{len(clients)}] {client_name}")
+                        if hasattr(report, "progress"):
+                            report.progress(done_count, len(clients),
+                                             text=f"{done_count} / {len(clients)} report(s) generated")
+            return generated, errors
+        except Exception as e:
+            if report:
+                report(f"Parallel generation unavailable ({e}) - falling back to sequential generation.")
+            generated, errors = [], []
+
+    import data_processor as dp
+    for i, client in enumerate(clients, start=1):
+        raw_rows = rows_by_client.get(client)
+        if report:
+            report(f"[{i}/{len(clients)}] {client}")
+        try:
+            pivot_df = dp.client_pivot_table_from_rows(raw_rows)
+            fp = write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
+            generated.append(fp)
+        except Exception as e:
+            errors.append(f"{client}: {e}")
+    return generated, errors
 
 
 if __name__ == "__main__":

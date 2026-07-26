@@ -25,18 +25,52 @@ except ImportError:
 
 def start_excel():
     """Launch a hidden Excel instance to reuse across many report files
-    (much faster than starting Excel fresh for every client)."""
+    (much faster than starting Excel fresh for every client).
+
+    ScreenUpdating and manual calculation mode are turned off for the
+    lifetime of this instance - both are standard, well-established
+    speedups for batch Excel COM automation: with ScreenUpdating on,
+    Excel repaints its (invisible, since Visible=False, but still
+    tracked internally) window after every single operation; with
+    automatic calculation on, it recalculates every open workbook's
+    formulas after every change, including ones made to a DIFFERENT
+    workbook than the one just edited once more than one file has been
+    opened in the same instance across a batch. Both add real overhead
+    per operation that has nothing to do with the actual pivot-table
+    work being done, and neither has any visible effect anyway since
+    excel.Visible is already False. Restored to their normal values in
+    stop_excel() before the instance quits, so nothing about the
+    Application object outlives this module's own use of it.
+
+    NOTE: this specific speedup could not be benchmarked in the
+    environment this was developed in (Linux, no Windows/Excel
+    available) - it's applied on the strength of it being a standard,
+    widely-documented Excel COM automation technique, not a
+    project-specific measurement like the other performance fixes in
+    this codebase. If it ever causes an issue in practice (e.g. some
+    other part of a workbook unexpectedly needs live recalculation),
+    it's safe to remove."""
     if not EXCEL_AVAILABLE:
         return None
     excel = win32.gencache.EnsureDispatch("Excel.Application")
     excel.Visible = False
     excel.DisplayAlerts = False
+    try:
+        excel.ScreenUpdating = False
+        excel.Calculation = xlc.xlCalculationManual
+    except Exception:
+        pass  # cosmetic/perf-only - never fail startup over this
     return excel
 
 
 def stop_excel(excel_app):
     if excel_app is None:
         return
+    try:
+        excel_app.Calculation = xlc.xlCalculationAutomatic
+        excel_app.ScreenUpdating = True
+    except Exception:
+        pass
     try:
         excel_app.Quit()
     except Exception:

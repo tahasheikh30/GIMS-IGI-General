@@ -4074,14 +4074,23 @@ class BalanceApp(tk.Tk):
                         use_native = False
                         report(f"Could not start Excel for native PivotTables ({e}) - using static formatted tables instead.")
 
-                for i, client in enumerate(clients, start=1):
-                    raw_rows = rows_by_client.get(client)
-                    if raw_rows is None:  # shouldn't normally happen - safety net only
-                        raw_rows = dp.get_client_raw_rows(filtered_df, client)
-                    report(f"[{i}/{len(clients)}] {client} ({len(raw_rows):,} row(s))")
-                    report.progress(i - 1, len(clients), text=f"Generating: {client} ({i}/{len(clients)})")
-                    fp = None
-                    if use_native:
+                if use_native:
+                    # The native pivot path drives a single shared Excel COM
+                    # instance across every client - COM automation isn't
+                    # safe to parallelize the same way plain openpyxl
+                    # writing is (see report_generator.write_client_reports_parallel's
+                    # own docstring), so this stays a sequential loop, just
+                    # over a COM instance that now also has ScreenUpdating
+                    # and automatic recalculation turned off for the
+                    # duration (see pivot_native.start_excel) - a standard
+                    # speedup for batch COM automation.
+                    for i, client in enumerate(clients, start=1):
+                        raw_rows = rows_by_client.get(client)
+                        if raw_rows is None:  # shouldn't normally happen - safety net only
+                            raw_rows = dp.get_client_raw_rows(filtered_df, client)
+                        report(f"[{i}/{len(clients)}] {client} ({len(raw_rows):,} row(s))")
+                        report.progress(i - 1, len(clients), text=f"Generating: {client} ({i}/{len(clients)})")
+                        fp = None
                         try:
                             fp = rg.write_raw_only_workbook(client, raw_rows, output_dir, report=report)
                             pivot_native.add_native_pivot_table(fp, client_name=client, excel_app=excel_app)
@@ -4089,11 +4098,20 @@ class BalanceApp(tk.Tk):
                             native_failures.append(client)
                             pivot_df = dp.client_pivot_table_from_rows(raw_rows)
                             fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
-                    else:
-                        pivot_df = dp.client_pivot_table_from_rows(raw_rows)
-                        fp = rg.write_client_report(client, pivot_df, output_dir, raw_df=raw_rows, report=report)
-                    generated.append(fp)
-                    report.progress(i, len(clients), text=f"{i} / {len(clients)} report(s) generated")
+                        generated.append(fp)
+                        report.progress(i, len(clients), text=f"{i} / {len(clients)} report(s) generated")
+                else:
+                    # No Excel available - every client's report is a
+                    # plain openpyxl write, fully independent of every
+                    # other, so this path is safely parallelized across
+                    # CPU cores (falls back to sequential on its own for a
+                    # single-core machine or a small batch - see
+                    # write_client_reports_parallel's own docstring).
+                    generated, gen_errors = rg.write_client_reports_parallel(
+                        clients, rows_by_client, output_dir, report=report)
+                    if gen_errors:
+                        for err in gen_errors:
+                            report(f"  ERROR: {err}")
             finally:
                 pivot_native.stop_excel(excel_app)
                 if com_initialized:
