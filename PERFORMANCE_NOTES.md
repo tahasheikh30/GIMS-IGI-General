@@ -347,4 +347,102 @@ buckets alone (run concurrently), not the sum of every file in the batch.
   real multi-core machine, by running those 7 large buckets concurrently
   instead of back to back.
 
+## Part 5, Policy Check (Premium Register) and Outstanding Premium
+
+### Policy Check - two correctness bugs found while investigating "why is it slow"
+
+Before any performance work, loading the real Premium Register file
+(the same 204,220-row file the Claims Register module uses) into this
+module failed outright: `REGISTER_ALIASES` only recognizes header text
+like `"Leader#"` / `"Doc Ref #"`, but the real file uses `"Document No."`
+/ `"Base Doc No."` (the same header style Claims Register's own aliases
+already expect). This module was evidently built against an older or
+different register export format than what's actually in use now - not
+a performance issue at all, but worth fixing before performance mattered.
+
+Separately, and more seriously: **this module had no continuation-sheet
+merging at all**. A legacy `.xls` register bigger than Excel's old 65,536-
+row-per-sheet cap (confirmed: the real 204,220-row register is split
+across 4 sheets, header only on the first) would have silently been read
+as just its first ~65,523 rows - 68% of the register missing, with no
+error or warning. Claims Register already had this fix
+(`_find_continuation_sheets`); ported the same logic here
+(`premium_register_processor._find_continuation_sheets`), verified
+against a synthetic 3-sheet, 9,000-row split file that all 9,000 rows
+load correctly.
+
+### Policy Check - performance (matching 15,000 leader rows against a 200,000-row register)
+
+Profiled with cProfile: `register_df.at[idx, leader_ref_col]` -
+DataFrame-level `.at[]` access - was being called on every single
+candidate check inside the matching loop. A microbenchmark of the same
+"same column, many different row indices" access pattern confirmed
+`Series.at[]` (i.e. access the column ONCE as its own Series, then index
+into that) is roughly 5x faster than `DataFrame.at[]` for this exact
+shape of repeated lookup - `DataFrame.at[]` goes through column lookup,
+scalar "boxing", and a pandas `__finalize__` call that deep-copies frame
+metadata on every access, none of which `Series.at[]` needs to repeat.
+
+Separately, `_score_candidate` always ran a full `SequenceMatcher.ratio()`
+call for every candidate, even though the final ranking always compares
+`(run_len, ratio)` with `run_len` first - a candidate with a lower
+run_len can never win regardless of its ratio. Split scoring into two
+passes: a cheap run_len-only check (plain substring test) across every
+candidate first, then `SequenceMatcher.ratio()` only for whichever
+candidates tie for the best run_len found - provably the same result as
+scoring everyone, just skipping ratio computation for candidates that
+can't possibly win. **Verified this is bit-for-bit identical to the
+original algorithm**: ran 1,500 deliberately fuzzy/corrupted queries
+(real register references with random slashes-to-dashes swaps, digit
+typos, and truncation) through both the old and new scoring logic side
+by side - zero differences in status, matched policy, or score.
+
+Also applied the same fast-reader (python-calamine) and
+`StyleIndexCache` fixes as every other module.
+
+Combined result on a real-shaped 200,000-row register / 15,000-row
+leader file: load+match+write went from ~97s+ to **~14s**.
+
+### Outstanding Premium
+
+`data_processor.py` already called the shared `fast_read_excel_rows()`
+(and so already benefited from the calamine swap in Part 4), but only
+above a 100,000-row threshold - anything smaller still went through
+`pd.read_excel()` directly. Removed the threshold, matching the fix
+already applied to `receivable_processor.py`: a real-shaped 50,000-row
+file went from 2.94s to 0.41s. `report_generator.py`'s `_write_raw_data_into`
+(the "Raw Data" sheet, which scales with a client's own transaction
+volume) got the same `StyleIndexCache` fix as the other three generators.
+
+This module has two genuinely different generation paths depending on
+whether Excel is installed, which matters for how far parallelization
+could safely go:
+
+- **Native PivotTable path** (Excel/pywin32 available): drives ONE shared
+  Excel COM instance across every client sequentially. Added
+  `ScreenUpdating = False` and manual calculation mode to that shared
+  instance for the duration of the batch (restored before it quits) - a
+  standard, well-documented speedup for batch Excel COM automation.
+  **This could not be verified at all** - this was developed on Linux
+  with no Windows/Excel available, so unlike every other fix in this
+  document, this one is applied on the strength of it being a known
+  technique, not a project-specific measurement. COM automation also
+  isn't safe to parallelize the same way plain `openpyxl` writing is (a
+  single Application object isn't built for concurrent access from
+  multiple processes), so this path was deliberately left sequential
+  rather than risk something that couldn't be tested here.
+- **Fallback static-table path** (no Excel, or a client's native pivot
+  build fails): pure `openpyxl`, fully independent per client - added
+  `report_generator.write_client_reports_parallel()` using the same
+  `ProcessPoolExecutor` pattern as the other three modules, with the same
+  fallback conditions. Verified correct: 500/500 synthetic client reports
+  generated with 0 errors, reopened and checked for valid content/fonts.
+
+Measured on a real-shaped 600,000-row file / 500 clients (fallback path,
+single CPU core in this environment): load+validate+analyze 7.76s,
+generate 500 reports 69.5s - the generation step would improve further
+on a real multi-core machine, same caveat as Part 4's parallel
+generation work.
+
+
 

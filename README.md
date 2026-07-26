@@ -41,7 +41,7 @@ with two collapsible menus, each expanding to its own set of sections:
 | `assets/company_logo_cropped.png` | Company logo shown top-right in the header |
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
 | `perf_utils.py` | Background-thread runner for Tkinter; a fast Excel reader (`python-calamine` when installed, ~7x faster than openpyxl's own reader on a real 500,000-row file, falling back to openpyxl's streaming reader otherwise); `StyleIndexCache`, which makes per-cell font/border/fill/number_format application cheap by reusing openpyxl's own internal style index instead of re-hashing the same style on every cell; a visual progress bar widget. Keeps the app responsive on huge (500k+ row) source files and fast when generating Excel output. See `PERFORMANCE_NOTES.md`. |
-| `report_generator.py` | Writes each client's raw transaction data into its own Excel file |
+| `report_generator.py` | Writes each client's raw transaction data into its own Excel file; also generates every client's static (non-native-pivot) report in parallel across CPU cores when Excel isn't available and the batch is large enough |
 | `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
 | `email_generator.py` | Fills the email template per client; template stored in `templates.json` |
 | `outlook_sender.py` | Sends via Outlook COM automation (your own signed-in account) |
@@ -53,7 +53,7 @@ with two collapsible menus, each expanding to its own set of sections:
 | `receivable_automation.py` | `load_email_lookup_from_file()` (used by the GUI, reads a separate lookup file) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
-| `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls`), and fuzzy-matches policy numbers between them |
+| `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls` including files split across multiple 65,536-row sheets), and fuzzy-matches policy numbers between them |
 | `premium_register_generator.py` | Writes the matched-output Excel file, with unmatched rows highlighted for manual entry |
 | `claims_register_processor.py` | Loads the Claim Intimation Register and IGI's Premium Register (merging legacy `.xls` files split across multiple 65,536-row sheets), fuzzy-matches each claim to its policy, and fans it out to every coinsurer sharing that policy |
 | `claims_register_generator.py` | Writes each coinsurer's two-sheet (Summary w/ charts, Claims Data) Excel workbook plus a shared "Unmatched Claims" workbook; generates every coinsurer's workbook in parallel across CPU cores when the batch is large enough |
