@@ -204,3 +204,147 @@ O(rows) regardless of item count. Empty-dataframe and missing-column edge
 cases (no data after filtering, no Agent Name/Branch desc column present)
 were checked separately and degrade to empty results rather than raising.
 
+## Part 4, fixing the two remaining bottlenecks Parts 1-3 didn't touch: reading huge files, and writing huge output workbooks
+
+Parts 1-3 fixed GUI freezing, slow row-by-row reads, and O(items x rows)
+re-scans. Two bottlenecks remained untouched, confirmed against real
+production-sized files: matching in the Claims Register module (204,220
+register rows / 27,976 claims) and generating output in both the
+Receivable and Claims Register modules (a real 500,000-row Receivable
+master file / 143 companies, and the same 27,976-claim run fanning out to
+274,000 matched claim-coinsurer rows across 98 coinsurers).
+
+### Claims Register matching (33 minutes -> ~10 seconds)
+
+`claims_register_processor.py`'s own blocking (`_build_policy_index`)
+indexed register rows by their bare 5+ digit serial number alone. On the
+real register, low serials collide constantly (every branch/class starts
+its own numbering back at 1) - some keys matched 1,500-5,600 register
+rows, and every claim landing on one of them had to be fuzzy-scored
+(SequenceMatcher) against the whole bloated pool.
+
+Fix: a second, far more selective blocking key pairs the branch/class
+code with the serial (e.g. `("HOFFNOP", "00025")` instead of just
+`"00025"`) - see `_compound_keys()` / `MAX_BLOCK_SIZE`'s docstring. Only
+the old bare-serial keys are purged once their candidate set is
+unreasonably large; compound keys are never purged, since they're small
+by construction. Also added `_build_siblings_index()` so pulling in a
+matched claim's co-insurer rows is an O(1) lookup instead of a fresh
+full-register scan per match.
+
+Verified this doesn't trade away correctness for speed: compared the fast
+(purged) result against the true unpurged result on a random 2,000-claim
+sample. Every difference found was the unpurged version accepting a weak,
+coincidental match (branch/class similarity barely over the acceptance
+threshold, e.g. `LHRHHDP` matched to unrelated `LHREBPOT`) - a pre-existing
+weakness in the acceptance thresholds that predates this fix, not
+something introduced by it. Zero exact reference-number matches were lost.
+
+### Reading Excel files (openpyxl's own reader was the actual cost)
+
+Profiled `receivable_processor.py`'s `load_raw_data()` against a real
+500,000-row file: openpyxl's `read_only` row iteration alone (no other
+code running around it) took ~43 of the ~50 total seconds. Switched
+`perf_utils.fast_read_excel_rows()` to try `python-calamine` (a Rust-based
+reader) first, falling back to the original openpyxl path if it isn't
+installed - ~7x faster on the same file (50s -> 7.4s total). Also reads
+legacy `.xls` directly. `receivable_processor.load_raw_data()` now always
+uses this fast path regardless of file size, rather than only above the
+old 100,000-row threshold, since it's strictly faster at every size.
+
+### Writing output workbooks (openpyxl re-hashing the same Font/Border on every cell)
+
+Profiled `receivable_generator.py` and `claims_register_generator.py`
+building real output files: ~73% of per-file time was inside openpyxl's
+own style-deduplication machinery
+(`styleable.py` / `indexed_list.py` / `Serialisable.__hash__`) - re-hashing
+the exact same, already-reused `Font`/`Border` objects on every single
+cell, even though the generators were already reusing shared constants
+rather than creating new style objects per cell.
+
+Fix: `perf_utils.StyleIndexCache` (new). The first time a given
+font/border/fill/alignment/number_format combination is used, it's
+applied the normal way and the resulting internal openpyxl style index is
+cached; every later cell needing the identical combination gets that
+index assigned directly (`cell._style = index`), skipping the repeated
+hashing. Keyed on **object identity** (`id()`), not the style objects'
+own values - hashing a Font/Border object to use as a dict key would be
+exactly the cost being avoided, even on a cache hit. Falls back to the
+always-correct per-attribute path if `_style` (a private openpyxl
+attribute) is ever unavailable, so a future openpyxl version can only
+make this slower, never wrong. Wired into both generators'
+per-cell-styled loops (`_write_sheet` / `_write_data_sheet` /
+`_write_unmatched_sheet` and each module's Summary-sheet breakdown
+table), replacing the old `style_budget_ok()` row-count gate that used to
+skip font/border entirely above 50,000 rows - with the cache, full
+styling is cheap enough that skipping it is no longer necessary.
+
+Measured on a real ~2,700-row company workbook: 4.18s -> 0.79s per file
+(~5.3x) once keyed correctly by identity. Confirmed correct by reopening
+generated files and checking font/border/number_format round-trip
+correctly through the reused style index.
+
+**A genuine floor, not fixed by this**: one real coinsurer bucket
+(HABIB INSURANCE COMPANY LIMITED, 58,423 matched claim-coinsurer rows,
+~4.4 million cells once every column is counted) still takes roughly a
+minute to write even with styling no longer the bottleneck - at that cell
+count, openpyxl's own per-cell object construction in its normal
+(non-streaming) write mode is the cost, confirmed via cProfile
+(`lxml_write_cell` / `Worksheet._get_cell` / `Cell.__init__`). openpyxl's
+much faster `write_only` streaming mode was tested as a fix and rejected:
+it cannot be safely mixed into the same workbook as the Summary sheet's
+merged cells and embedded charts - confirmed directly by attempting it,
+which silently dropped every row written to the write-only sheet (the
+file reopened with `max_row == 1`, header only). Rather than risk
+producing a corrupted file, huge single buckets are left on normal mode
+and instead handled by parallelization (below).
+
+### Parallel generation across CPU cores
+
+Each output workbook (one per company / one per coinsurer) is fully
+independent - its own DataFrame slice in, its own `.xlsx` out - so
+generation is an "embarrassingly parallel" batch. Added
+`build_company_workbooks_parallel()` (`receivable_generator.py`) and
+`build_coinsurer_workbooks_parallel()` (`claims_register_generator.py`),
+both using `concurrent.futures.ProcessPoolExecutor` to spread file
+generation across cores, wired into `app.py`'s "Generate Excel Reports"
+workers in place of the old one-at-a-time loop. The Claims Register
+version also folds the "Unmatched Claims" workbook into the same batch as
+one more task, so it runs concurrently with the coinsurer files instead
+of as a separate step afterward.
+
+Both fall back to the original sequential loop whenever parallelism
+wouldn't help or isn't safely available: fewer than 2 CPU cores, a small
+batch (parallel process start-up/pickling overhead would outweigh the
+benefit), or a process pool that fails to start at all for any
+environment-specific reason - caught broadly so a batch never fails
+outright just because the parallel path couldn't start.
+
+**Caveat, disclosed rather than glossed over**: this was built and
+correctness-verified (identical, fully valid output, confirmed by
+reopening generated files) in a sandbox with only 1 CPU core available,
+so the actual multi-core speedup could not be measured directly in that
+environment - only reasoned about from the fact that each file's build
+cost is CPU-bound and fully independent of every other file's. On a real
+multi-core machine, generating a batch where a handful of buckets are
+huge and the rest are small should take roughly as long as those few huge
+buckets alone (run concurrently), not the sum of every file in the batch.
+
+### Net effect, measured on real files where possible
+
+- Claims Register matching: ~33 minutes -> ~10-50 seconds (see Part 4's
+  first section above for the range depending on machine load).
+- Receivable, 500,000 rows / 143 companies: load+validate+analyze+generate
+  ~204s -> ~74-79s on a single core (reader + styling fixes only; parallel
+  generation would improve this further on a multi-core machine).
+- Claims Register generation, 27,976 claims / 98 coinsurers / 274,000
+  matched rows: the styling fix alone took the small/medium buckets (91
+  of 98, ~22,000 total rows) from a proportional share of ~744s down to
+  ~36s; the 7 large buckets (~256,000 rows combined) improved less
+  dramatically in absolute terms since they're bound by openpyxl's
+  per-cell construction cost at that scale, not styling - parallel
+  generation is what brings the WHOLE BATCH's wall-clock time down on a
+  real multi-core machine, by running those 7 large buckets concurrently
+  instead of back to back.
+
+

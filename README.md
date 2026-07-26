@@ -22,7 +22,15 @@ with two collapsible menus, each expanding to its own set of sections:
     policy numbers against IGI's Premium Register using fuzzy digit-run
     matching, pulls in the matched IGI Policy Number, and flags any
     unmatched rows (highlighted red) for manual entry.
-  - **Claims Register** — placeholder, reserved for a future module.
+  - **Claims Register** — fully built: matches the Claim Intimation Register
+    against IGI's own Premium Register to recover each claim's coinsurer(s)
+    (a policy shared by several coinsurers fans a claim out to each of
+    their files), then writes one Excel workbook per coinsurer plus a
+    separate "Unmatched Claims" workbook for manual review, and drafts/
+    sends a recovery-statement email per coinsurer file. Same three-tab
+    structure as Premium/Claims Email Automation (Upload & Match →
+    Insurance Company Files → Review & Send Emails), with an optional
+    date filter to scope a run to a specific period.
 
 ## What's included
 
@@ -32,7 +40,7 @@ with two collapsible menus, each expanding to its own set of sections:
 | `assets/gims_logo_cropped.png` | GIMS logo shown top-left in the header |
 | `assets/company_logo_cropped.png` | Company logo shown top-right in the header |
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
-| `perf_utils.py` | Background-thread runner for Tkinter, a fast streaming Excel reader, a visual progress bar widget, and the write-side style budget used by the generators below - keeps the app responsive on huge (500k+ row) source files and shows live progress while generating Excel files. See `PERFORMANCE_NOTES.md`. |
+| `perf_utils.py` | Background-thread runner for Tkinter; a fast Excel reader (`python-calamine` when installed, ~7x faster than openpyxl's own reader on a real 500,000-row file, falling back to openpyxl's streaming reader otherwise); `StyleIndexCache`, which makes per-cell font/border/fill/number_format application cheap by reusing openpyxl's own internal style index instead of re-hashing the same style on every cell; a visual progress bar widget. Keeps the app responsive on huge (500k+ row) source files and fast when generating Excel output. See `PERFORMANCE_NOTES.md`. |
 | `report_generator.py` | Writes each client's raw transaction data into its own Excel file |
 | `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
 | `email_generator.py` | Fills the email template per client; template stored in `templates.json` |
@@ -40,13 +48,17 @@ with two collapsible menus, each expanding to its own set of sections:
 | `loss_ratio_processor.py` | Reads/validates Loss Ratio input files, normalizes column-name variations, aggregates per company |
 | `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output |
 | `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
-| `receivable_generator.py` | Writes each insurance company's three-sheet (Summary w/ charts, Premium Receivable, Claims Receivable) Excel statement, covering every client for that company |
+| `receivable_generator.py` | Writes each insurance company's three-sheet (Summary w/ charts, Premium Receivable, Claims Receivable) Excel statement, covering every client for that company; also generates every company's workbook in parallel across CPU cores when the batch is large enough |
 | `receivable_email.py` | Drafts the statement email per company file and sends via `outlook_sender` |
 | `receivable_automation.py` | `load_email_lookup_from_file()` (used by the GUI, reads a separate lookup file) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
 | `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
 | `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
 | `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls`), and fuzzy-matches policy numbers between them |
 | `premium_register_generator.py` | Writes the matched-output Excel file, with unmatched rows highlighted for manual entry |
+| `claims_register_processor.py` | Loads the Claim Intimation Register and IGI's Premium Register (merging legacy `.xls` files split across multiple 65,536-row sheets), fuzzy-matches each claim to its policy, and fans it out to every coinsurer sharing that policy |
+| `claims_register_generator.py` | Writes each coinsurer's two-sheet (Summary w/ charts, Claims Data) Excel workbook plus a shared "Unmatched Claims" workbook; generates every coinsurer's workbook in parallel across CPU cores when the batch is large enough |
+| `claims_register_email.py` | Drafts the recovery-statement email per coinsurer file and sends via `outlook_sender` |
+| `claims_register_run_log.py` | Writes the Claims Register module's audit trail to `claims_register_run_history.json` |
 
 ## Requirements
 
@@ -81,8 +93,9 @@ Register**, **Claims Register**). Both menus start expanded, and each can
 be collapsed independently without affecting the other. The active section
 is highlighted with an accent bar and bold text. All the functionality
 below (Steps 1–3) lives inside **Outstanding Premium**, under General
-Operations — click it in the sidebar if it isn't already selected. Claims
-Register and Renewal are placeholders reserved for future modules.
+Operations — click it in the sidebar if it isn't already selected. Renewal
+is a placeholder reserved for a future module; Claims Register is fully
+built (see its own section below).
 
 ### Step 1 — Upload & Filter
 1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
@@ -375,9 +388,6 @@ works on Windows with Outlook installed and signed in — this could only be
 verified here in dry-run mode. Please test a dry run first, then send to
 yourself before using it on real recipients.
 
-**Claims Register**, the remaining item under the Coinsurance menu, is a
-placeholder reserved for a future module.
-
 ## Coinsurance > Premium Register module
 
 Click **Coinsurance** in the sidebar to expand it, then click
@@ -456,6 +466,76 @@ date-like suffixes) differs. Matching works in two stages:
    immediately visible which rows still need to be entered into the
    Premium Register by hand. A small note below the table summarizes the
    overall match rate.
+
+## Coinsurance > Claims Register module
+
+Click **Coinsurance** in the sidebar, then expand **Claims** and click
+**Claims Intimation**. Same three-tab structure as Premium/Claims Email
+Automation (Upload & Match → Insurance Company Files → Review & Send
+Emails).
+
+**What it does:** matches the Claim Intimation Register (Finance's own
+log of claims as they come in — sparsely filled in on the coinsurer side,
+since that column is manually entered) against IGI's Premium Register to
+recover which coinsurer(s) share each claim's underlying policy. A policy
+can be shared by several coinsurers at once (confirmed against real data:
+one policy had 11 separate coinsurer rows) — matching a claim's own
+`Policy/PMD #` against the register's `Base Doc No.` finds the right
+policy, then every coinsurer sharing that same Base Doc No. is pulled in
+at once, so a single claim can fan out into several coinsurers' own
+recovery files, each showing only that coinsurer's own Share % and their
+proportional cut of Claim Paid / Claim O/S.
+
+Matching uses the same fuzzy digit-run approach as Premium Register
+(blocking + longest-complete-run scoring), tuned for this module's own
+reference format — see `claims_register_processor.py`'s own docstrings
+for the details, including a documented, deliberate blocking-key design
+that keeps matching fast even against a 200,000+ row register.
+
+1. **Upload & Match**
+   - **Claim Intimation Register** and **IGI Premium Register** — both
+     `.xlsx`/`.xls`, real header row auto-detected the same way as every
+     other GIMS module. Legacy `.xls` files that are split across several
+     sheets at Excel's old 65,536-row-per-sheet limit are automatically
+     detected and merged back into one table (confirmed against a real
+     204,220-row register split across 4 sheets) — the header only needs
+     to exist on the first sheet.
+   - **Date Filter (optional)** — scope a run to claims whose Intimation
+     Date or Loss Date falls within a chosen range, without needing to
+     trim the source files first. The Premium Register itself is never
+     date-filtered (it's only used as a lookup table), so it can still
+     cover a much wider period than the claims being matched.
+   - Click **Load & Match Claims**. The Activity Log reports how many
+     claims matched to a coinsurer, how many claim-coinsurer pairs that
+     produced across how many coinsurer files, and — for anything that
+     couldn't be matched — a breakdown of why (no matching policy found,
+     or the matched policy has no coinsurer on it at all, i.e. 100% IGI).
+2. **Insurance Company Files** — one row per coinsurer (plus a shared
+   pooled "OFC" row for every coinsurer whose name contains "OFC"), with
+   its claim count and total Share of Claim Paid / O/S. Click **Generate
+   Excel Reports** to write one workbook per coinsurer, plus a separate
+   **"Unmatched Claims"** workbook for anything that needs manual review.
+   Each coinsurer workbook has two sheets: **"Summary"** (a dashboard —
+   KPI cards, a Paid-vs-Outstanding pie, and a per-insured bar chart, all
+   driven by live Excel formulas) and **"Claims Data"** (every matched
+   claim row for that coinsurer, original claim columns preserved plus
+   the fan-out columns: Coinsurer Name, Coinsurer Share %, Coinsurer
+   Share of Claim Paid/O/S, Matched Policy Doc No., Match Score). The
+   Unmatched Claims workbook highlights every row red (the whole sheet
+   needs review) with a Reason column explaining why.
+3. **Review & Send Emails** — draft, preview/edit, and send a claims
+   recovery-statement email per coinsurer file, with the same shared
+   signature box, dry-run toggle, and per-row Send/Save Edits controls as
+   every other GIMS email workflow.
+
+**Performance note:** both matching and Excel generation for this module
+were specifically profiled and optimized against real, large production
+files (a 204,220-row register and a 27,976-claim register) — see
+`PERFORMANCE_NOTES.md`'s Part 4 for the full detail, including the one
+disclosed limitation (a single coinsurer with an extremely large claim
+count is still bound by openpyxl's own per-cell cost once its data sheet
+runs into the millions of cells, since that sheet's workbook also needs
+real embedded charts).
 
 ## Customizing the email template
 
