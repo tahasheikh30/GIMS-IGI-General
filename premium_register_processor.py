@@ -234,6 +234,42 @@ def _pick_best_sheet(xls, alias_lookup, max_scan=25, min_score=1):
     return sheet_name, header_row
 
 
+def _find_continuation_sheets(xls, primary_sheet, expected_ncols, alias_lookup, max_scan=25, min_score=1):
+    """
+    Legacy .xls workbooks are capped at 65,536 rows PER SHEET - a
+    register bigger than that (confirmed against a real Premium Register
+    export - 204,220 rows split across 4 sheets) gets split across
+    Sheet1/Sheet2/Sheet3/... by whatever produced the file, with the real
+    header row living ONLY on the first sheet and every later sheet being
+    a bare continuation of the same table (no header row of its own, same
+    column count). Reading only the sheet _pick_best_sheet()/name-hint
+    matching picks (the only one that scores anything against the alias
+    list, since it's the only one with a header) silently drops every row
+    on every later sheet - a real policy could be sitting in Sheet2/3/4
+    and simply never get read, with no error or warning at all.
+
+    Returns an ordered list of sheet names (in workbook order, excluding
+    primary_sheet) that look like pure-data continuations of
+    primary_sheet: same raw column count, and NO row in the first
+    `max_scan` rows scores as a header against alias_lookup (a sheet that
+    DOES score is presumably a genuinely different table with its own
+    header and must never be merged in as if it were more rows of the
+    same table). Same logic as claims_register_processor.py's own
+    _find_continuation_sheets, which this was adapted from.
+    """
+    continuations = []
+    for sn in xls.sheet_names:
+        if sn == primary_sheet:
+            continue
+        preview = pd.read_excel(xls, sheet_name=sn, header=None, nrows=max_scan)
+        if preview.shape[1] != expected_ncols:
+            continue
+        _, score = find_header_row(preview, alias_lookup, max_scan=max_scan, min_score=min_score, return_score=True)
+        if score == 0:
+            continuations.append(sn)
+    return continuations
+
+
 def _read_workbook_any_engine(filepath):
     """pandas/openpyxl can't read the legacy binary .xls format at all
     (only .xlsx) - that requires the separate 'xlrd' package. Try the
@@ -242,13 +278,23 @@ def _read_workbook_any_engine(filepath):
     LibreOffice install (if one is present on this machine), which
     produces an equivalent, cleanly readable file. If neither xlrd nor
     LibreOffice is available, raise a clear, actionable error rather than
-    a confusing pandas/import traceback."""
+    a confusing pandas/import traceback.
+
+    Returns (xls, resolved_filepath) - xls is a pd.ExcelFile (used for
+    the cheap header-row preview scans, which stay on pandas' own
+    reader), resolved_filepath is the path load_raw_data should hand to
+    perf_utils.fast_read_excel_rows() for the actual full-sheet read
+    (the original path for .xlsx or an xlrd-readable .xls, or the
+    LibreOffice-converted temp .xlsx path otherwise - python-calamine,
+    fast_read_excel_rows()'s preferred reader, can read a genuine .xls
+    directly too, so this only takes the LibreOffice detour when even
+    that fails)."""
     ext = os.path.splitext(filepath)[1].lower()
     if ext != ".xls":
-        return pd.ExcelFile(filepath)
+        return pd.ExcelFile(filepath), filepath
 
     try:
-        return pd.ExcelFile(filepath, engine="xlrd")
+        return pd.ExcelFile(filepath, engine="xlrd"), filepath
     except ImportError:
         pass  # xlrd not installed - try the LibreOffice fallback below
     except Exception:
@@ -274,7 +320,7 @@ def _read_workbook_any_engine(filepath):
             f"Could not read '{os.path.basename(filepath)}' - LibreOffice conversion from .xls "
             f"to .xlsx failed: {result.stderr.decode(errors='ignore')[:300]}"
         )
-    return pd.ExcelFile(converted)
+    return pd.ExcelFile(converted), converted
 
 
 def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hints=None):
@@ -292,7 +338,7 @@ def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hin
         columns. Ignored if sheet_name is given explicitly.
     """
     alias_lookup = _build_alias_lookup(aliases_dict)
-    xls = _read_workbook_any_engine(filepath)
+    xls, resolved_filepath = _read_workbook_any_engine(filepath)
 
     if sheet_name is None:
         picked = None
@@ -315,10 +361,51 @@ def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hin
         preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
         header_row = find_header_row(preview, alias_lookup)
 
-    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-    columns = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].reset_index(drop=True)
-    data.columns = _dedupe_columns(columns)
+    # The header-row scan above always stays a cheap pandas nrows=25
+    # preview - only the FULL sheet read goes through the fast path.
+    # perf_utils.fast_read_excel_rows() prefers python-calamine (a
+    # Rust-based reader, ~7x faster than pandas'/openpyxl's own reader on
+    # a real 500,000-row file - see PERFORMANCE_NOTES.md's Part 4),
+    # falling back to openpyxl's own read_only streaming mode if
+    # calamine isn't installed, and further falling back to plain
+    # pd.read_excel() below if perf_utils itself isn't available at all.
+    #
+    # Continuation sheets (see _find_continuation_sheets' docstring - a
+    # legacy .xls register split across Sheet1/2/3/4 at Excel's old
+    # 65,536-row-per-sheet cap, header only on the first) are detected
+    # and merged in as more rows of the same table, exactly the same fix
+    # already applied in claims_register_processor.py - confirmed against
+    # a real 204,220-row Premium Register that this module would
+    # otherwise have silently read only its first 65,523 rows and missed
+    # the remaining 138,697 with no warning at all.
+    try:
+        from perf_utils import fast_read_excel_rows
+        rows, _n = fast_read_excel_rows(resolved_filepath, sheet_name)
+        columns = _dedupe_columns(list(rows[header_row]))
+        data = pd.DataFrame(rows[header_row + 1:], columns=columns)
+
+        continuation_sheets = _find_continuation_sheets(xls, sheet_name, len(columns), alias_lookup)
+        if continuation_sheets:
+            frames = [data]
+            for sn in continuation_sheets:
+                cont_rows, _n2 = fast_read_excel_rows(resolved_filepath, sn)
+                frames.append(pd.DataFrame(cont_rows, columns=columns))
+            data = pd.concat(frames, ignore_index=True)
+    except ImportError:
+        raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        columns = _dedupe_columns(raw.iloc[header_row].tolist())
+        data = raw.iloc[header_row + 1:].reset_index(drop=True)
+        data.columns = columns
+
+        continuation_sheets = _find_continuation_sheets(xls, sheet_name, len(columns), alias_lookup)
+        if continuation_sheets:
+            frames = [data]
+            for sn in continuation_sheets:
+                cont_raw = pd.read_excel(xls, sheet_name=sn, header=None)
+                cont_raw.columns = columns
+                frames.append(cont_raw)
+            data = pd.concat(frames, ignore_index=True)
+
     data = data.dropna(how="all").reset_index(drop=True)
     data.attrs["source_sheet"] = sheet_name
     return data
@@ -554,48 +641,97 @@ def _digits_only(value):
     return re.sub(r"\D", "", str(value))
 
 
-def _score_candidate(query_value, candidate_value):
+def _score_candidate(query_runs, cand_digits):
     """
-    Score one candidate register row against a query value.
+    Cheap first-pass score: the length of the longest of the query's own
+    digit runs (3+ digits) that appears verbatim as a substring of the
+    candidate's digit string - no SequenceMatcher call here at all.
 
-    The primary signal is NOT overall character-similarity (a generic
-    ratio over the whole string is easily fooled - two numbers that just
-    happen to share a lot of common digits in roughly the same positions
-    can out-score the actual matching pair, e.g. "...115585..." vs the
-    true "...025585..." both partially resemble a query containing
-    "25585"). What actually identifies the right row is whether one of
-    the query's own COMPLETE digit runs (its policy/endorsement number as
-    a whole token, not a fragment) shows up intact inside the candidate -
-    that's a much more specific, much less coincidental signal. So:
-      1. primary score = the length of the longest of the query's own
-         digit runs (3+ digits) that appears verbatim as a substring of
-         the candidate's digit string
-      2. tiebreaker = a generic digits-only SequenceMatcher ratio, only
-         used to rank among candidates tied on (1) - e.g. when nothing
-         matched exactly, or several candidates share an equally long run
-    Returns (primary_score, ratio).
+    The primary signal for a real match is NOT overall character-
+    similarity (a generic ratio over the whole string is easily fooled -
+    two numbers that just happen to share a lot of common digits in
+    roughly the same positions can out-score the actual matching pair,
+    e.g. "...115585..." vs the true "...025585..." both partially
+    resemble a query containing "25585"). What actually identifies the
+    right row is whether one of the query's own COMPLETE digit runs (its
+    policy/endorsement number as a whole token, not a fragment) shows up
+    intact inside the candidate - that's a much more specific, much less
+    coincidental signal, and it's cheap to check (a plain substring test)
+    compared to a full SequenceMatcher ratio.
+
+    query_runs: the query's own qualifying 3+ digit runs, precomputed
+        ONCE per query by the caller (match_one), not re-derived via
+        regex on every candidate.
+    cand_digits: this candidate's own precomputed digits-only string (see
+        match_leader_file's register_digits_series) - also precomputed
+        rather than re-derived per candidate.
+
+    Returns best_run_len only. The SequenceMatcher ratio (the tiebreaker/
+    fallback signal) is scored separately, and only for whichever
+    candidates tie for the best run_len found across the WHOLE candidate
+    set - see match_one. A candidate with a shorter run_len can never
+    win regardless of its ratio, since acceptance/ranking always compares
+    (run_len, ratio) with run_len first, so there is nothing to gain by
+    also ratio-scoring it - this two-pass split is what makes matching
+    fast without changing the result: it's the exact same (run_len,
+    ratio) comparison as before, just skipping ratio computation for
+    candidates that can't possibly win it.
     """
-    cand_digits = _digits_only(candidate_value)
-    query_digits = _digits_only(query_value)
     best_run_len = 0
-    for run in re.findall(r"\d+", str(query_value)):
-        if len(run) >= 3 and len(run) > best_run_len and run in cand_digits:
+    for run in query_runs:
+        if len(run) > best_run_len and run in cand_digits:
             best_run_len = len(run)
-    ratio = SequenceMatcher(None, query_digits, cand_digits).ratio()
-    return best_run_len, ratio
+    return best_run_len
 
 
 MIN_RUN_MATCH = 4   # a fully-contained query run shorter than this is too common to trust alone
 MIN_RATIO_FALLBACK = 0.75  # only used to accept a match with no qualifying full-run overlap
 
 
-def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index):
+def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, leader_ref_series=None, igi_policy_series=None,
+              register_digits_series=None):
     """
     Try to match a single leader policy number against the register.
     Returns a dict: {"igi_policy_number", "matched_leader_ref", "score",
     "status"} where status is "Matched" or "Not Matched" (igi_policy_number
     is None when not matched).
+
+    leader_ref_series / igi_policy_series: optional precomputed
+    register_df[leader_ref_col] / register_df[igi_policy_col] Series (see
+    match_leader_file) - built on the fly from register_df if not
+    supplied, for standalone/one-off use.
+    register_digits_series: optional precomputed
+    register_df[leader_ref_col].map(_digits_only) Series (see
+    match_leader_file) - built on the fly if not supplied.
+
+    PERFORMANCE (verified via cProfile against a real-shaped 200,000-row
+    register / 15,000-row leader file):
+      1. Candidate lookups use precomputed SERIES via Series.at[idx], not
+         register_df.at[idx, col] on the full DataFrame. DataFrame.at[]
+         on a 2D frame goes through a much heavier path than Series.at[]
+         on a 1D column (column lookup, scalar "boxing", and a pandas
+         __finalize__ call that deep-copies frame metadata on every
+         single access) - repeating that once per CANDIDATE, for every
+         leader row, was one of the two dominant costs of matching
+         (measured at ~13s of a ~34s run on a 2,000-row subset, before
+         this fix). Roughly 5x faster for this "same column, many
+         different row indices" access pattern.
+      2. Scoring is now two passes: a cheap run_len-only check (plain
+         substring test, no SequenceMatcher) across every candidate
+         first, THEN a SequenceMatcher ratio computed only for whichever
+         candidates tie for the best run_len found - see
+         _score_candidate's own docstring for why this is provably the
+         same result as scoring every candidate fully, just faster. This
+         was the OTHER dominant cost (~18s of the same ~34s run, mostly
+         inside Python's own difflib module).
     """
+    if leader_ref_series is None:
+        leader_ref_series = register_df[leader_ref_col]
+    if igi_policy_series is None:
+        igi_policy_series = register_df[igi_policy_col]
+    if register_digits_series is None:
+        register_digits_series = leader_ref_series.astype(str).map(_digits_only)
+
     if pd.isna(nums_value) or str(nums_value).strip() == "":
         return {"igi_policy_number": None, "matched_leader_ref": None, "score": 0.0, "status": "Not Matched"}
 
@@ -611,20 +747,33 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index):
     if not candidates:
         return {"igi_policy_number": None, "matched_leader_ref": None, "score": 0.0, "status": "Not Matched"}
 
-    best_idx, best_run_len, best_ratio = None, 0, 0.0
+    query_digits = _digits_only(nums_value)
+    query_runs = [r for r in re.findall(r"\d+", str(nums_value)) if len(r) >= 3]
+
+    # Pass 1: cheap run_len-only scoring for every candidate.
+    best_run_len = 0
+    run_len_by_idx = {}
     for idx in candidates:
-        cand_val = register_df.at[idx, leader_ref_col]
-        run_len, ratio = _score_candidate(nums_value, cand_val)
-        if (run_len, ratio) > (best_run_len, best_ratio):
-            best_idx, best_run_len, best_ratio = idx, run_len, ratio
+        rl = _score_candidate(query_runs, register_digits_series.at[idx])
+        run_len_by_idx[idx] = rl
+        if rl > best_run_len:
+            best_run_len = rl
+    finalists = [idx for idx, rl in run_len_by_idx.items() if rl == best_run_len]
+
+    # Pass 2: SequenceMatcher ratio only for the tied-for-best finalists.
+    best_idx, best_ratio = None, 0.0
+    for idx in finalists:
+        ratio = SequenceMatcher(None, query_digits, register_digits_series.at[idx]).ratio()
+        if ratio > best_ratio:
+            best_idx, best_ratio = idx, ratio
 
     accepted = best_idx is not None and (
         best_run_len >= MIN_RUN_MATCH or best_ratio >= MIN_RATIO_FALLBACK
     )
     if accepted:
         return {
-            "igi_policy_number": register_df.at[best_idx, igi_policy_col],
-            "matched_leader_ref": register_df.at[best_idx, leader_ref_col],
+            "igi_policy_number": igi_policy_series.at[best_idx],
+            "matched_leader_ref": leader_ref_series.at[best_idx],
             "score": round(best_ratio, 3),
             "status": "Matched",
         }
@@ -645,6 +794,15 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
         non-GUI use.
     """
     index = build_match_index(register_df, leader_ref_col)
+    # Precompute these ONCE for the whole register, rather than letting
+    # match_one() default them per call - see match_one's own docstring
+    # for why passing the same Series in on every call (instead of
+    # DataFrame.at[idx, col], and instead of re-deriving digits-only
+    # strings via regex on every single candidate check) is the fix that
+    # actually matters here.
+    leader_ref_series = register_df[leader_ref_col]
+    igi_policy_series = register_df[igi_policy_col]
+    register_digits_series = leader_ref_series.astype(str).map(_digits_only)
 
     try:
         from perf_utils import RowProgress
@@ -654,7 +812,9 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
 
     igi_numbers, matched_refs, scores, statuses = [], [], [], []
     for i, val in enumerate(leader_df[nums_col], start=1):
-        result = match_one(val, register_df, leader_ref_col, igi_policy_col, index)
+        result = match_one(val, register_df, leader_ref_col, igi_policy_col, index,
+                            leader_ref_series=leader_ref_series, igi_policy_series=igi_policy_series,
+                            register_digits_series=register_digits_series)
         igi_numbers.append(result["igi_policy_number"])
         matched_refs.append(result["matched_leader_ref"])
         scores.append(result["score"])

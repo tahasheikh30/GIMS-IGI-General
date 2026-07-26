@@ -30,7 +30,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 try:
-    from perf_utils import style_budget_ok, RowProgress
+    from perf_utils import style_budget_ok, RowProgress, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     def style_budget_ok(n_rows):
         return True
@@ -44,6 +44,22 @@ except ImportError:  # perf_utils.py not yet added to this checkout, degrade gra
 
         def final(self, *a, **k):
             pass
+
+    class StyleIndexCache:
+        """Plain, always-correct fallback if perf_utils isn't available -
+        no caching, just sets each style attribute directly every time
+        (the original, slower-but-safe behavior)."""
+        def apply(self, cell, font=None, border=None, fill=None, alignment=None, number_format=None):
+            if font is not None:
+                cell.font = font
+            if border is not None:
+                cell.border = border
+            if fill is not None:
+                cell.fill = fill
+            if alignment is not None:
+                cell.alignment = alignment
+            if number_format is not None:
+                cell.number_format = number_format
 
 HEADER_FILL = PatternFill("solid", start_color="1F4E78", end_color="1F4E78")
 HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF")
@@ -137,11 +153,20 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
 
     n_matched = int((result_df["Match Status"] == "Matched").sum())
     n_total = len(result_df)
-    apply_style = style_budget_ok(n_total)
     status_col_idx = columns.index("Match Status")
 
     clean_df = _prepare_for_excel(result_df, date_cols)
     progress = RowProgress(report, total=n_total, label="rows written") if report else None
+    # StyleIndexCache (see its docstring in perf_utils.py) makes per-cell
+    # font/border/fill/number_format application cheap regardless of row
+    # count, by registering each distinct style combination once and
+    # reusing its internal openpyxl style index directly for every later
+    # cell needing the identical combination - this replaces the old
+    # style_budget_ok() row-count gate that used to skip font/fill
+    # entirely above 50,000 rows on MATCHED rows. The unmatched-row
+    # highlight was always applied regardless of file size (it's
+    # functional information, not decoration) and stays that way here.
+    style_cache = StyleIndexCache()
 
     for i, row in enumerate(clean_df.itertuples(index=False, name=None), start=2):
         is_unmatched = row[status_col_idx] != "Matched"
@@ -150,31 +175,24 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
             _write_text_safe(cell)
             if val is None:
                 continue
+            number_format = None
+            if col in date_cols:
+                number_format = "DD-MMM-YYYY"
+            elif col == "Match Score":
+                number_format = "0.000"
             # The unmatched-row highlight is functional information (it's
             # what flags a row for manual entry), never skipped regardless
-            # of file size. Everything else is cosmetic and respects the
-            # style budget.
+            # of file size.
             if is_unmatched:
-                cell.border = BORDER
-                cell.font = UNMATCHED_FONT
-                cell.fill = UNMATCHED_FILL
-            elif apply_style:
-                cell.border = BORDER
-                cell.font = BODY_FONT
-                if col in NEW_COLUMNS:
-                    cell.fill = MATCHED_NEW_COL_FILL
-            if col in date_cols:
-                cell.number_format = "DD-MMM-YYYY"
-            elif col == "Match Score":
-                cell.number_format = "0.000"
+                style_cache.apply(cell, font=UNMATCHED_FONT, border=BORDER, fill=UNMATCHED_FILL, number_format=number_format)
+            else:
+                fill = MATCHED_NEW_COL_FILL if col in NEW_COLUMNS else None
+                style_cache.apply(cell, font=BODY_FONT, border=BORDER, fill=fill, number_format=number_format)
         if progress:
             progress.maybe(i - 1)
 
     if progress:
         progress.final()
-    if not apply_style and report:
-        report(f"  Note: {n_total:,} rows exceeds the styling budget - per-cell font/fill on MATCHED rows "
-               f"was skipped for speed (unmatched-row highlighting, values, and number formats are unaffected).")
 
     for j, col in enumerate(columns, start=1):
         width = 26 if col in NEW_COLUMNS else max(12, min(30, len(str(col)) + 4))
