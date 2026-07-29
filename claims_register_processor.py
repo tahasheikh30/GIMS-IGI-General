@@ -385,7 +385,7 @@ def load_claim_intimation_file(filepath, sheet_name=None, report=None):
     was matched for "Policy/PMD Number".
     """
     alias_lookup = _build_alias_lookup(CLAIM_ALIASES)
-    xls = _read_workbook_any_engine(filepath)
+    xls, _resolved_filepath = _read_workbook_any_engine(filepath)
 
     if sheet_name is None:
         sheet_name, header_row = _pick_best_sheet(xls, alias_lookup)
@@ -487,7 +487,7 @@ def load_premium_register_file(filepath, sheet_name=None, report=None):
         as None.
     """
     alias_lookup = _build_alias_lookup(REGISTER_ALIASES)
-    xls = _read_workbook_any_engine(filepath)
+    xls, _resolved_filepath = _read_workbook_any_engine(filepath)
 
     if sheet_name is None:
         sheet_name, header_row = _pick_best_sheet(xls, alias_lookup)
@@ -866,19 +866,43 @@ def match_claims(claims_df, pmd_col, register_df, ins_col, doc_col, base_doc_col
 OFC_BUCKET_LABEL = "OFC"
 
 
-def _bucket_series(matched_df, company_col="Coinsurer Name"):
-    is_ofc = matched_df[company_col].astype(str).str.contains("ofc", case=False, na=False, regex=False)
-    return matched_df[company_col].where(~is_ofc, OFC_BUCKET_LABEL)
+def _bucket_series(matched_df, company_col="Coinsurer Name", alias_mapping=None):
+    """The bucket label for every row: the company's own name, remapped
+    to its canonical form first if an alias mapping resolves it (see
+    company_alias_resolver.py - this is what merges e.g. "AIC Adamjee
+    House Branch" and "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH" under
+    one real company instead of each getting its own output file), then
+    pooled into the shared "OFC" bucket if the (possibly now-canonical)
+    name contains "OFC". A name with no mapping is used completely
+    unchanged - the safe default from company_alias_resolver.apply_alias."""
+    company_series = matched_df[company_col]
+    if alias_mapping:
+        import company_alias_resolver as car
+        company_series = company_series.map(lambda v: car.apply_alias(v, alias_mapping))
+    is_ofc = company_series.astype(str).str.contains("ofc", case=False, na=False, regex=False)
+    return company_series.where(~is_ofc, OFC_BUCKET_LABEL)
 
 
 def build_coinsurer_buckets(matched_df, company_col="Coinsurer Name",
                              insured_col=None, paid_col="Coinsurer Share of Claim Paid",
-                             os_col="Coinsurer Share of Claim O/S"):
+                             os_col="Coinsurer Share of Claim O/S", alias_mapping=None):
     """
     Group matched_df (one row per claim-coinsurer pair) into one bucket
     per output workbook - one per coinsurer, with every company whose
     name contains "OFC" pooled into a single shared "OFC" bucket, same
     rationale/pattern as receivable_processor.build_company_groups.
+
+    alias_mapping: optional {normalized_raw_name: canonical_company} dict
+        (see company_alias_resolver.load_alias_mapping_file) - when given,
+        every row's Coinsurer Name is remapped to its canonical company
+        BEFORE bucketing, so branch-name variants of the same real
+        company (confirmed real case: "AIC Adamjee House Branch",
+        "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH", etc.) land in ONE
+        bucket/output file instead of each getting its own. A raw name
+        with no confident mapping is left completely unchanged - it
+        keeps behaving exactly like today (its own separate bucket).
+        Leave as None (the default) to skip this entirely - existing
+        callers are unaffected.
 
     Returns (groups, totals, breakdowns):
       groups: {bucket_label: claims_df} - every row belonging to that
@@ -903,7 +927,7 @@ def build_coinsurer_buckets(matched_df, company_col="Coinsurer Name",
     df = matched_df.copy()
     if len(df) == 0:
         return {}, {}, {}
-    df["_bucket"] = _bucket_series(df, company_col)
+    df["_bucket"] = _bucket_series(df, company_col, alias_mapping=alias_mapping)
     df["_paid_numeric"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0) if paid_col in df.columns else 0.0
     df["_os_numeric"] = pd.to_numeric(df[os_col], errors="coerce").fillna(0) if os_col in df.columns else 0.0
 

@@ -510,6 +510,13 @@ that keeps matching fast even against a 200,000+ row register.
      produced across how many coinsurer files, and — for anything that
      couldn't be matched — a breakdown of why (no matching policy found,
      or the matched policy has no coinsurer on it at all, i.e. 100% IGI).
+   - **Company Aliases File (optional)** — merges branch-name variants of
+     the same coinsurer (real data example: "AIC Adamjee House Branch",
+     "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH", and "ADAMJEE INSURANCE
+     COMPANY LTD" are the same company recorded three different ways)
+     into one output file and one email instead of one per branch. See
+     **Company Aliases**, below, for how to generate and use this file —
+     it's shared with the Premium/Claims Email Automation module.
 2. **Insurance Company Files** — one row per coinsurer (plus a shared
    pooled "OFC" row for every coinsurer whose name contains "OFC"), with
    its claim count and total Share of Claim Paid / O/S. Click **Generate
@@ -526,7 +533,9 @@ that keeps matching fast even against a 200,000+ row register.
 3. **Review & Send Emails** — draft, preview/edit, and send a claims
    recovery-statement email per coinsurer file, with the same shared
    signature box, dry-run toggle, and per-row Send/Save Edits controls as
-   every other GIMS email workflow.
+   every other GIMS email workflow. The "To" field accepts multiple
+   addresses separated by a semicolon (Outlook sends to all of them) —
+   see **Multiple recipients per company**, below.
 
 **Performance note:** both matching and Excel generation for this module
 were specifically profiled and optimized against real, large production
@@ -537,7 +546,65 @@ count is still bound by openpyxl's own per-cell cost once its data sheet
 runs into the millions of cells, since that sheet's workbook also needs
 real embedded charts).
 
+## Company Aliases (merging branch-name variants) and multiple email recipients
+
+Both `claims_register_processor.py` (Claims Register) and
+`receivable_processor.py` (Premium/Claims Email Automation) group source
+rows by a company/coinsurer name field that real data records
+inconsistently — the same real company shows up under dozens of literal
+strings, because branch offices and window takaful units are entered
+separately rather than under one consistent name (confirmed against a
+real 27,976-claim file: 98 distinct names for roughly 25 actual
+companies). `company_alias_resolver.py` is the shared module behind both
+features described below.
+
+### Merging branch-name variants under one real company
+
+1. Run **Load & Match Claims** (Claims Register) or **Analyze / Build
+   Groups** (Premium/Claims Email Automation) at least once first.
+2. Click **Suggest Aliases...** next to it. This scans every distinct
+   raw name the run actually found and tries to match each one against
+   the Company Name list in your Email Lookup File, using (in order of
+   confidence): an exact match; a shared *distinctive* brand word (e.g.
+   both "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH" and "AIC Adamjee
+   House Branch" contain "ADAMJEE", and no other company in the list
+   does); a company's own likely acronym (e.g. "AIC" = Adamjee Insurance
+   **C**ompany, "JGI" = **J**ubilee **G**eneral **I**nsurance) — but only
+   when that acronym uniquely identifies one company; and finally a
+   close-text-similarity check for typos and minor formatting
+   differences. It writes an editable Excel file with one row per raw
+   name — the "Canonical Company" column is **pre-filled only where the
+   match is confident**; anything ambiguous is left **blank and
+   highlighted amber**, with a plain-English "Match Reason" explaining
+   why (e.g. "acronym 'AIC' is ambiguous — could be any of: Adamjee,
+   Alfalah, Alpha, Asia Insurance Company"). Nothing is ever merged on a
+   guess — a name with no confident match, or left blank by you, keeps
+   behaving exactly like today: its own separate file/email.
+3. Open the generated file, review it, and fill in or correct
+   "Canonical Company" for any row you want merged. Save it.
+4. Browse to that saved file in the **Company Aliases File** field, and
+   run matching/analysis again. Every raw name mapped in the file now
+   lands in one combined output file (and one combined email) under its
+   canonical company name instead of its own separate one.
+
+This is a genuinely safe operation to re-run: financial totals and claim/
+row counts are unaffected by merging (only *which output file* a row
+lands in changes) — nothing is added, dropped, or double-counted.
+
+### Multiple recipients per company
+
+The Email Lookup File (`Co-insurance_Companies_List.xlsx`-style) can list
+**more than one email address per company**, each on its own row directly
+below that company's name — this is parsed automatically, cleaned (a
+`Name <email>` wrapper, or a stray trailing `>` or `;` left over from a
+copy-pasted email, is stripped down to just the address), and every
+address for that company is sent to as a combined "To" list. You can also
+just type multiple addresses straight into the "To" field on the Review &
+Send Emails tab yourself — separate them with a semicolon and Outlook
+will send to all of them.
+
 ## Customizing the email template
+
 
 Edit the `DEFAULT_TEMPLATE` dict in `email_generator.py`, or save additional
 templates at runtime (the `save_template()` function is ready to be wired to a

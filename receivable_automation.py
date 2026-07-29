@@ -27,28 +27,38 @@ def load_email_lookup_from_file(filepath):
     Load the recipient-email lookup from a SEPARATE lookup file (.xlsx or
     .csv) that the user browses to on tab 1 - keyed by Company (the
     co-insurance partner), e.g. "ADAMJEE INSURANCE COMPANY LTD" -> its
-    Finance contact email(s). This mirrors the Outstanding Premium
-    module's own email-lookup-file pattern (see app.py's load_data /
-    data_processor), just keyed by Company instead of Client, since the
-    master transaction workbook itself only has a single sheet and no
-    longer carries its own address-book sheet.
+    Finance contact email(s).
 
-    Expects a plain header row at the top of the file: a name/company
-    column (matched by "company", "client", or "participant" appearing in
-    the header text - falls back to the first column if none match), an
-    "Email" column (matched by "email" in the header text), and an
-    optional POC/contact column (matched by "poc", "contact", "attn",
-    "attention", "recipient name", or "contact person").
+    Tries company_alias_resolver.load_canonical_companies_and_emails()
+    FIRST - this handles the real, confirmed file shape (title/banner
+    rows above the real header, Company Name only on the first row of
+    each company's own block, ONE EMAIL ADDRESS PER ROW rather than
+    packed into a single cell, addresses often wrapped as "Name
+    <address>" or with a stray trailing ">"/";" left over from a
+    copy-pasted email header) and supports MULTIPLE RECIPIENTS per
+    company (every valid email found for that company is kept, joined
+    with ";" - Outlook's To field accepts this natively).
 
-    A company can have several emails in one cell, comma/semicolon
-    separated (e.g. "a@x.com, b@x.com") - these are preserved and passed
-    to Outlook as a semicolon-separated To list.
+    Falls back to the original simple "one row per company, single
+    company-name column + single email column (comma/semicolon-separated
+    for multiple addresses in one cell)" parser if the file doesn't match
+    that shape - so an older-style lookup file someone already has still
+    works unchanged.
 
     Returns (email_lookup, poc_lookup) - both dicts keyed by normalized
-    (upper/stripped) company name, matching receivable_email.py's lookup
-    convention.
+    (upper/stripped) company name, matching receivable_email.py's /
+    claims_register_email.py's lookup convention.
     """
     ext = os.path.splitext(filepath)[1].lower()
+    if ext != ".csv":
+        try:
+            import company_alias_resolver as car
+            _companies, email_lookup, poc_lookup = car.load_canonical_companies_and_emails(filepath)
+            if email_lookup:
+                return email_lookup, poc_lookup
+        except Exception:
+            pass  # not shaped like the real multi-row file - fall through to the simple parser below
+
     if ext == ".csv":
         df = pd.read_csv(filepath)
     else:
