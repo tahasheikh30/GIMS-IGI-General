@@ -37,6 +37,8 @@ import claims_register_processor as crp
 import claims_register_generator as crg
 import claims_register_email as cre
 import claims_register_run_log as crlog
+import claims_check_processor as ccp
+import claims_check_generator as ccg
 import perf_utils
 import bank_statement_processor as bsp
 import bank_position_register as bpr
@@ -147,6 +149,10 @@ class BalanceApp(tk.Tk):
         self.premreg_leader_file = ""
         self.premreg_register_file = ""
         self.premreg_result_df = None
+
+        self.claimscheck_leader_file = ""
+        self.claimscheck_register_file = ""
+        self.claimscheck_result_df = None
 
         self.claims_intimation_file = ""
         self.claims_premium_register_file = ""
@@ -524,6 +530,7 @@ class BalanceApp(tk.Tk):
                 # unchanged - only where it sits in the sidebar changed.
                 (None, "Claims", [
                     ("coinsurance_claims_register", "Claims Intimation"),
+                    ("coinsurance_claims_check", "Claims Check"),
                 ]),
             ],
             before=bottom_anchor,
@@ -819,6 +826,11 @@ class BalanceApp(tk.Tk):
         claims_register_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["coinsurance_claims_register"] = claims_register_page
         self._build_claims_register_page(claims_register_page)
+
+        claims_check_page = ttk.Frame(container)
+        claims_check_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["coinsurance_claims_check"] = claims_check_page
+        self._build_claims_check_page(claims_check_page)
 
         renewal_page = self._build_placeholder_page(container, "Renewal")
         renewal_page.grid(row=0, column=0, sticky="nsew")
@@ -2243,6 +2255,238 @@ class BalanceApp(tk.Tk):
             self, worker,
             on_progress=lambda msg: self._log_premreg(msg),
             on_progress_value=self.premreg_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    # ---------- Coinsurance > Claims > Claims Check module ----------
+    def _build_claims_check_page(self, parent):
+        """Claims Check (Coinsurance) - checks whether a co-insurance
+        leader's own claims file references a policy that actually
+        exists in IGI's own Premium Register, by matching the claim's
+        own Policy/PMD # against the register's Base Doc No. (falling
+        back to Document No. as a secondary column). Same single-page,
+        numbered-card layout as Policy Check, since this is its
+        claims-side counterpart and does the same kind of job."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        PAD_X = 20
+
+        # --- Page header ---
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Claims Check", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        ttk.Label(header, text="Check whether a co-insurance leader's own claims file references a policy "
+                                "that actually exists in our own books, by matching each claim's Policy/PMD # "
+                                "against IGI's Premium Register.",
+                  foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
+
+        info_badge = tk.Frame(header, bg=self.COLOR_ACCENT_SOFT)
+        info_badge.pack(anchor="w")
+        tk.Frame(info_badge, bg=self.COLOR_GOLD, width=3).pack(side="left", fill="y")
+        tk.Label(info_badge, text="Same fuzzy digit-run matching engine as Claims Intimation \u2014 unmatched claims are flagged red for manual review, not guessed",
+                 bg=self.COLOR_ACCENT_SOFT, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
+                 padx=14, pady=8).pack(side="left")
+
+        # --- Section 1: Input files ---
+        s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
+        claimscheck_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
+                            "the file has banner/title rows above it. If the leader's file has several sheets "
+                            "(e.g. a settlement workbook with separate tabs for Premium Payable, IGI Claims / "
+                            "Claim Rec, monthly snapshots, etc.), the right sheet is found automatically \u2014 by "
+                            "its name first, falling back to whichever sheet's own columns look like a claims "
+                            "file if no sheet name is a clear match.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        claimscheck_s1_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(claimscheck_s1_note, s1, side_padding=10)
+
+        leader_row = self._premreg_file_row(
+            s1, "Leader's Claims File",
+            "The co-insurance leader's own claims sheet (e.g. \"IGI Claims\") \u2014 their Policy/PMD # column is matched against our Base Doc No. Auto-detects the claims sheet if the file has multiple tabs.",
+        )
+        self.claimscheck_leader_icon, self.claimscheck_leader_name_var = leader_row[0], leader_row[1]
+        self._make_pill_button(leader_row[2], "Browse...", self._browse_claimscheck_leader_file,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+
+        register_row = self._premreg_file_row(
+            s1, "IGI Premium Register",
+            "Our own register \u2014 carries the original policy (Base Doc No.) every later transaction, including a claim, is issued/renewed from.",
+        )
+        self.claimscheck_register_icon, self.claimscheck_register_name_var = register_row[0], register_row[1]
+        self._make_pill_button(register_row[2], "Browse...", self._browse_claimscheck_register_file,
+                                bg=self.COLOR_ACCENT).pack(side="left")
+
+        # --- Section 2: Run matching ---
+        s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
+        claimscheck_s2_note = ttk.Label(s2, text="Every original column from the leader's claims file is preserved, plus the "
+                            "matched IGI Base Doc No., a match score, and a Matched/Not Matched status.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        claimscheck_s2_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(claimscheck_s2_note, s2, side_padding=10)
+        run_btn = self._make_action_button(s2, "Run Matching", self._run_claims_check_match, kind="accent")
+        run_btn.pack(anchor="w")
+        self.claimscheck_summary_var = tk.StringVar(value="")
+        ttk.Label(s2, textvariable=self.claimscheck_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 0))
+
+        self.claimscheck_progress = perf_utils.ProgressBarPanel(s2)
+        self.claimscheck_progress.frame.pack(fill="x", pady=(10, 0))
+
+        # --- Section 3: Log ---
+        s3 = self._loss_section_card(body, "3", "Processing Log", PAD_X, expand_bottom=True)
+        self.claimscheck_log = scrolledtext.ScrolledText(s3, height=10, font=("Consolas", 9),
+                                                           relief="solid", borderwidth=1)
+        self.claimscheck_log.pack(fill="both", expand=True)
+
+    def _browse_claimscheck_leader_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.claimscheck_leader_file = path
+            self.claimscheck_leader_name_var.set(os.path.basename(path))
+            self.claimscheck_leader_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _browse_claimscheck_register_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.claimscheck_register_file = path
+            self.claimscheck_register_name_var.set(os.path.basename(path))
+            self.claimscheck_register_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _log_claimscheck(self, msg):
+        self.claimscheck_log.insert("end", str(msg) + "\n")
+        self.claimscheck_log.see("end")
+
+    def _run_claims_check_match(self):
+        leader_file = getattr(self, "claimscheck_leader_file", "")
+        register_file = getattr(self, "claimscheck_register_file", "")
+        if not leader_file:
+            messagebox.showerror("No leader file selected", "Browse to the leader's claims file first.")
+            return
+        if not register_file:
+            messagebox.showerror("No register file selected", "Browse to IGI's Premium Register file first.")
+            return
+        if not os.path.exists(leader_file):
+            messagebox.showerror("File not found", f"Could not find:\n{leader_file}")
+            return
+        if not os.path.exists(register_file):
+            messagebox.showerror("File not found", f"Could not find:\n{register_file}")
+            return
+
+        self.claimscheck_log.delete("1.0", "end")
+        self.claimscheck_summary_var.set("")
+        self._log_claimscheck(f"Leader claims file: {os.path.basename(leader_file)}")
+        self._log_claimscheck(f"Register file:      {os.path.basename(register_file)}\n")
+        self.status_var.set("Checking claims against the Premium Register...")
+        self.claimscheck_progress.start(total=None, text="Loading files...")
+
+        def worker(report):
+            report("Loading leader's claims file...")
+            leader_df, pmd_col = ccp.load_leader_claims_file(leader_file)
+            report(f"  {len(leader_df):,} row(s) loaded. Policy/PMD # column detected as '{pmd_col}'.")
+
+            report("Loading IGI Premium Register...")
+            register_df, doc_col, base_doc_col = ccp.load_register_file(register_file)
+            report(f"  {len(register_df):,} row(s) loaded. Base Doc No column='{doc_col}'"
+                   + (f", Document No column='{base_doc_col}'." if base_doc_col else " (no Document No column found - matching against Base Doc No only)."))
+
+            report(f"\nChecking {len(leader_df):,} claim(s) against {len(register_df):,} register row(s)...")
+            report.progress(0, len(leader_df), text=f"Checking 0 / {len(leader_df):,} claim(s)")
+            result = ccp.match_leader_claims_file(leader_df, pmd_col, register_df, doc_col, base_doc_col, report=report)
+            return result
+
+        def on_done(result):
+            self.claimscheck_result_df = result
+            matched = int((result["Match Status"] == "Matched").sum())
+            total = len(result)
+            pct = (matched / total) if total else 0
+            self._log_claimscheck(f"\nMatched {matched} of {total} ({pct:.1%}).")
+            if matched < total:
+                self._log_claimscheck(f"{total - matched} claim(s) unmatched - these will be highlighted red in "
+                                       f"the output for manual review (no policy found in our own Premium Register).")
+
+            self.claimscheck_summary_var.set(f"Matched {matched} / {total} ({pct:.1%})")
+            self.claimscheck_progress.finish(f"Matched {matched} / {total} ({pct:.1%}).")
+            self.status_var.set(f"Claims Check: matched {matched}/{total} ({pct:.1%}).")
+
+            default_name = ccg.build_output_filename(leader_file)
+            default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Claims Check"))
+            output_path = filedialog.asksaveasfilename(
+                title="Save Claims Check Results As",
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+                initialdir=default_dir,
+                initialfile=default_name,
+            )
+            if not output_path:
+                self._log_claimscheck("\nSave cancelled - results were not written to a file (still available above).")
+                return
+            self._save_claimscheck_output(result, output_path, leader_file, matched, total, pct)
+
+        def on_error(exc):
+            self.claimscheck_progress.finish("Matching failed - see the Processing Log for details.")
+            self._log_claimscheck(f"\nERROR: {exc}")
+            messagebox.showerror("Matching failed", str(exc))
+            self.status_var.set("Claims Check matching failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_claimscheck(msg),
+            on_progress_value=self.claimscheck_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _save_claimscheck_output(self, result, output_path, leader_file, matched, total, pct):
+        """Writing the highlighted output workbook is itself a per-row
+        openpyxl write (see claims_check_generator.build_match_output) -
+        kept on a second background pass so a huge result doesn't freeze
+        the save step either."""
+        self.claimscheck_progress.start(total=len(result), text=f"Writing 0 / {len(result):,} row(s)")
+
+        def worker(report):
+            report(f"Writing {len(result):,} row(s) to {os.path.basename(output_path)}...")
+            ccg.build_match_output(result, output_path, leader_source_filename=leader_file, report=report)
+
+        def on_done(_):
+            self.claimscheck_progress.finish(f"Saved: {os.path.basename(output_path)}")
+            self._log_claimscheck(f"\nSaved: {output_path}")
+            self.status_var.set(f"Claims Check saved: {os.path.basename(output_path)}")
+            messagebox.showinfo("Done", f"Matched {matched} of {total} ({pct:.1%}).\n\nSaved to:\n{output_path}")
+
+        def on_error(exc):
+            self.claimscheck_progress.finish("Save failed - see the Processing Log for details.")
+            self._log_claimscheck(f"\nERROR writing output file: {exc}")
+            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{exc}")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_claimscheck(msg),
+            on_progress_value=self.claimscheck_progress.update,
             on_done=on_done, on_error=on_error,
         )
 

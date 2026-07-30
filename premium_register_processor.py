@@ -381,6 +381,35 @@ def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hin
     try:
         from perf_utils import fast_read_excel_rows
         rows, _n = fast_read_excel_rows(resolved_filepath, sheet_name)
+        # Re-locate the header row directly against THESE rows, rather
+        # than blindly reusing the row index found by the separate
+        # xlrd/pandas preview scan above.
+        #
+        # CONFIRMED REAL BUG this guards against: for a real legacy .xls
+        # file with a fully-blank leading row (a Crystal Reports export
+        # quirk - a title/banner row so empty even the row itself is
+        # blank), xlrd (used for the preview scan above) and
+        # python-calamine (perf_utils.fast_read_excel_rows' preferred
+        # reader, used for this full read) disagreed on whether that
+        # blank row exists at all: xlrd reported it (902 rows), calamine
+        # silently dropped it (901 rows) - a genuine cross-library
+        # discrepancy, not a bug in either reader's row COUNT/CONTENT
+        # otherwise. Reusing the xlrd-side header_row index against
+        # calamine's own, one-row-shorter row list then landed one row
+        # too early: the first real DATA row got read as if it were the
+        # header, and every subsequent row's "Base Doc No"/"Leader Ref
+        # Number"/etc. value silently paired with the WRONG row's other
+        # columns from then on - wrong, but with no error raised, so it
+        # would have gone completely unnoticed. Re-scanning the actual
+        # rows about to be used removes any dependency on the two readers
+        # agreeing on row alignment; if it can't find a header (e.g. a
+        # very short/unusual sheet), it safely falls back to the
+        # xlrd-side header_row found above rather than raising.
+        preview_from_rows = pd.DataFrame(rows[:25])
+        fast_header_row, _fast_score = find_header_row(preview_from_rows, alias_lookup, max_scan=25,
+                                                         min_score=1, return_score=True)
+        if fast_header_row is not None:
+            header_row = fast_header_row
         columns = _dedupe_columns(list(rows[header_row]))
         data = pd.DataFrame(rows[header_row + 1:], columns=columns)
 
