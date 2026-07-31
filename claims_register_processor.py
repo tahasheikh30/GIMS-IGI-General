@@ -738,10 +738,29 @@ def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, lead
     if len(coinsurer_rows) == 0:
         return {"status": "No Coinsurer", "policy_doc_no": policy_doc_no, "match_score": round(best_digit_ratio, 3), "coinsurers": []}
 
-    coinsurers = [
-        {"company": str(r[ins_col]).strip(), "share_pct": pd.to_numeric(r[share_col], errors="coerce")}
-        for _, r in coinsurer_rows.iterrows()
-    ]
+    # DEDUPE BY COMPANY NAME: a real Premium Register can carry more than
+    # one row for the SAME coinsurer under the SAME Base Doc No - e.g. a
+    # separate row per endorsement/transaction on that policy, all
+    # sharing the same "Ins" company and (normally) the same "Share" - a
+    # confirmed real case that was previously fanning a single claim out
+    # into one duplicate coinsurer entry PER register row for that
+    # company (e.g. 4 near-identical rows in the output for a company
+    # that had 4 transaction rows on the policy), rather than exactly one
+    # entry per distinct coinsurer. Grouped here by the normalized
+    # (stripped/uppercased) company name, keeping only the FIRST row seen
+    # per company - Share % is a property of the coinsurer's stake in the
+    # policy, not of any one transaction row, so it should never be
+    # multiplied just because the register happens to log that company
+    # more than once for the same policy.
+    seen_companies = set()
+    coinsurers = []
+    for _, r in coinsurer_rows.iterrows():
+        company = str(r[ins_col]).strip()
+        key = company.upper()
+        if key in seen_companies:
+            continue
+        seen_companies.add(key)
+        coinsurers.append({"company": company, "share_pct": pd.to_numeric(r[share_col], errors="coerce")})
     return {"status": "Matched", "policy_doc_no": policy_doc_no, "match_score": round(best_digit_ratio, 3), "coinsurers": coinsurers}
 
 
