@@ -583,6 +583,298 @@ def apply_alias(raw_name, mapping):
     return mapping.get(normalize_name(raw_name), raw_name)
 
 
+# ---------------------------------------------------------------------------
+# Self-merge: the "checkbox" workflow.
+#
+# WHY THIS EXISTS: the workflow above (generate_alias_suggestions_file ->
+# review -> load_alias_mapping_file) requires a real Email Lookup File
+# with a canonical company list, and a manual review-file round trip,
+# BEFORE a single report can be generated. Confirmed real case that
+# motivated this: six real Claims Register output files
+# (ATLAS_IC_Bank_Road_Rawalpindi, ATLAS_INSURANCE_COMPANY,
+# ATLAS_INSURANCE_FAISALABAD_BRANCH,
+# ATLAS_INSURANCE_GENERAL_TAKAFUL_MAIN_BOULEVARD_GULBERG_BRANCH,
+# ATLAS_INSURANCE_LTD, ATLAS_INSURANCE_LTD_ISLAMABAD_BRANCH) were all the
+# same real company, each with its own "Coinsurer Name" and its own
+# workbook, because no alias file had been built for that run at all.
+#
+# self_merge_bucket_labels() below clusters the bucket labels a run
+# ACTUALLY PRODUCED against each other - no external file required - using
+# the exact same distinctive-word / acronym signals
+# suggest_canonical_company() already uses against an external list, just
+# applied name-vs-name within this one batch. If an Email Lookup File
+# happens to be loaded too, each confidently-formed cluster is then
+# cross-checked against its real canonical company list and renamed to
+# that if it agrees - "self-merge first, then also apply the canonical
+# names if provided". Anything genuinely ambiguous is never silently
+# merged or silently left apart without telling anyone - it's collected
+# into ambiguous_groups for write_ambiguous_merge_review_file() to surface,
+# same never-merge-on-a-guess principle as the rest of this module.
+# ---------------------------------------------------------------------------
+
+def self_merge_bucket_labels(bucket_labels, weight_by=None, canonical_companies=None):
+    """
+    Cluster bucket_labels (the coinsurer/company names actually present
+    in ONE run's output) against each other. No external canonical list
+    is required for the basic case - two labels sharing a non-generic,
+    4+ letter word (e.g. "ATLAS" in both "ATLAS INSURANCE COMPANY" and
+    "ATLAS INSURANCE LTD") are clustered together directly, the same
+    signal/threshold suggest_canonical_company() already trusts at 0.9
+    confidence against an external list.
+
+    weight_by: optional {label: number} - typically that bucket's own
+        claim/row count in this run. Each cluster's representative name
+        is whichever member has the HIGHEST weight (ties broken
+        alphabetically) - "whichever variant has the most claims/rows".
+        Falls back to alphabetically-first per cluster if not given.
+
+    canonical_companies: optional list from
+        load_canonical_companies_and_emails() (i.e. only available if an
+        Email Lookup File is loaded). Once a cluster is formed by
+        self-merging, every member is ALSO checked against this real
+        list via suggest_canonical_company(); if every confident hit
+        among the cluster's members agrees on ONE real canonical
+        company, that name is used as the representative instead of the
+        in-run heuristic. If members disagree about which canonical
+        company they belong to, the cluster is still self-merged (the
+        in-run signal, e.g. shared "ATLAS", is still solid) but is ALSO
+        added to ambiguous_groups so the naming conflict gets reviewed
+        rather than silently picking one.
+
+    Returns (merge_map, ambiguous_groups):
+      merge_map: {label: representative_label} - EVERY input label maps
+          to something (itself, if it never merged with anything).
+      ambiguous_groups: [{"labels": [...], "reason": str}, ...] - groups
+          of labels sharing some signal (usually a shared/prefixed
+          acronym, or a canonical-name disagreement) that could NOT be
+          safely auto-resolved. Labels involved in a pure acronym
+          ambiguity (no distinctive-word cluster already formed) are
+          left mapped to THEMSELVES in merge_map - i.e. NOT merged -
+          until a person resolves it.
+    """
+    labels = list(dict.fromkeys(str(l) for l in bucket_labels if str(l).strip()))
+    weight_by = weight_by or {}
+    parent = {l: l for l in labels}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # --- Pass 1: cluster on a shared distinctive brand word -----------
+    word_index = {}
+    for l in labels:
+        for w in _distinctive_words(l):
+            word_index.setdefault(w, set()).add(l)
+
+    word_merged = set()  # labels that joined a cluster via a word (vs. still solo)
+    for word, owners in word_index.items():
+        if len(owners) < 2:
+            continue
+        owners_sorted = sorted(owners)
+        for other in owners_sorted[1:]:
+            union(owners_sorted[0], other)
+        word_merged.update(owners_sorted)
+
+    # --- Pass 2: a bare/leading acronym-shaped label (e.g. a raw "AIC"
+    # entry with no other distinctive word of its own) matched against
+    # every OTHER label's own generated acronym - only auto-merged if it
+    # points at exactly one existing cluster; flagged ambiguous otherwise.
+    acronym_map = {}
+    for l in labels:
+        acronym_map.setdefault(_generate_acronym(l), []).append(l)
+
+    ambiguous_groups = []
+    for l in labels:
+        leading = raw_words_ordered_first_token(l)
+        if not leading:
+            continue
+        candidates = set()
+        for full_acr, owners in acronym_map.items():
+            if full_acr == leading or (len(leading) >= 2 and full_acr.startswith(leading) and full_acr != leading):
+                candidates.update(o for o in owners if o != l)
+        if not candidates:
+            continue
+        my_root = find(l)
+        other_roots = {find(c) for c in candidates} - {my_root}
+        if not other_roots:
+            continue  # already in the same cluster as every candidate - nothing to do
+        if len(other_roots) == 1 and l not in word_merged:
+            union(l, next(iter(candidates)))
+        else:
+            ambiguous_groups.append({
+                "labels": sorted({l} | candidates),
+                "reason": f"'{l}' is acronym-shaped and ambiguous among: {', '.join(sorted(candidates))} - needs manual review",
+            })
+
+    # --- Build cluster membership, pick each cluster's representative --
+    clusters = {}
+    for l in labels:
+        clusters.setdefault(find(l), []).append(l)
+
+    merge_map = {}
+    for members in clusters.values():
+        if len(members) == 1:
+            merge_map[members[0]] = members[0]
+            continue
+
+        representative = sorted(members, key=lambda m: (-weight_by.get(m, 0), m))[0]
+
+        if canonical_companies:
+            suggestions = set()
+            for m in members:
+                name, conf, _reason = suggest_canonical_company(m, canonical_companies)
+                if name and conf >= HIGH_CONFIDENCE_THRESHOLD:
+                    suggestions.add(name)
+            if len(suggestions) == 1:
+                representative = next(iter(suggestions))
+            elif len(suggestions) > 1:
+                ambiguous_groups.append({
+                    "labels": sorted(members),
+                    "reason": (f"self-merged as one company (shared name signal), but the canonical "
+                               f"company list disagrees on which one - could be: {', '.join(sorted(suggestions))}"),
+                })
+
+        for m in members:
+            merge_map[m] = representative
+
+    return merge_map, ambiguous_groups
+
+
+def merge_buckets(groups, totals, breakdowns, merge_map, combine_group):
+    """
+    Combine existing output buckets according to merge_map
+    ({old_label: new_label}, e.g. from self_merge_bucket_labels() or a
+    loaded Company Aliases file) into fewer, merged buckets - the actual
+    "give the data in one file" step.
+
+    combine_group(list_of_group_values, new_label) -> merged_group_value:
+        caller-supplied, since Claims Register's group value is a single
+        DataFrame and Receivable's is a dict of two DataFrames
+        ({"premium_rows", "claims_rows"}) - this function stays agnostic
+        to that shape. The caller's combine_group is expected to also
+        re-tag whatever column holds the company/coinsurer name (e.g.
+        "Coinsurer Name" or "Company") to new_label on every row, so the
+        merged workbook's own data sheet reads consistently rather than
+        mixing several raw names together.
+
+    totals: numeric values are summed across every bucket folded into a
+        merged label. NOTE: a "num_claims"/"num_clients" style count is
+        summed too, which double-counts anything (e.g. one client) that
+        genuinely appeared under more than one of the raw variants being
+        merged - a rare edge case, disclosed rather than silently
+        "fixed" by a more complex (and slower) recount, since the
+        person-facing row-level breakdown IS still deduplicated (below).
+
+    breakdowns: per-insured/per-client tables are concatenated then
+        re-aggregated by name (first column), so a client/insured that
+        shows up under two different raw company variants folds into one
+        row instead of two, with its own numeric columns summed and
+        re-sorted by the first numeric column, largest first.
+
+    Returns (merged_groups, merged_totals, merged_breakdowns) - same
+    shapes as the inputs, just with merge_map's clusters combined under
+    their representative label.
+    """
+    from collections import defaultdict
+    clusters = defaultdict(list)
+    for old_label, new_label in merge_map.items():
+        if old_label in groups:
+            clusters[new_label].append(old_label)
+
+    merged_groups, merged_totals, merged_breakdowns = {}, {}, {}
+    for new_label, old_labels in clusters.items():
+        merged_groups[new_label] = combine_group([groups[o] for o in old_labels], new_label)
+
+        combined_totals = {}
+        for o in old_labels:
+            for k, v in totals.get(o, {}).items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    combined_totals[k] = combined_totals.get(k, 0) + v
+                elif k not in combined_totals:
+                    combined_totals[k] = v
+        merged_totals[new_label] = combined_totals
+
+        frames = [breakdowns[o] for o in old_labels if o in breakdowns and breakdowns[o] is not None and len(breakdowns[o])]
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            name_col = combined.columns[0]
+            numeric_cols = [c for c in combined.columns[1:] if pd.api.types.is_numeric_dtype(combined[c])]
+            other_cols = [c for c in combined.columns[1:] if c not in numeric_cols]
+            agg = {c: "sum" for c in numeric_cols}
+            for c in other_cols:
+                agg[c] = "first"
+            g = combined.groupby(name_col, as_index=False).agg(agg)
+            g = g[list(combined.columns)]  # restore original column order
+            if numeric_cols:
+                g = g.sort_values(numeric_cols[0], ascending=False).reset_index(drop=True)
+            merged_breakdowns[new_label] = g
+        elif old_labels and old_labels[0] in breakdowns:
+            merged_breakdowns[new_label] = breakdowns[old_labels[0]]
+
+    return merged_groups, merged_totals, merged_breakdowns
+
+
+AMBIGUOUS_REVIEW_COLUMNS = ["Group (raw names found together)", "Reason"]
+
+
+def write_ambiguous_merge_review_file(ambiguous_groups, output_path):
+    """
+    Writes a small review workbook for self_merge_bucket_labels()'s
+    ambiguous_groups - one row per ambiguous cluster, the raw names
+    involved (semicolon-joined) and why it couldn't be safely
+    auto-merged. This is the "checkbox" workflow's equivalent of
+    generate_alias_suggestions_file(): whoever's running the report opens
+    this, decides which (if any) of the names listed really are the same
+    company, and - if so - builds/extends a normal Company Aliases file
+    (see generate_alias_suggestions_file / load_alias_mapping_file) for
+    those specific names. Nothing here is ever applied automatically;
+    every confidently-resolved cluster from the same run has already been
+    merged and generated separately from this review step.
+
+    Returns output_path.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Needs Manual Review"
+
+    for j, col in enumerate(AMBIGUOUS_REVIEW_COLUMNS, start=1):
+        c = ws.cell(row=1, column=j, value=col)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 20
+
+    for i, group in enumerate(ambiguous_groups, start=2):
+        values = ["; ".join(group["labels"]), group["reason"]]
+        for j, val in enumerate(values, start=1):
+            cell = ws.cell(row=i, column=j, value=val)
+            cell.border = BORDER
+            cell.font = NEEDS_REVIEW_FONT
+            cell.fill = NEEDS_REVIEW_FILL
+
+    ws.column_dimensions["A"].width = 60
+    ws.column_dimensions["B"].width = 80
+
+    note_row = len(ambiguous_groups) + 3
+    ws.cell(row=note_row, column=1,
+             value=(f"{len(ambiguous_groups)} group(s) could not be safely auto-merged and were generated as "
+                    f"separate files instead. If any of these really are the same company, build a Company "
+                    f"Aliases file for them (Suggest Aliases..., or fill one in by hand) and re-run with it set.")
+             ).font = Font(name="Arial", size=9, italic=True, color="6C7A89")
+
+    wb.save(output_path)
+    return output_path
+
+
 if __name__ == "__main__":
     import sys
     lookup_fp = sys.argv[1] if len(sys.argv) > 1 else "/mnt/user-data/uploads/Co-insurance_Companies_List.xlsx"
