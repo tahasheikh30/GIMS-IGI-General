@@ -215,11 +215,17 @@ def _write_data_sheet(ws, df, highlight_new_cols=None, report=None):
         ws.column_dimensions[get_column_letter(j)].width = width
 
 
-def _write_unmatched_sheet(ws, df, report=None):
+def _write_unmatched_sheet(ws, df, report=None, note=None, empty_message=None):
     """Every unmatched claim row, entirely highlighted red (matches
     premium_register_generator's own unmatched-row convention) since the
     whole sheet is 'needs manual review', plus the Reason column
-    explaining why."""
+    explaining why.
+
+    note / empty_message: optional overrides for the summary footnote and
+    the "nothing here" placeholder, so this same writer can be reused for
+    a differently-flavored manual-review sheet (see
+    build_ambiguous_alias_workbook below) without duplicating the styling
+    logic - default text (unmatched-claims wording) is used if omitted."""
     columns = list(df.columns)
     n_rows = len(df)
 
@@ -232,7 +238,8 @@ def _write_unmatched_sheet(ws, df, report=None):
     ws.row_dimensions[1].height = 20
 
     if n_rows == 0:
-        ws.cell(row=2, column=1, value="No unmatched claims - everything matched to a coinsurer.").font = EMPTY_FONT
+        ws.cell(row=2, column=1,
+                 value=empty_message or "No unmatched claims - everything matched to a coinsurer.").font = EMPTY_FONT
         return
 
     date_cols = {c for c in columns if pd.api.types.is_datetime64_any_dtype(df[c])}
@@ -258,9 +265,9 @@ def _write_unmatched_sheet(ws, df, report=None):
         ws.column_dimensions[get_column_letter(j)].width = width
 
     note_row = n_rows + 3
-    ws.cell(row=note_row, column=1,
-             value=f"{n_rows} claim(s) need manual review - either no matching policy was found in the Premium "
-                   f"Register, or the matched policy has no coinsurer on it.").font = Font(name="Arial", size=9, italic=True, color="6C7A89")
+    default_note = (f"{n_rows} claim(s) need manual review - either no matching policy was found in the Premium "
+                    f"Register, or the matched policy has no coinsurer on it.")
+    ws.cell(row=note_row, column=1, value=note or default_note).font = Font(name="Arial", size=9, italic=True, color="6C7A89")
 
 
 def _chart_title(text, color=NAVY, size=1300, bold=True):
@@ -689,6 +696,48 @@ def build_unmatched_workbook(unmatched_df, output_dir, run_date=None, report=Non
     _write_unmatched_sheet(ws, unmatched_df, report=report)
     run_date = run_date or date.today()
     filename = f"Unmatched_Claims_{run_date.strftime('%d%m%Y')}.xlsx"
+    filepath = os.path.join(output_dir, filename)
+    wb.save(filepath)
+    return filepath
+
+
+def build_ambiguous_alias_workbook(claims_df, output_dir, run_date=None, report=None):
+    """
+    Single-sheet workbook of every claim belonging to a coinsurer bucket
+    whose company-name alias could not be safely auto-resolved (see
+    company_alias_resolver.self_merge_bucket_labels's ambiguous_groups).
+
+    These buckets are deliberately EXCLUDED from the normal per-coinsurer
+    generation - rather than guessing which real company they belong to,
+    or blocking generation of every OTHER, unambiguous bucket until the
+    conflict is resolved - so this is the "set aside for manual review"
+    counterpart to build_unmatched_workbook, just keyed on an unresolved
+    company identity instead of an unresolved policy match.
+
+    claims_df: every original claim column plus a "Reason" column (the
+        plain-English conflict explanation from ambiguous_groups) and the
+        "Coinsurer Name" fan-out column, so it's still clear which raw
+        name each row came from. Every row is highlighted red, same
+        convention as the Unmatched Claims workbook.
+
+    Returns the filepath written, or None if claims_df is empty (nothing
+    to write)."""
+    if len(claims_df) == 0:
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Needs Manual Review"
+    n_names = claims_df["Coinsurer Name"].nunique() if "Coinsurer Name" in claims_df.columns else None
+    names_note = f" across {n_names} coinsurer name(s)" if n_names else ""
+    note = (f"{len(claims_df)} claim(s){names_note} need manual review - the company-name alias for these "
+            f"coinsurers could not be safely auto-resolved (see the Reason column for why). Build or extend a "
+            f"Company Aliases file for the names involved, then re-run 'Load & Match Claims' and 'Generate "
+            f"Excel Reports' to include them.")
+    _write_unmatched_sheet(ws, claims_df, report=report, note=note,
+                            empty_message="No ambiguous company aliases - everything was resolved automatically.")
+    run_date = run_date or date.today()
+    filename = f"Ambiguous_Company_Alias_Claims_{run_date.strftime('%d%m%Y')}.xlsx"
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath

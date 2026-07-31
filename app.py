@@ -3853,13 +3853,25 @@ class BalanceApp(tk.Tk):
         Lookup File's own canonical company list if one is loaded, then
         fold matching buckets together via merge_buckets().
 
-        Returns True if it's safe to proceed to generation (possibly
-        after merging self.claims_groups/totals/breakdowns in place), or
-        False if it stopped generation because something needs manual
-        review first (a review file has already been written and the
-        person already told about it via messagebox in that case).
+        Any bucket(s) involved in a conflict self_merge_bucket_labels
+        couldn't safely resolve are no longer allowed to block the whole
+        run: they're pulled OUT of self.claims_groups/totals/breakdowns
+        entirely and their claims are written to their own
+        "Ambiguous_Company_Alias_Claims" workbook for manual review (via
+        claims_register_generator.build_ambiguous_alias_workbook),
+        alongside the existing label-only "Needs_Manual_Review_Company_
+        Merge" summary explaining why each conflict couldn't be resolved.
+        Every OTHER, unambiguous bucket still merges and generates
+        normally in the same run - nothing is silently guessed, and
+        nothing unaffected is held hostage by a conflict elsewhere.
+
+        Always returns True (this step no longer stops generation) unless
+        called with no groups at all, in which case there's nothing to do.
         """
         import company_alias_resolver as car
+
+        if not self.claims_groups:
+            return True
 
         canonical_companies = None
         lookup_path = self.claims_email_lookup_file_var.get().strip()
@@ -3874,24 +3886,59 @@ class BalanceApp(tk.Tk):
             list(self.claims_groups.keys()), weight_by=weights, canonical_companies=canonical_companies)
 
         if ambiguous:
+            # Every raw label caught up in ANY ambiguous cluster - these
+            # are the buckets set aside, not just logged about.
+            ambiguous_labels = set()
+            label_to_reason = {}
+            for g in ambiguous:
+                for l in g["labels"]:
+                    ambiguous_labels.add(l)
+                    label_to_reason.setdefault(l, g["reason"])
+            ambiguous_labels = {l for l in ambiguous_labels if l in self.claims_groups}
+
             review_dir = self._new_run_folder(self.claims_output_dir_var.get().strip() or self.claims_output_dir)
+
             review_path = os.path.join(review_dir, "Needs_Manual_Review_Company_Merge.xlsx")
             car.write_ambiguous_merge_review_file(ambiguous, review_path)
-            self.log_claims(f"\nMerge checkbox: {len(ambiguous)} group(s) need manual review before merging - "
-                             f"see {review_path}")
+
+            frames = []
+            for l in ambiguous_labels:
+                df = self.claims_groups[l].copy()
+                df["Reason"] = label_to_reason.get(l, "")
+                frames.append(df)
+            combined_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            claims_review_path = crg.build_ambiguous_alias_workbook(combined_df, review_dir)
+
+            # Pull these buckets out of the run entirely - the rest
+            # proceeds untouched. merge_buckets() below only ever touches
+            # labels still present in self.claims_groups, so removing
+            # them here is also what keeps them out of the merge step.
+            for l in ambiguous_labels:
+                self.claims_groups.pop(l, None)
+                self.claims_totals.pop(l, None)
+                self.claims_breakdowns.pop(l, None)
+            self._refresh_claims_results_tree()
+
+            self.log_claims(f"\nMerge checkbox: {len(ambiguous_labels)} coinsurer bucket(s) set aside for manual "
+                             f"review (conflicting company-name alias) rather than guessed or blocking the rest "
+                             f"of the run - see {review_path}"
+                             + (f" and {claims_review_path}" if claims_review_path else "") + ".")
             messagebox.showwarning(
-                "Some company names need review before merging",
-                f"{len(ambiguous)} group(s) of coinsurer names couldn't be safely auto-merged (see the log for "
-                f"why) and were written to a review file instead of being guessed:\n\n{review_path}\n\n"
-                f"Open it, and if any of those really are the same company, build a Company Aliases file for "
-                f"them (Suggest Aliases... on tab 1) and set it before generating. Nothing was merged or "
-                f"generated yet - uncheck the merge box to generate the {len(self.claims_groups)} files "
-                f"separately instead, or fix the ambiguity and click Generate again."
+                "Some coinsurer names need manual review",
+                f"{len(ambiguous_labels)} coinsurer bucket(s) had a company-name alias conflict that couldn't be "
+                f"safely auto-resolved and were set aside into their own review file(s) instead of being "
+                f"guessed:\n\n{review_path}"
+                + (f"\n{claims_review_path}" if claims_review_path else "")
+                + f"\n\nThe remaining {len(self.claims_groups)} coinsurer file(s) will still be generated "
+                  f"normally. Once you've resolved the conflict (e.g. via a Company Aliases file), re-run "
+                  f"'Load & Match Claims' and 'Generate Excel Reports' to include the set-aside claims."
             )
-            return False
+
+            if not self.claims_groups:
+                return True  # nothing unambiguous left to merge/generate
 
         # Only bother re-bucketing if the merge actually combines something.
-        if all(v == k for k, v in merge_map.items()):
+        if all(v == k for k, v in merge_map.items() if k in self.claims_groups):
             return True
 
         def combine_group(dfs, new_label):
