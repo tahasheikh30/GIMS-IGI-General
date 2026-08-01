@@ -156,6 +156,7 @@ class BalanceApp(tk.Tk):
 
         self.claims_intimation_file = ""
         self.claims_premium_register_file = ""
+        self.claims_pmd_col = None  # real policy-reference column name from the last matched run - see load_and_match_claims
         self.claims_matched_df = None
         self.claims_unmatched_df = None
         self.claims_groups = None
@@ -376,6 +377,24 @@ class BalanceApp(tk.Tk):
         run_dir = os.path.join(base_dir, datetime.now().strftime("%Y-%m-%d %H-%M-%S"))
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
+
+    @staticmethod
+    def _cleanup_if_empty_dir(path):
+        """Remove `path` if it exists and is empty - used after a Save As
+        dialog is cancelled for a module (Loss Ratio, Policy Check, Claims
+        Check) whose default save location is a freshly-created
+        _new_run_folder() subfolder created purely to seed the dialog's
+        initialdir. Without this, cancelling the dialog left behind a
+        permanently empty, timestamped folder under the module's base
+        output folder every time - harmless to functionality but clutter
+        that accumulates indefinitely. Only ever removes a directory
+        that's genuinely empty (os.rmdir already refuses a non-empty one),
+        so this can never delete a file the person actually saved."""
+        try:
+            if path and os.path.isdir(path) and not os.listdir(path):
+                os.rmdir(path)
+        except OSError:
+            pass  # best-effort cleanup only - never worth failing the flow over
 
     # ---------- UI construction ----------
     def _build_ui(self):
@@ -1322,6 +1341,7 @@ class BalanceApp(tk.Tk):
             initialdir=default_dir,
             initialfile=default_name,
         )
+        self._cleanup_if_empty_dir(default_dir)  # remove the seeded folder if nothing was ever written into it
         if not output_path:
             self._log_loss("\nSave cancelled - report was not written.")
             return
@@ -2220,6 +2240,7 @@ class BalanceApp(tk.Tk):
                 initialdir=default_dir,
                 initialfile=default_name,
             )
+            self._cleanup_if_empty_dir(default_dir)  # remove the seeded folder if nothing was ever written into it
             if not output_path:
                 self._log_premreg("\nSave cancelled - results were not written to a file (still available above).")
                 return
@@ -2452,6 +2473,7 @@ class BalanceApp(tk.Tk):
                 initialdir=default_dir,
                 initialfile=default_name,
             )
+            self._cleanup_if_empty_dir(default_dir)  # remove the seeded folder if nothing was ever written into it
             if not output_path:
                 self._log_claimscheck("\nSave cancelled - results were not written to a file (still available above).")
                 return
@@ -3404,8 +3426,12 @@ class BalanceApp(tk.Tk):
 
         claims_load_match_btn_row = ttk.Frame(load_box)
         claims_load_match_btn_row.pack(anchor="w", fill="x")
+        # Full-size (not compact) to match the visual weight of "Run
+        # Matching" on Policy Check / Claims Check - all three are the
+        # same kind of primary action (load + fuzzy-match two files) and
+        # should read identically regardless of which page they're on.
         self.claims_match_btn = self._make_action_button(claims_load_match_btn_row, "Load & Match Claims", self.load_and_match_claims,
-                                                           kind="accent", compact=True)
+                                                           kind="accent", compact=False)
         self.claims_match_btn.pack(side="left")
 
         self.claims_match_progress = perf_utils.ProgressBarPanel(load_box)
@@ -3802,10 +3828,20 @@ class BalanceApp(tk.Tk):
                 claim_paid_col=claim_paid_col, claim_os_col=claim_os_col, report=report,
             )
             groups, totals, breakdowns = crp.build_coinsurer_buckets(matched_df, insured_col=insured_col)
-            return claims_df, matched_df, unmatched_df, groups, totals, breakdowns
+            # pmd_col is the REAL column name as found in this specific
+            # source file (e.g. "Policy /PMD#", "Policy/PMD #", "NUMS",
+            # etc. - see CLAIM_ALIASES) - never a guessed/hardcoded
+            # literal. It has to be threaded back out here so on_done and
+            # send_all_claims_register_emails() can look up the same
+            # column on matched_df/claims_matched_df later without
+            # re-guessing it (a hardcoded literal here previously caused
+            # a KeyError crash against real files whose header text
+            # didn't happen to match the guess).
+            return claims_df, pmd_col, matched_df, unmatched_df, groups, totals, breakdowns
 
         def on_done(result):
-            claims_df, matched_df, unmatched_df, groups, totals, breakdowns = result
+            claims_df, pmd_col, matched_df, unmatched_df, groups, totals, breakdowns = result
+            self.claims_pmd_col = pmd_col
             self.claims_matched_df = matched_df
             self.claims_unmatched_df = unmatched_df
             self.claims_groups = groups
@@ -3814,7 +3850,7 @@ class BalanceApp(tk.Tk):
 
             n_claims = len(claims_df)
             n_matched_pairs = len(matched_df)
-            n_unique_matched = matched_df["Policy/PMD #"].nunique() if len(matched_df) else 0
+            n_unique_matched = matched_df[pmd_col].nunique() if len(matched_df) else 0
             n_unmatched = len(unmatched_df)
 
             self.log_claims(f"\n{n_unique_matched} of {n_claims} claim(s) matched to a coinsurer "
@@ -4088,9 +4124,17 @@ class BalanceApp(tk.Tk):
             sent = sum(1 for r in results if r["sent"])
             failed = len(results) - sent
             missing_email = sum(1 for d in self.claims_drafts if not d.get("email"))
+            # pmd_col: the real policy-reference column name found in this
+            # run's own source file (set in load_and_match_claims' on_done),
+            # never a hardcoded guess like the literal "Policy/PMD #" used
+            # here previously - that guess doesn't match the confirmed real
+            # header text ("Policy /PMD#", space before the slash) and
+            # would raise a KeyError here, crashing Send All after emails
+            # had potentially already started sending.
+            pmd_col = getattr(self, "claims_pmd_col", None)
             crlog.log_run(
-                num_claims_loaded=(len(self.claims_matched_df["Policy/PMD #"].unique()) + len(self.claims_unmatched_df)) if self.claims_matched_df is not None else 0,
-                num_matched_claims=self.claims_matched_df["Policy/PMD #"].nunique() if self.claims_matched_df is not None else 0,
+                num_claims_loaded=(len(self.claims_matched_df[pmd_col].unique()) + len(self.claims_unmatched_df)) if self.claims_matched_df is not None and pmd_col else 0,
+                num_matched_claims=self.claims_matched_df[pmd_col].nunique() if self.claims_matched_df is not None and pmd_col else 0,
                 num_unmatched_claims=len(self.claims_unmatched_df) if self.claims_unmatched_df is not None else 0,
                 num_groups=len(self.claims_groups), num_files_generated=len(filename_lookup),
                 num_sent=sent, num_failed=failed, num_missing_email=missing_email, dry_run=dry_run,

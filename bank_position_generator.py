@@ -212,11 +212,19 @@ def _write_summary_remittances_block(ws, count, warnings):
     ws.cell(row=total_row, column=3).value = f"=SUM(C{SUMMARY_REMITTANCES_START_ROW}:C{last_data_row})"
 
 
-def _write_summary_named_amount_block(ws, items, start_row, capacity, name_key, extra_key, extra_col,
+def _write_summary_named_amount_block(ws, items, start_row, capacity, name_key, extra_key,
                                        total_row_offset, warnings, block_label):
     """Shared logic for Major Payments / Major Receivables - both are a
     literal (not formula) Name/Amount/Bank/Date list directly on Summary,
-    same shape, different capacity."""
+    same shape, different capacity.
+
+    extra_key's value is always written to column D (4) - the fixed
+    Summary layout confirmed against the real template. There used to be
+    a separate `extra_col` parameter here that was accepted but never
+    actually used (column 4 was hardcoded in the body regardless of what
+    was passed in) - removed rather than left as a latent trap for a
+    future caller that might reasonably expect passing a different value
+    to matter."""
     if len(items) > capacity:
         overflow = items[capacity:]
         names = ", ".join(i.get(name_key, "?") for i in overflow)
@@ -349,13 +357,13 @@ def generate_bank_position(previous_file, output_file,
     if major_payments is not None:
         _write_summary_named_amount_block(
             summary_ws, major_payments, SUMMARY_MAJOR_PAYMENTS_START_ROW, SUMMARY_MAJOR_PAYMENTS_CAPACITY,
-            name_key="name", extra_key="bank", extra_col=4, total_row_offset=1, warnings=warnings,
+            name_key="name", extra_key="bank", total_row_offset=1, warnings=warnings,
             block_label="Major Payment")
 
     if major_receivables is not None:
         _write_summary_named_amount_block(
             summary_ws, major_receivables, SUMMARY_MAJOR_RECEIVABLES_START_ROW, SUMMARY_MAJOR_RECEIVABLES_CAPACITY,
-            name_key="name", extra_key="bank", extra_col=4, total_row_offset=1, warnings=warnings,
+            name_key="name", extra_key="bank", total_row_offset=1, warnings=warnings,
             block_label="Major Receivable")
 
     wb.save(output_file)
