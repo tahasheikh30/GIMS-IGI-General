@@ -2578,25 +2578,8 @@ class BalanceApp(tk.Tk):
         receivable_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(receivable_email_lookup_note, source_box)
 
-        ttk.Label(source_box, text="Company Aliases File (.xlsx, optional)", style="Panel.TLabel").grid(row=6, column=0, sticky="w", **pad)
-        self.receivable_alias_file_var = tk.StringVar()
-        ttk.Entry(source_box, textvariable=self.receivable_alias_file_var).grid(row=6, column=1, sticky="ew", **pad)
-        ttk.Button(source_box, text="Browse...", command=self.browse_receivable_alias_file).grid(row=6, column=2, **pad)
-        receivable_alias_note = ttk.Label(
-            source_box, text="Merges branch-name variants of the same coinsurance company (e.g. \"AIC Adamjee "
-                              "House Branch\") into one output file/email instead of a separate one per branch. "
-                              "Click 'Suggest Aliases...' after loading data below to generate an editable "
-                              "starting point - review it, fill in or correct the 'Canonical Company' column, "
-                              "then browse to the saved file here. Left blank, every distinct name gets its own "
-                              "file, exactly like today.",
-            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
-        receivable_alias_note.grid(row=7, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
-        self._bind_dynamic_wraplength(receivable_alias_note, source_box)
-
         ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
-                   command=self.load_receivable_data).grid(row=8, column=0, sticky="w", padx=10, pady=(10, 4))
-        ttk.Button(source_box, text="Suggest Aliases...", width=24,
-                   command=self.suggest_receivable_aliases).grid(row=8, column=1, sticky="w", padx=10, pady=(10, 4))
+                   command=self.load_receivable_data).grid(row=6, column=0, sticky="w", padx=10, pady=(10, 4))
 
         # ---- Section: Filters ----
         filter_box = ttk.Labelframe(canvas_frame, text="  Filters  ", padding=14)
@@ -2643,12 +2626,14 @@ class BalanceApp(tk.Tk):
         merge_row = ttk.Frame(f)
         merge_row.pack(fill="x", padx=12, pady=(0, 8))
         self.receivable_merge_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(merge_row, text="Merge similar company names automatically (branch/spelling variants \u2192 one file)",
+        ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
                          variable=self.receivable_merge_var).pack(side="left")
         merge_note = ttk.Label(
-            f, text="Runs before generating: clusters the company names above that clearly share the same real "
-                    "company. Anything genuinely ambiguous is never guessed - it's written to a review file and "
-                    "generation stops so you can check it first.",
+            f, text="Runs before generating: two company names are combined into one file whenever they share "
+                    "the same leading name before the first underscore/space (e.g. \"Atlas_Insurance_Faisalabad\" "
+                    "and \"Atlas_Insurance_ClaimRecovery\" both start with \"Atlas\"), or when one of them is a "
+                    "known abbreviation (AIC = Adamjee, JGE/JGI = Jubilee, UBL = United Bank). No data is lost - "
+                    "every row from every merged company still appears in the combined file.",
             style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         merge_note.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -2776,56 +2761,6 @@ class BalanceApp(tk.Tk):
         if path:
             self.receivable_email_lookup_file_var.set(path)
 
-    def browse_receivable_alias_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
-        if path:
-            self.receivable_alias_file_var.set(path)
-
-    def suggest_receivable_aliases(self):
-        """Scan every distinct Company name in the currently-loaded
-        receivable data, suggest a canonical company for each (from the
-        email lookup file's own company list) wherever confident, and
-        write an editable suggestions workbook - see
-        company_alias_resolver.py for the full matching logic and why
-        anything ambiguous is deliberately left blank for manual review
-        rather than guessed at."""
-        if self.receivable_clean_df is None:
-            messagebox.showerror("Error", "Load data first (tab 1) before generating alias suggestions.")
-            return
-        lookup_path = self.receivable_email_lookup_file_var.get().strip()
-        if not lookup_path or not os.path.exists(lookup_path):
-            messagebox.showerror("Error", "Browse to the Email Lookup File first - its Company Name list is "
-                                           "what raw names get matched against.")
-            return
-
-        company_col = self.receivable_colmap["company"]
-        raw_names = self.receivable_clean_df[company_col].dropna().unique().tolist()
-
-        default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Premium Claims Receivable"))
-        output_path = filedialog.asksaveasfilename(
-            title="Save Company Alias Suggestions As", defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")], initialdir=default_dir,
-            initialfile="Company_Alias_Suggestions.xlsx",
-        )
-        if not output_path:
-            return
-
-        try:
-            import company_alias_resolver as car
-            companies, _emails, _pocs = car.load_canonical_companies_and_emails(lookup_path)
-            fp = car.generate_alias_suggestions_file(raw_names, companies, output_path)
-        except Exception as e:
-            messagebox.showerror("Could not generate suggestions", str(e))
-            return
-
-        self.receivable_alias_file_var.set(fp)
-        messagebox.showinfo(
-            "Suggestions generated",
-            f"Wrote {len(raw_names)} raw name(s) to:\n{fp}\n\n"
-            "Rows highlighted amber need manual review - open the file, fill in or correct the "
-            "'Canonical Company' column, save it, then click 'Analyze / Build Groups' again."
-        )
-
     def log_receivable(self, msg):
         self.receivable_setup_log.insert("end", str(msg) + "\n")
         self.receivable_setup_log.see("end")
@@ -2900,16 +2835,6 @@ class BalanceApp(tk.Tk):
 
         self.status_var.set("Analyzing / building groups...")
 
-        alias_mapping = None
-        alias_path = self.receivable_alias_file_var.get().strip()
-        if alias_path and os.path.exists(alias_path):
-            try:
-                import company_alias_resolver as car
-                alias_mapping = car.load_alias_mapping_file(alias_path)
-            except Exception as e:
-                messagebox.showwarning("Company Aliases file", f"Could not read the alias file, continuing "
-                                                                 f"without it:\n{e}")
-
         def worker(report):
             # analyze_buckets() computes the company/OFC bucket assignment
             # ONCE and derives groups, totals, AND every bucket's client
@@ -2918,11 +2843,11 @@ class BalanceApp(tk.Tk):
             # company_totals() as two separate full-dataset scans, and
             # (critically) precomputes every bucket's client breakdown up
             # front so generate_receivable_reports() below never needs to
-            # re-scan the whole dataset per company again. alias_mapping
-            # (if loaded above) merges branch-name variants of the same
-            # real company into one bucket first - see analyze_buckets'
-            # own docstring.
-            groups, totals, breakdowns = rvp.analyze_buckets(df, alias_mapping=alias_mapping)
+            # re-scan the whole dataset per company again. Buckets here are
+            # grouped by each row's own exact Company name - merging
+            # branch-name/spelling variants together is a separate,
+            # optional step (the "Merge files" checkbox on tab 2).
+            groups, totals, breakdowns = rvp.analyze_buckets(df)
             return groups, totals, breakdowns
 
         def on_done(result):
@@ -2961,48 +2886,27 @@ class BalanceApp(tk.Tk):
         self.receivable_results_summary_var.set(f"{len(self.receivable_groups)} output file(s) identified")
 
     def _run_receivable_self_merge(self):
-        """Same 'Merge similar company names automatically' logic as
-        Claims Register's _run_claims_self_merge - see that method's
-        docstring. Operates on self.receivable_groups (each bucket's
-        value is {"premium_rows": df, "claims_rows": df} here, rather
-        than Claims Register's single claims_df, so combine_group is
-        adapted for that shape and re-tags the ORIGINAL company column
-        (self.receivable_colmap["company"]) rather than a fixed
-        "Coinsurer Name" column name)."""
-        import company_alias_resolver as car
+        """The 'Merge files for the same company' checkbox's actual work.
 
-        canonical_companies = None
-        lookup_path = self.receivable_email_lookup_file_var.get().strip()
-        if lookup_path and os.path.exists(lookup_path):
-            try:
-                canonical_companies, _emails, _pocs = car.load_canonical_companies_and_emails(lookup_path)
-            except Exception:
-                canonical_companies = None
+        Groups self.receivable_groups' own bucket labels (each already the
+        exact, unmodified Company name a row was recorded under) by
+        company_alias_resolver.self_merge_bucket_labels: two labels merge
+        whenever they share the same leading name before the first
+        underscore/space (e.g. "Atlas_Insurance_Faisalabad" and
+        "Atlas_Insurance_ClaimRecovery" both start with "Atlas"), or when
+        one of them is a known abbreviation (AIC/JGE/JGI/UBL). Fully
+        deterministic - nothing is ever ambiguous or held back for manual
+        review. Every merged bucket's premium/claims rows are concatenated
+        (combine_group below), so no data from any of the original,
+        separately-named files is ever lost."""
+        import company_alias_resolver as car
 
         company_col = self.receivable_colmap["company"]
         weights = {
             label: len(g["premium_rows"]) + len(g["claims_rows"])
             for label, g in self.receivable_groups.items()
         }
-        merge_map, ambiguous = car.self_merge_bucket_labels(
-            list(self.receivable_groups.keys()), weight_by=weights, canonical_companies=canonical_companies)
-
-        if ambiguous:
-            review_dir = self._new_run_folder(self.receivable_output_dir_var.get().strip() or self.output_dir_base)
-            review_path = os.path.join(review_dir, "Needs_Manual_Review_Company_Merge.xlsx")
-            car.write_ambiguous_merge_review_file(ambiguous, review_path)
-            self.log_receivable(f"\nMerge checkbox: {len(ambiguous)} group(s) need manual review before merging - "
-                                 f"see {review_path}")
-            messagebox.showwarning(
-                "Some company names need review before merging",
-                f"{len(ambiguous)} group(s) of company names couldn't be safely auto-merged (see the log for why) "
-                f"and were written to a review file instead of being guessed:\n\n{review_path}\n\n"
-                f"Open it, and if any of those really are the same company, build a Company Aliases file for them "
-                f"(Suggest Aliases... on tab 1) and set it before generating. Nothing was merged or generated yet - "
-                f"uncheck the merge box to generate the {len(self.receivable_groups)} files separately instead, "
-                f"or fix the ambiguity and click Generate again."
-            )
-            return False
+        merge_map = car.self_merge_bucket_labels(list(self.receivable_groups.keys()), weight_by=weights)
 
         if all(v == k for k, v in merge_map.items()):
             return True
@@ -3027,7 +2931,7 @@ class BalanceApp(tk.Tk):
         self.receivable_totals = merged_totals
         self.receivable_breakdowns = merged_breakdowns
         self._refresh_receivable_results_tree()
-        self.log_receivable(f"\nMerge checkbox: combined {n_before} company file(s) into {n_after} by company name.")
+        self.log_receivable(f"\nMerge checkbox: combined {n_before} company file(s) into {n_after} by shared company name.")
         return True
 
     def generate_receivable_reports(self):
@@ -3376,21 +3280,6 @@ class BalanceApp(tk.Tk):
         claims_email_lookup_note.grid(row=6, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(claims_email_lookup_note, source_box)
 
-        ttk.Label(source_box, text="Company Aliases File (.xlsx, optional)", style="Panel.TLabel").grid(row=7, column=0, sticky="w", **pad)
-        self.claims_alias_file_var = tk.StringVar()
-        ttk.Entry(source_box, textvariable=self.claims_alias_file_var).grid(row=7, column=1, sticky="ew", **pad)
-        ttk.Button(source_box, text="Browse...", command=self.browse_claims_alias_file).grid(row=7, column=2, **pad)
-        claims_alias_note = ttk.Label(
-            source_box, text="Merges branch-name variants of the same coinsurer (e.g. \"AIC Adamjee House "
-                              "Branch\") into one output file/email instead of a separate one per branch. "
-                              "Load & Match Claims first (below), then click 'Suggest Aliases...' to generate "
-                              "an editable starting point - review it, fill in or correct the 'Canonical "
-                              "Company' column, then browse to the saved file here and re-run matching. Left "
-                              "blank, every distinct coinsurer name gets its own file, exactly like today.",
-            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
-        claims_alias_note.grid(row=8, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
-        self._bind_dynamic_wraplength(claims_alias_note, source_box)
-
         # ---- Section: Date Filter ----
         # Scopes a run to a selected period even though the Claim Intimation
         # Register (and the Premium Register it's matched against) can span
@@ -3450,9 +3339,6 @@ class BalanceApp(tk.Tk):
         self.claims_match_btn = self._make_action_button(claims_load_match_btn_row, "Load & Match Claims", self.load_and_match_claims,
                                                            kind="accent", compact=True)
         self.claims_match_btn.pack(side="left")
-        self.claims_suggest_aliases_btn = self._make_action_button(
-            claims_load_match_btn_row, "Suggest Aliases...", self.suggest_claims_aliases, kind="quiet", compact=True)
-        self.claims_suggest_aliases_btn.pack(side="left", padx=(8, 0))
 
         self.claims_match_progress = perf_utils.ProgressBarPanel(load_box)
         self.claims_match_progress.frame.pack(fill="x", pady=(8, 0))
@@ -3491,13 +3377,15 @@ class BalanceApp(tk.Tk):
         merge_row = ttk.Frame(f)
         merge_row.pack(fill="x", padx=12, pady=(0, 8))
         self.claims_merge_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(merge_row, text="Merge similar company names automatically (e.g. \"ATLAS INSURANCE COMPANY\" / "
-                                         "\"ATLAS INSURANCE LTD\" / branch variants \u2192 one file)",
+        ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
                          variable=self.claims_merge_var).pack(side="left")
         merge_note = ttk.Label(
-            f, text="Runs before generating: clusters the coinsurer names above that clearly share the same real "
-                    "company, combining their claims into one workbook. Anything genuinely ambiguous is never "
-                    "guessed - it's written to a review file and generation stops so you can check it first.",
+            f, text="Runs before generating: two coinsurer names are combined into one workbook whenever they "
+                    "share the same leading name before the first underscore/space (e.g. "
+                    "\"Atlas_Insurance_Faisalabad\" and \"Atlas_Insurance_ClaimRecovery\" both start with "
+                    "\"Atlas\"), or when one of them is a known abbreviation (AIC = Adamjee, JGE/JGI = Jubilee, "
+                    "UBL = United Bank). No data is lost - every claim from every merged coinsurer name still "
+                    "appears in the combined file.",
             style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         merge_note.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -3630,56 +3518,6 @@ class BalanceApp(tk.Tk):
         if path:
             self.claims_email_lookup_file_var.set(path)
 
-    def browse_claims_alias_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
-        if path:
-            self.claims_alias_file_var.set(path)
-
-    def suggest_claims_aliases(self):
-        """Scan every distinct Coinsurer Name found by the most recent
-        'Load & Match Claims' run, suggest a canonical company for each
-        (from the email lookup file's own company list) wherever
-        confident, and write an editable suggestions workbook - see
-        company_alias_resolver.py for the full matching logic and why
-        anything ambiguous is deliberately left blank for manual review
-        rather than guessed at."""
-        if self.claims_matched_df is None or len(self.claims_matched_df) == 0:
-            messagebox.showerror("Error", "Click 'Load & Match Claims' first - alias suggestions are built from "
-                                           "the coinsurer names that matching actually found.")
-            return
-        lookup_path = self.claims_email_lookup_file_var.get().strip()
-        if not lookup_path or not os.path.exists(lookup_path):
-            messagebox.showerror("Error", "Browse to the Email Lookup File first - its Company Name list is "
-                                           "what raw coinsurer names get matched against.")
-            return
-
-        raw_names = self.claims_matched_df["Coinsurer Name"].dropna().unique().tolist()
-
-        default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Claims Register"))
-        output_path = filedialog.asksaveasfilename(
-            title="Save Company Alias Suggestions As", defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")], initialdir=default_dir,
-            initialfile="Company_Alias_Suggestions.xlsx",
-        )
-        if not output_path:
-            return
-
-        try:
-            import company_alias_resolver as car
-            companies, _emails, _pocs = car.load_canonical_companies_and_emails(lookup_path)
-            fp = car.generate_alias_suggestions_file(raw_names, companies, output_path)
-        except Exception as e:
-            messagebox.showerror("Could not generate suggestions", str(e))
-            return
-
-        self.claims_alias_file_var.set(fp)
-        messagebox.showinfo(
-            "Suggestions generated",
-            f"Wrote {len(raw_names)} raw coinsurer name(s) to:\n{fp}\n\n"
-            "Rows highlighted amber need manual review - open the file, fill in or correct the "
-            "'Canonical Company' column, save it, then click 'Load & Match Claims' again."
-        )
-
     def log_claims(self, msg):
         self.claims_setup_log.insert("end", str(msg) + "\n")
         self.claims_setup_log.see("end")
@@ -3717,16 +3555,6 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Invalid date filter", "Date Filter 'From' must not be after 'To'.")
             return
         date_filter_field = self.claims_date_field_var.get()  # "Intimation Date" or "Loss Date"
-
-        alias_mapping = None
-        alias_path = self.claims_alias_file_var.get().strip()
-        if alias_path and os.path.exists(alias_path):
-            try:
-                import company_alias_resolver as car
-                alias_mapping = car.load_alias_mapping_file(alias_path)
-            except Exception as e:
-                messagebox.showwarning("Company Aliases file", f"Could not read the alias file, continuing "
-                                                                 f"without it:\n{e}")
 
         self.claims_setup_log.delete("1.0", "end")
         self.claims_match_summary_var.set("")
@@ -3776,7 +3604,7 @@ class BalanceApp(tk.Tk):
                 claims_df, pmd_col, reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col,
                 claim_paid_col=claim_paid_col, claim_os_col=claim_os_col, report=report,
             )
-            groups, totals, breakdowns = crp.build_coinsurer_buckets(matched_df, insured_col=insured_col, alias_mapping=alias_mapping)
+            groups, totals, breakdowns = crp.build_coinsurer_buckets(matched_df, insured_col=insured_col)
             return claims_df, matched_df, unmatched_df, groups, totals, breakdowns
 
         def on_done(result):
@@ -3846,99 +3674,32 @@ class BalanceApp(tk.Tk):
 
     def _run_claims_self_merge(self):
         """
-        The 'Merge similar company names automatically' checkbox's actual
-        work: cluster the CURRENT self.claims_groups bucket labels against
-        each other (company_alias_resolver.self_merge_bucket_labels - no
-        Email Lookup File required), cross-checking against the Email
-        Lookup File's own canonical company list if one is loaded, then
-        fold matching buckets together via merge_buckets().
+        The 'Merge files for the same company' checkbox's actual work.
 
-        Any bucket(s) involved in a conflict self_merge_bucket_labels
-        couldn't safely resolve are no longer allowed to block the whole
-        run: they're pulled OUT of self.claims_groups/totals/breakdowns
-        entirely and their claims are written to their own
-        "Ambiguous_Company_Alias_Claims" workbook for manual review (via
-        claims_register_generator.build_ambiguous_alias_workbook),
-        alongside the existing label-only "Needs_Manual_Review_Company_
-        Merge" summary explaining why each conflict couldn't be resolved.
-        Every OTHER, unambiguous bucket still merges and generates
-        normally in the same run - nothing is silently guessed, and
-        nothing unaffected is held hostage by a conflict elsewhere.
+        Groups self.claims_groups' own bucket labels (each already the
+        exact, unmodified Coinsurer Name a claim was matched under) by
+        company_alias_resolver.self_merge_bucket_labels: two labels merge
+        whenever they share the same leading name before the first
+        underscore/space (e.g. "Atlas_Insurance_Faisalabad" and
+        "Atlas_Insurance_ClaimRecovery" both start with "Atlas"), or when
+        one of them is a known abbreviation (AIC = Adamjee, JGE/JGI =
+        Jubilee, UBL = United Bank). Fully deterministic - no manual
+        review, nothing ever left ambiguous. Every merged bucket's claims
+        are concatenated (combine_group below), so no data from any of
+        the original, separately-named files is ever lost.
 
-        Always returns True (this step no longer stops generation) unless
-        called with no groups at all, in which case there's nothing to do.
+        Always returns True (there's nothing that can block generation).
         """
         import company_alias_resolver as car
 
         if not self.claims_groups:
             return True
 
-        canonical_companies = None
-        lookup_path = self.claims_email_lookup_file_var.get().strip()
-        if lookup_path and os.path.exists(lookup_path):
-            try:
-                canonical_companies, _emails, _pocs = car.load_canonical_companies_and_emails(lookup_path)
-            except Exception:
-                canonical_companies = None  # not shaped like the real canonical-list file - self-merge only
-
         weights = {label: self.claims_totals[label]["num_claims"] for label in self.claims_groups}
-        merge_map, ambiguous = car.self_merge_bucket_labels(
-            list(self.claims_groups.keys()), weight_by=weights, canonical_companies=canonical_companies)
-
-        if ambiguous:
-            # Every raw label caught up in ANY ambiguous cluster - these
-            # are the buckets set aside, not just logged about.
-            ambiguous_labels = set()
-            label_to_reason = {}
-            for g in ambiguous:
-                for l in g["labels"]:
-                    ambiguous_labels.add(l)
-                    label_to_reason.setdefault(l, g["reason"])
-            ambiguous_labels = {l for l in ambiguous_labels if l in self.claims_groups}
-
-            review_dir = self._new_run_folder(self.claims_output_dir_var.get().strip() or self.claims_output_dir)
-
-            review_path = os.path.join(review_dir, "Needs_Manual_Review_Company_Merge.xlsx")
-            car.write_ambiguous_merge_review_file(ambiguous, review_path)
-
-            frames = []
-            for l in ambiguous_labels:
-                df = self.claims_groups[l].copy()
-                df["Reason"] = label_to_reason.get(l, "")
-                frames.append(df)
-            combined_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-            claims_review_path = crg.build_ambiguous_alias_workbook(combined_df, review_dir)
-
-            # Pull these buckets out of the run entirely - the rest
-            # proceeds untouched. merge_buckets() below only ever touches
-            # labels still present in self.claims_groups, so removing
-            # them here is also what keeps them out of the merge step.
-            for l in ambiguous_labels:
-                self.claims_groups.pop(l, None)
-                self.claims_totals.pop(l, None)
-                self.claims_breakdowns.pop(l, None)
-            self._refresh_claims_results_tree()
-
-            self.log_claims(f"\nMerge checkbox: {len(ambiguous_labels)} coinsurer bucket(s) set aside for manual "
-                             f"review (conflicting company-name alias) rather than guessed or blocking the rest "
-                             f"of the run - see {review_path}"
-                             + (f" and {claims_review_path}" if claims_review_path else "") + ".")
-            messagebox.showwarning(
-                "Some coinsurer names need manual review",
-                f"{len(ambiguous_labels)} coinsurer bucket(s) had a company-name alias conflict that couldn't be "
-                f"safely auto-resolved and were set aside into their own review file(s) instead of being "
-                f"guessed:\n\n{review_path}"
-                + (f"\n{claims_review_path}" if claims_review_path else "")
-                + f"\n\nThe remaining {len(self.claims_groups)} coinsurer file(s) will still be generated "
-                  f"normally. Once you've resolved the conflict (e.g. via a Company Aliases file), re-run "
-                  f"'Load & Match Claims' and 'Generate Excel Reports' to include the set-aside claims."
-            )
-
-            if not self.claims_groups:
-                return True  # nothing unambiguous left to merge/generate
+        merge_map = car.self_merge_bucket_labels(list(self.claims_groups.keys()), weight_by=weights)
 
         # Only bother re-bucketing if the merge actually combines something.
-        if all(v == k for k, v in merge_map.items() if k in self.claims_groups):
+        if all(v == k for k, v in merge_map.items()):
             return True
 
         def combine_group(dfs, new_label):
@@ -3953,7 +3714,7 @@ class BalanceApp(tk.Tk):
         n_before, n_after = len(self.claims_groups), len(merged_groups)
         self.claims_groups, self.claims_totals, self.claims_breakdowns = merged_groups, merged_totals, merged_breakdowns
         self._refresh_claims_results_tree()
-        self.log_claims(f"\nMerge checkbox: combined {n_before} coinsurer file(s) into {n_after} by company name.")
+        self.log_claims(f"\nMerge checkbox: combined {n_before} coinsurer file(s) into {n_after} by shared company name.")
         return True
 
     def generate_claims_register_reports(self):

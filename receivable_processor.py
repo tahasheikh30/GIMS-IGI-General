@@ -488,21 +488,17 @@ def _is_ofc_company(company_name):
     return "ofc" in str(company_name).strip().lower()
 
 
-def _bucket_series(clean_df, alias_mapping=None):
+def _bucket_series(clean_df):
     """
-    Map every row's Company to its output bucket: its own exact Company
-    name (remapped to its canonical form first if alias_mapping resolves
-    it - see company_alias_resolver.py, this is what merges branch-name
-    variants of the same real company under one bucket instead of each
-    getting its own), or the shared OFC_BUCKET_LABEL if the (possibly now
-    canonical) name contains "OFC". This is the one place that decides
-    bucketing, so every grouping/totals/breakdown function below stays in
-    sync automatically.
-
-    alias_mapping: optional {normalized_raw_name: canonical_company} dict
-        (see company_alias_resolver.load_alias_mapping_file). A company
-        name with no confident mapping is left completely unchanged - the
-        safe default from company_alias_resolver.apply_alias.
+    Map every row's Company to its output bucket: its own exact,
+    unmodified Company name, or the shared OFC_BUCKET_LABEL if that name
+    contains "OFC". This is the one place that decides bucketing, so
+    every grouping/totals/breakdown function below stays in sync
+    automatically. Branch-name/spelling variants of the same real company
+    are NOT merged here - that happens as a separate, optional
+    post-processing step (the "Merge similar company names automatically"
+    checkbox in the UI, see company_alias_resolver.self_merge_bucket_labels)
+    applied to whatever buckets this function already produced.
 
     Fully vectorized (Series.str.contains) rather than a per-row
     Series.apply(_is_ofc_company) - on a real ~1,000,000-row export the
@@ -511,14 +507,11 @@ def _bucket_series(clean_df, alias_mapping=None):
     check as a single C-level pass over the whole column instead.
     """
     company_series = clean_df["_rec_company"]
-    if alias_mapping:
-        import company_alias_resolver as car
-        company_series = company_series.map(lambda v: car.apply_alias(v, alias_mapping))
     is_ofc = company_series.str.contains("ofc", case=False, na=False, regex=False)
     return company_series.where(~is_ofc, OFC_BUCKET_LABEL)
 
 
-def build_company_groups(clean_df, alias_mapping=None):
+def build_company_groups(clean_df):
     """
     Group clean_df into one bucket per output workbook. Per spec, that's
     one file per insurance company, covering every client for that
@@ -533,9 +526,6 @@ def build_company_groups(clean_df, alias_mapping=None):
     companies get their own file" means one shared file for the whole OFC
     set, not one each).
 
-    alias_mapping: optional {normalized_raw_name: canonical_company} dict
-        - see _bucket_series's own docstring for what this does and why.
-
     Each sub-dataframe keeps every ORIGINAL source column (including
     Client Name and Company - both stay visible on every row, which
     matters most for the pooled OFC bucket since it mixes rows from
@@ -543,7 +533,7 @@ def build_company_groups(clean_df, alias_mapping=None):
     columns are stripped back out before being returned.
     """
     df = clean_df.copy()
-    df["_rec_bucket"] = _bucket_series(df, alias_mapping=alias_mapping)
+    df["_rec_bucket"] = _bucket_series(df)
 
     groups = {}
     for bucket, sub in df.groupby("_rec_bucket", sort=False):
@@ -556,7 +546,7 @@ def build_company_groups(clean_df, alias_mapping=None):
     return groups
 
 
-def company_totals(clean_df, groups, alias_mapping=None):
+def company_totals(clean_df, groups):
     """Return {bucket_label: {"premium_total": x, "claims_total": y,
     "num_clients": n}} computed straight from the helper amount columns
     (before they're stripped), so totals are correct even though the
@@ -564,12 +554,9 @@ def company_totals(clean_df, groups, alias_mapping=None):
     counts distinct clients within that bucket - for a normal company
     that's just its own client count; for the pooled OFC bucket it's the
     distinct client count across every OFC-named company combined.
-
-    alias_mapping: optional - see _bucket_series's own docstring. Must
-        match whatever was passed to build_company_groups() for `groups`
-        to line up with these totals correctly."""
+"""
     df = clean_df.copy()
-    df["_rec_bucket"] = _bucket_series(df, alias_mapping=alias_mapping)
+    df["_rec_bucket"] = _bucket_series(df)
 
     totals = {}
     for bucket, sub in df.groupby("_rec_bucket", sort=False):
@@ -581,17 +568,13 @@ def company_totals(clean_df, groups, alias_mapping=None):
     return totals
 
 
-def client_breakdown_for_bucket(clean_df, bucket_label, alias_mapping=None):
+def client_breakdown_for_bucket(clean_df, bucket_label):
     """
     Per-client Premium/Claims Receivable totals within ONE output bucket
     (a single company, or the pooled OFC set) - this feeds that
     workbook's own Summary sheet chart, sorted largest Premium Receivable
     first so the chart reads most-to-least at a glance.
 
-    alias_mapping: optional - see _bucket_series's own docstring. Must
-        match whatever bucket_label was actually produced with (a
-        canonical company name if aliasing was used) for this to find
-        the right rows.
 
     PERFORMANCE NOTE: this re-buckets and re-scans the WHOLE clean_df
     from scratch on every call. That's fine for a one-off lookup, but a
@@ -604,7 +587,7 @@ def client_breakdown_for_bucket(clean_df, bucket_label, alias_mapping=None):
     many buckets there are.
     """
     df = clean_df.copy()
-    df["_rec_bucket"] = _bucket_series(df, alias_mapping=alias_mapping)
+    df["_rec_bucket"] = _bucket_series(df)
     sub = df[df["_rec_bucket"] == bucket_label]
     g = (
         sub.groupby("_rec_client")
@@ -615,7 +598,7 @@ def client_breakdown_for_bucket(clean_df, bucket_label, alias_mapping=None):
     return g.sort_values("premium_total", ascending=False).reset_index(drop=True)
 
 
-def build_client_breakdowns(clean_df, alias_mapping=None):
+def build_client_breakdowns(clean_df):
     """
     The bulk, single-pass equivalent of calling client_breakdown_for_bucket()
     once per bucket in a loop. Computes the per-client Premium/Claims
@@ -625,7 +608,6 @@ def build_client_breakdowns(clean_df, alias_mapping=None):
     every bucket. On the real 113-bucket run mentioned above, this turns
     113 full-dataset scans into one.
 
-    alias_mapping: optional - see _bucket_series's own docstring.
 
     Returns {bucket_label: breakdown_df}, where each breakdown_df has the
     exact same shape as client_breakdown_for_bucket()'s own return value
@@ -633,7 +615,7 @@ def build_client_breakdowns(clean_df, alias_mapping=None):
     Receivable first).
     """
     df = clean_df.copy()
-    df["_rec_bucket"] = _bucket_series(df, alias_mapping=alias_mapping)
+    df["_rec_bucket"] = _bucket_series(df)
     grouped = (
         df.groupby(["_rec_bucket", "_rec_client"])
         .agg(premium_total=("_rec_premium_amt", "sum"), claims_total=("_rec_claims_amt", "sum"))
@@ -648,7 +630,7 @@ def build_client_breakdowns(clean_df, alias_mapping=None):
     return breakdowns
 
 
-def analyze_buckets(clean_df, alias_mapping=None):
+def analyze_buckets(clean_df):
     """
     One-stop replacement for calling build_company_groups(), then
     company_totals(), then build_client_breakdowns() as three separate
@@ -657,15 +639,6 @@ def analyze_buckets(clean_df, alias_mapping=None):
     all three results, so a huge file only gets bucketed a single time
     no matter how many downstream results are needed from it.
 
-    alias_mapping: optional {normalized_raw_name: canonical_company} dict
-        (see company_alias_resolver.load_alias_mapping_file) - when
-        given, every row's Company is remapped to its canonical company
-        BEFORE bucketing, so branch-name variants of the same real
-        company land in ONE bucket/output file/email instead of each
-        getting their own. A raw name with no confident mapping is left
-        completely unchanged - it keeps behaving exactly like today (its
-        own separate bucket). Leave as None (the default) to skip this
-        entirely - existing callers are unaffected.
 
     Returns (groups, totals, breakdowns) - identical shapes to what
     build_company_groups() / company_totals() / build_client_breakdowns()
@@ -673,7 +646,7 @@ def analyze_buckets(clean_df, alias_mapping=None):
     three back to back.
     """
     df = clean_df.copy()
-    df["_rec_bucket"] = _bucket_series(df, alias_mapping=alias_mapping)
+    df["_rec_bucket"] = _bucket_series(df)
 
     groups = {}
     totals = {}
