@@ -470,6 +470,41 @@ def filter_claims_by_date(claims_df, date_col, start_date=None, end_date=None):
     return claims_df.loc[keep].reset_index(drop=True), num_excluded_no_date
 
 
+def filter_claims_by_fields(claims_df, field_filters):
+    """
+    Restrict claims_df to rows matching a set of exact-value column
+    filters - the Unit (Branch Name) / Client Name (Insured Name) /
+    Department (Department Name) filters on the Claims Intimation setup
+    tab, same "comma-separated exact names" convention already used by
+    the Receivable module's Client/Company filters
+    (receivable_processor / app.py's analyze_receivable).
+
+    field_filters: list of (original_column_name, [exact_value, ...])
+        tuples. A filter is skipped if its column wasn't found in
+        claims_df (None) or its value list is empty - callers are
+        expected to have already logged a warning for a missing column
+        before calling this, so this function stays silent about it.
+        Multiple filters combine with AND (each narrows further).
+
+    Matching is on the column's own string value, stripped - not
+    normalized/fuzzy - same exact-match behavior as every other
+    comma-separated filter in GIMS, so a filter value has to match the
+    source data's own spelling exactly.
+
+    Returns the filtered dataframe (index reset) - does NOT report a
+    dropped-row count itself (unlike filter_claims_by_date, which
+    reports rows dropped for a missing date); the caller logs the
+    before/after row count instead, since a single call here can apply
+    several filters at once.
+    """
+    df = claims_df
+    for col, values in field_filters:
+        if not values or col is None or col not in df.columns:
+            continue
+        df = df[df[col].astype(str).str.strip().isin(values)]
+    return df.reset_index(drop=True)
+
+
 def load_premium_register_file(filepath, sheet_name=None, report=None):
     """
     Load the Premium Register. Identifies "Ins" (the coinsurer/company

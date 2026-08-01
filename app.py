@@ -167,6 +167,15 @@ class BalanceApp(tk.Tk):
         self.claims_drafts = []
         self.claims_output_dir = os.path.join(os.getcwd(), "Claims Register")
         self.claims_last_run_dir = None  # set to the current generation's own dated/timed subfolder once generated
+        # Cache for the Unit/Client Name/Department filter listboxes - set
+        # by _load_claims_filter_options() (the "Load Filter Options"
+        # button) so the file only has to be read once: load_and_match_claims()
+        # reuses this cached dataframe instead of re-reading the same file
+        # from disk, as long as the file path hasn't changed since.
+        self.claims_intimation_df = None
+        self.claims_intimation_pmd_col = None
+        self.claims_intimation_colmap = None
+        self.claims_intimation_loaded_path = None
 
         # Bank Position module state
         self.bankpos_statement_paths = {}     # bank_key -> filepath
@@ -3318,6 +3327,65 @@ class BalanceApp(tk.Tk):
         self.claims_date_to_var = tk.StringVar()
         ttk.Entry(date_filter_row, textvariable=self.claims_date_to_var, width=14).pack(side="left")
 
+        # ---- Section: Filters (Unit / Client Name / Department) ----
+        # Same style/interaction as the Outstanding Premium module's own
+        # "Threshold & Filters" section (General Operations sidebar menu):
+        # multi-select listboxes (Ctrl+click for several values, none
+        # selected = all), populated from the real distinct values in the
+        # loaded Claim Intimation Register rather than typed by hand.
+        # Applied to the Claim Intimation Register BEFORE matching (same
+        # point in the pipeline as the Date Filter above), so - like the
+        # Date Filter - everything downstream (matched/unmatched counts,
+        # coinsurer buckets, every generated workbook) only ever sees
+        # claims that passed these filters. The Premium Register itself is
+        # never filtered by these either, for the same reason the Date
+        # Filter leaves it alone - it's only a lookup table for resolving
+        # coinsurers, so it still needs its own full range/scope.
+        claims_filter_box = ttk.Labelframe(canvas_frame, text="  Filters (optional)  ", padding=14)
+        claims_filter_box.pack(fill="x", padx=12, pady=8)
+        claims_filter_box.columnconfigure(0, weight=1)
+        claims_filter_box.columnconfigure(1, weight=1)
+        claims_filter_box.columnconfigure(2, weight=1)
+
+        claims_filter_note = ttk.Label(
+            claims_filter_box, text="Click \"Load Filter Options\" after browsing to the Claim Intimation "
+                                     "Register above to populate these lists from that file's own values.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        claims_filter_note.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
+        self._bind_dynamic_wraplength(claims_filter_note, claims_filter_box, side_padding=10)
+
+        load_filters_row = ttk.Frame(claims_filter_box, style="Panel.TFrame")
+        load_filters_row.grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 10))
+        self.claims_load_filters_btn = ttk.Button(load_filters_row, text="Load Filter Options",
+                                                    command=self._load_claims_filter_options)
+        self.claims_load_filters_btn.pack(side="left")
+        self.claims_filter_status_var = tk.StringVar(value="")
+        ttk.Label(load_filters_row, textvariable=self.claims_filter_status_var, style="Muted.TLabel",
+                  background=self.COLOR_PANEL).pack(side="left", padx=(10, 0))
+
+        def _claims_filter_listbox_col(parent, col_idx, title):
+            col = ttk.Frame(parent, style="Panel.TFrame")
+            col.grid(row=2, column=col_idx, sticky="nsew", padx=6, pady=4)
+            ttk.Label(col, text=title, style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            ttk.Label(col, text="Ctrl+click to select multiple \u00b7 none = all", style="Muted.TLabel",
+                      background=self.COLOR_PANEL).pack(anchor="w", pady=(0, 4))
+            frame = tk.Frame(col, highlightbackground="#D6DCE1", highlightthickness=1)
+            frame.pack(fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical")
+            listbox = tk.Listbox(frame, selectmode="extended", height=10, width=32,
+                                  exportselection=False, font=("Segoe UI", 10),
+                                  activestyle="none", relief="flat", borderwidth=0,
+                                  selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                  highlightthickness=0, yscrollcommand=scroll.set)
+            scroll.config(command=listbox.yview)
+            listbox.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            return listbox
+
+        self.claims_unit_listbox = _claims_filter_listbox_col(claims_filter_box, 0, "Unit (Branch Name) filter")
+        self.claims_client_listbox = _claims_filter_listbox_col(claims_filter_box, 1, "Client Name filter")
+        self.claims_department_listbox = _claims_filter_listbox_col(claims_filter_box, 2, "Department filter")
+
         # ---- Section: Load & Match (kept below the Date Filter, so any
         # filter is already set before the user loads the data) - a proper
         # bordered Labelframe matching Data Source / Date Filter above it,
@@ -3535,6 +3603,71 @@ class BalanceApp(tk.Tk):
         except ValueError:
             raise ValueError(f"{label} must be in YYYY-MM-DD format (or left blank), got '{text}'.")
 
+    def _load_claims_filter_options(self):
+        """
+        'Load Filter Options' button - reads the Claim Intimation Register
+        currently browsed to (Data Source, above) and populates the Unit
+        (Branch Name) / Client Name (Insured Name) / Department (Department
+        Name) listboxes with that file's own real distinct values, same
+        "load once, populate a multi-select Listbox" interaction as
+        Outstanding Premium's Department/Agent/Branch filters on its own
+        setup tab (see load_data's on_done there).
+
+        The loaded dataframe, its Policy/PMD # column, and its column map
+        are cached (self.claims_intimation_df / _pmd_col / _colmap /
+        _loaded_path) so load_and_match_claims() can reuse them instead of
+        re-reading the same file from disk - the cache is keyed on the
+        file path actually loaded, so browsing to a different file and
+        clicking Load & Match Claims without re-clicking this button first
+        still works correctly (it just re-reads the file itself, same as
+        before this feature existed).
+        """
+        path = self.claims_intimation_file_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Please select a valid Claim Intimation Register file first.")
+            return
+
+        self.claims_filter_status_var.set("Loading...")
+
+        def worker(report):
+            claims_df, pmd_col = crp.load_claim_intimation_file(path, report=report)
+            colmap = crp.get_claim_colmap(claims_df)
+            return claims_df, pmd_col, colmap
+
+        def on_done(result):
+            claims_df, pmd_col, colmap = result
+            self.claims_intimation_df = claims_df
+            self.claims_intimation_pmd_col = pmd_col
+            self.claims_intimation_colmap = colmap
+            self.claims_intimation_loaded_path = path
+
+            def _populate(listbox, canonical_col):
+                listbox.delete(0, "end")
+                orig_col = colmap.get(canonical_col)
+                if not orig_col or orig_col not in claims_df.columns:
+                    return
+                values = sorted(claims_df[orig_col].dropna().astype(str).str.strip().unique())
+                values = [v for v in values if v]
+                for i, v in enumerate(values):
+                    listbox.insert("end", v)
+                    listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            _populate(self.claims_unit_listbox, "Branch Name")
+            _populate(self.claims_client_listbox, "Insured Name")
+            _populate(self.claims_department_listbox, "Department Name")
+
+            self.claims_filter_status_var.set(f"Loaded {len(claims_df):,} row(s).")
+            self.status_var.set("Claims Intimation: filter options loaded.")
+
+        def on_error(exc):
+            self.claims_filter_status_var.set("Load failed - see error.")
+            messagebox.showerror("Could not load file", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_done=on_done, on_error=on_error,
+            busy_widgets=[self.claims_load_filters_btn],
+        )
+
     def load_and_match_claims(self):
         intimation_path = self.claims_intimation_file_var.get().strip()
         register_path = self.claims_premium_register_file_var.get().strip()
@@ -3556,6 +3689,16 @@ class BalanceApp(tk.Tk):
             return
         date_filter_field = self.claims_date_field_var.get()  # "Intimation Date" or "Loss Date"
 
+        # Read the filter listbox selections here, on the MAIN thread -
+        # Tkinter widgets must never be queried from a background thread
+        # (see the identical pattern in analyze() for Outstanding Premium's
+        # own Department/Agent/Branch listboxes, read before
+        # run_in_background is ever called). The captured plain Python
+        # lists below are what the worker closure actually uses.
+        selected_units = [self.claims_unit_listbox.get(i) for i in self.claims_unit_listbox.curselection()]
+        selected_clients = [self.claims_client_listbox.get(i) for i in self.claims_client_listbox.curselection()]
+        selected_depts = [self.claims_department_listbox.get(i) for i in self.claims_department_listbox.curselection()]
+
         self.claims_setup_log.delete("1.0", "end")
         self.claims_match_summary_var.set("")
         self.claims_match_summary_label.pack_forget()
@@ -3563,11 +3706,24 @@ class BalanceApp(tk.Tk):
         self.claims_match_progress.start(total=None, text="Loading files...")
 
         def worker(report):
-            report(f"Loading Claim Intimation Register: {os.path.basename(intimation_path)}...")
-            claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path, report=report)
-            report(f"  {len(claims_df):,} claim row(s) loaded. Policy reference column detected as '{pmd_col}'.")
+            # Reuse the cached load from "Load Filter Options" (above) if
+            # it's for this exact same file - skips re-reading a
+            # potentially huge file from disk a second time. Falls back to
+            # loading fresh here (same as before this feature existed) if
+            # the button was never clicked, or was clicked for a different
+            # file than what's currently browsed to.
+            if self.claims_intimation_df is not None and self.claims_intimation_loaded_path == intimation_path:
+                claims_df = self.claims_intimation_df.copy()
+                pmd_col = self.claims_intimation_pmd_col
+                colmap = self.claims_intimation_colmap
+                report(f"Using already-loaded Claim Intimation Register: {os.path.basename(intimation_path)} "
+                       f"({len(claims_df):,} row(s)).")
+            else:
+                report(f"Loading Claim Intimation Register: {os.path.basename(intimation_path)}...")
+                claims_df, pmd_col = crp.load_claim_intimation_file(intimation_path, report=report)
+                report(f"  {len(claims_df):,} claim row(s) loaded. Policy reference column detected as '{pmd_col}'.")
+                colmap = crp.get_claim_colmap(claims_df)
 
-            colmap = crp.get_claim_colmap(claims_df)
             claim_paid_col = colmap.get("Claim Paid")
             claim_os_col = colmap.get("Claim O/S")
             insured_col = colmap.get("Insured Name")
@@ -3592,6 +3748,47 @@ class BalanceApp(tk.Tk):
                     report(f"\nDate Filter applied on '{date_filter_field}' ({date_col}), range {range_text}: "
                            f"{before_count:,} -> {len(claims_df):,} claim(s) kept"
                            + (f", {num_no_date:,} row(s) excluded for a missing/unparseable date." if num_no_date else "."))
+
+            # Unit / Client Name / Department filters - multi-select
+            # listboxes (Ctrl+click for several values, none selected =
+            # all), same interaction as Outstanding Premium's own
+            # Department/Agent/Branch filters. Applied at the same point
+            # in the pipeline as the Date Filter above (before matching),
+            # so everything downstream only ever sees claims that passed
+            # these filters too. Each is optional and independent; a
+            # filter whose target column isn't present in this register is
+            # skipped with a warning rather than silently ignored or
+            # raising. selected_units/selected_clients/selected_depts were
+            # already read from the listboxes on the MAIN thread above,
+            # before this worker started - see the comment there for why.
+            field_filters = []
+            if selected_units:
+                branch_col = colmap.get("Branch Name")
+                if not branch_col:
+                    report("\nWARNING: Unit filter requested, but no 'Branch Name' column was found in the "
+                           "Claim Intimation Register - filter skipped.")
+                else:
+                    field_filters.append((branch_col, selected_units))
+            if selected_clients:
+                insured_col_for_filter = colmap.get("Insured Name")
+                if not insured_col_for_filter:
+                    report("\nWARNING: Client Name filter requested, but no 'Insured Name' column was found in "
+                           "the Claim Intimation Register - filter skipped.")
+                else:
+                    field_filters.append((insured_col_for_filter, selected_clients))
+            if selected_depts:
+                dept_col = colmap.get("Department Name")
+                if not dept_col:
+                    report("\nWARNING: Department filter requested, but no 'Department Name' column was found "
+                           "in the Claim Intimation Register - filter skipped.")
+                else:
+                    field_filters.append((dept_col, selected_depts))
+
+            if field_filters:
+                before_count = len(claims_df)
+                claims_df = crp.filter_claims_by_fields(claims_df, field_filters)
+                report(f"\nUnit/Client Name/Department filter(s) applied: {before_count:,} -> "
+                       f"{len(claims_df):,} claim(s) kept.")
 
             report(f"Loading IGI Premium Register: {os.path.basename(register_path)}...")
             reg_df, ins_col, doc_col, base_doc_col, leader_col, share_col = crp.load_premium_register_file(register_path, report=report)
