@@ -49,7 +49,14 @@ ABBREVIATIONS = {
     "AIC": "Adamjee Insurance",
     "JGE": "Jubilee Insurance",
     "JGI": "Jubilee Insurance",  # common alternate spelling of the same abbreviation
-    "UBL": "United Bank",
+    # NOTE: "UBL" is deliberately NOT mapped to "United Bank" here (it used
+    # to be). UBL Insurers and United Insurance Company are two different
+    # real companies - but mapping "UBL" -> "United Bank" made
+    # get_merge_key() reduce BOTH of them down to the same "UNITED" key
+    # (United Bank's own leading token), which silently merged "UBL ..."
+    # labels into "United Insurance ..."'s bucket/file. UBL's own leading
+    # token ("UBL") is already a perfectly good, distinct merge key on its
+    # own, so no abbreviation entry is needed (or wanted) for it at all.
 }
 
 
@@ -87,6 +94,84 @@ def get_merge_key(label):
         canonical = ABBREVIATIONS[token_letters]
         return _letters_upper(_first_token(canonical))
     return token_letters or str(label).strip().upper()
+
+
+# ---------------------------------------------------------------------------
+# Canonical output filenames for a fixed list of known companies. Used by
+# the Claims Register and Receivable generators to name a bucket's output
+# file/workbook after the company using this exact, requested convention,
+# instead of deriving the filename mechanically from whatever raw/merged
+# bucket label happened to win (which can vary - "Atlas Insurance Co Ltd"
+# vs "ATLAS_INSURANCE_FAISALABAD" vs "Atlas Insurance Company Limited" all
+# refer to the same real company but would otherwise produce different
+# filenames depending on which raw label happened to be picked as the
+# merge representative).
+#
+# Matching is substring-based against the label's own compacted (letters
+# only, uppercased, spaces/punctuation stripped) form, checked in the
+# order listed below - deliberately looser than get_merge_key()'s "first
+# token only" rule, since a filename should resolve correctly regardless
+# of exactly how the raw or merged bucket label happens to be worded/
+# ordered (e.g. "AIC Adamjee House Branch" and "Adamjee Insurance Co Ltd"
+# should both resolve to the same canonical Adamjee filename). A company
+# NOT in this list falls back to the existing safe_filename_part()-based
+# naming in each generator, unchanged.
+#
+# IMPORTANT - UBL vs United: kept as two separate, non-overlapping entries
+# on purpose. "UBL" and "UNITED" share no common substring, so a UBL
+# Insurers bucket can never accidentally resolve to the United Insurance
+# Company filename (or vice versa) - see the note above ABBREVIATIONS for
+# the related merge-key bug this was fixed alongside.
+# ---------------------------------------------------------------------------
+CANONICAL_COMPANY_FILENAMES = [
+    ("ADAMJEE", "Adamjee_Insurance_Company_LTD"),
+    ("ALFALAH", "Alfalah_Insurance_Company_LTD"),
+    ("ALPHA", "Alpha_Insurance_Company_LTD"),
+    ("ASKARI", "Askari_Insurance_Company_LTD"),
+    ("ASIA", "Asia_Insurance_Company_LTD"),
+    ("ATLAS", "Atlas_Insurance_Company_LTD"),
+    ("CENTURY", "Century_Insurance_Company_LTD"),
+    ("CHUBB", "Chubb_Insurance_Company_Pakistan_LTD"),
+    ("EASTWEST", "East_West_Insurance_Company_LTD"),
+    ("EFU", "EFU_General_Insurance_Company_LTD"),
+    ("HABIB", "Habib_Insurance_Company_LTD"),
+    ("IGI", "IGI_General_Insurance_Company_LTD"),
+    ("JUBILEE", "Jubilee_General_Insurance_Company_LTD"),
+    ("PAKQATAR", "PAK_Qatar_General_Takaful"),
+    ("PREMIER", "Premier_Insurance_Company_LTD"),
+    ("RELIANCE", "Reliance_Insurance_Company_LTD"),
+    ("SALAAM", "Salaam_Takaful_LTD"),
+    ("SAUDIPAK", "Saudi_PAK_Insurance_Company_LTD"),
+    ("SECURITYGENERAL", "Security_General_Insurance_Company_LTD"),
+    ("SHAHEEN", "Shaheen_Insurance_Company_LTD"),
+    ("PAKISTANGENERAL", "The_Pakistan_General_Insurance_Company_LTD"),
+    ("TPL", "TPL_Insurance_Company_LTD"),
+    ("UBL", "UBL_Insurance_Company_LTD"),
+    ("UNITED", "United_Insurance_Company_LTD"),
+    ("UNIVERSAL", "Universal_Insurance_Company_LTD"),
+]
+
+
+def canonical_filename_for_label(label):
+    """
+    Return the fixed canonical filename stub (no date suffix, no
+    extension) for `label` if it identifies one of the companies listed in
+    CANONICAL_COMPANY_FILENAMES above, else None - callers should fall
+    back to their own existing safe_filename_part()-based naming when this
+    returns None, so every company not on the fixed list keeps behaving
+    exactly as before.
+
+    An abbreviation-prefixed label (e.g. "AIC ...", "JGE ...") is resolved
+    to its real company name first (the same ABBREVIATIONS lookup
+    get_merge_key() already uses), so it matches by real name rather than
+    needing its own separate substring entry here.
+    """
+    token_letters = _letters_upper(_first_token(label))
+    search_text = _letters_upper(ABBREVIATIONS.get(token_letters, "")) + _letters_upper(label)
+    for substring, filename in CANONICAL_COMPANY_FILENAMES:
+        if substring in search_text:
+            return filename
+    return None
 
 
 def self_merge_bucket_labels(bucket_labels, weight_by=None):

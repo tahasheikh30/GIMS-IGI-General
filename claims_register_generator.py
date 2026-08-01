@@ -35,6 +35,8 @@ from openpyxl.chart.text import RichText, Text
 from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
+import company_alias_resolver as car
+
 try:
     from perf_utils import style_budget_ok, ThrottledReporter, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
@@ -132,7 +134,15 @@ def safe_filename_part(name):
 
 def build_output_filename(bucket_label, run_date=None):
     run_date = run_date or date.today()
-    return f"{safe_filename_part(bucket_label)}_ClaimsRecovery_{run_date.strftime('%d%m%Y')}.xlsx"
+    # A fixed, requested naming convention applies to a known set of
+    # companies (see company_alias_resolver.CANONICAL_COMPANY_FILENAMES) -
+    # e.g. always "UBL_Insurance_Company_LTD" / "United_Insurance_Company_LTD"
+    # regardless of exactly how that company's raw/merged bucket label
+    # happens to be worded. Any company not on that fixed list keeps the
+    # original sanitized-label naming, unchanged.
+    canonical = car.canonical_filename_for_label(bucket_label)
+    stub = canonical if canonical else safe_filename_part(bucket_label)
+    return f"{stub}_ClaimsRecovery_{run_date.strftime('%d%m%Y')}.xlsx"
 
 
 def _prepare_for_excel(df, date_cols):
