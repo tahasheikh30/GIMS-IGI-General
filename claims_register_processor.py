@@ -89,6 +89,8 @@ from premium_register_processor import (
 )
 from difflib import SequenceMatcher
 
+import company_alias_resolver as car
+
 try:
     from perf_utils import fast_read_excel_rows, estimate_row_count
     _PERF_AVAILABLE = True
@@ -738,25 +740,44 @@ def match_one_claim(pmd_value, register_df, ins_col, doc_col, base_doc_col, lead
     if len(coinsurer_rows) == 0:
         return {"status": "No Coinsurer", "policy_doc_no": policy_doc_no, "match_score": round(best_digit_ratio, 3), "coinsurers": []}
 
-    # DEDUPE BY COMPANY NAME: a real Premium Register can carry more than
-    # one row for the SAME coinsurer under the SAME Base Doc No - e.g. a
-    # separate row per endorsement/transaction on that policy, all
-    # sharing the same "Ins" company and (normally) the same "Share" - a
-    # confirmed real case that was previously fanning a single claim out
-    # into one duplicate coinsurer entry PER register row for that
-    # company (e.g. 4 near-identical rows in the output for a company
-    # that had 4 transaction rows on the policy), rather than exactly one
-    # entry per distinct coinsurer. Grouped here by the normalized
-    # (stripped/uppercased) company name, keeping only the FIRST row seen
-    # per company - Share % is a property of the coinsurer's stake in the
-    # policy, not of any one transaction row, so it should never be
-    # multiplied just because the register happens to log that company
-    # more than once for the same policy.
+    # DEDUPE BY COMPANY: a real Premium Register can carry more than one
+    # row for the SAME coinsurer under the SAME Base Doc No. Two distinct
+    # ways this shows up, both of which must collapse to a SINGLE fan-out
+    # entry per claim:
+    #   1. Same exact spelling repeated - e.g. a separate row per
+    #      endorsement/transaction on that policy, all sharing the same
+    #      "Ins" text and (normally) the same "Share".
+    #   2. Two different SPELLINGS of the same real company on the same
+    #      policy - a confirmed real case: one policy carried both
+    #      "ATLAS INSURANCE COMPANY" and "ATLAS INSURANCE LTD" as separate
+    #      register rows, each at an identical 25% share. A plain
+    #      exact-text dedupe (the previous behavior here) does not catch
+    #      this, since the two strings genuinely differ character-for-
+    #      character - so every claim on that policy was silently fanned
+    #      out to "Atlas" TWICE, each carrying the identical share and
+    #      the identical PKR amount. That doubles what's actually owed,
+    #      and once the same claim's two entries later land in the same
+    #      output file (either because they already shared the exact
+    #      bucket label, or after the "Merge files for the same company"
+    #      checkbox combines their buckets), it reads as the exact same
+    #      claim row repeated twice.
+    # Both cases are deduped here the same way, using
+    # company_alias_resolver.get_merge_key() - the identical name-
+    # normalization the "Merge files for the same company" checkbox
+    # already uses to decide two raw names are the same real company
+    # (same leading-token / known-abbreviation rules) - rather than a
+    # bare uppercase-and-strip comparison, so a register-side spelling
+    # duplicate is caught here at match time regardless of whether the
+    # merge checkbox is ever used downstream. Keeping only the FIRST row
+    # seen per company - Share % is a property of the coinsurer's stake
+    # in the policy, not of any one transaction row or spelling, so it
+    # should never be multiplied just because the register logs that
+    # company under more than one row or more than one name.
     seen_companies = set()
     coinsurers = []
     for _, r in coinsurer_rows.iterrows():
         company = str(r[ins_col]).strip()
-        key = company.upper()
+        key = car.get_merge_key(company)
         if key in seen_companies:
             continue
         seen_companies.add(key)
