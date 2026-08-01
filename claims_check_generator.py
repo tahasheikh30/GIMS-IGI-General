@@ -1,9 +1,10 @@
 """
 Writes the Claims Check matching output: every original column from the
-leader's own claims sheet, plus the matched IGI Base Doc No. and match
-diagnostics, with unmatched rows highlighted so they're immediately
-visible as needing manual review - i.e. a claim the leader billed us for
-that we can't find any record of in our own Premium Register.
+leader's own claims sheet, plus the matched IGI Policy Number (Doc Ref #)
+and match diagnostics, with unmatched rows highlighted so they're
+immediately visible as needing manual review - i.e. a claim the leader
+billed us for that we can't find any record of in our own Premium
+Register.
 
 Styling mirrors premium_register_generator.py (the Policy Check module
 this is the claims-side counterpart to) so output looks consistent with
@@ -63,7 +64,7 @@ MATCHED_NEW_COL_FILL = PatternFill("solid", start_color="E2EFDA", end_color="E2E
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
-NEW_COLUMNS = ["IGI Base Doc No.", "Match Score", "Match Status"]
+NEW_COLUMNS = ["IGI Policy Number", "Matched Leader Ref (Register)", "Match Score", "Match Status"]
 
 
 def _write_text_safe(cell):

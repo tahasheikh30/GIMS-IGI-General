@@ -2330,13 +2330,14 @@ class BalanceApp(tk.Tk):
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
         ttk.Label(header, text="Check whether a co-insurance leader's own claims file references a policy "
                                 "that actually exists in our own books, by matching each claim's Policy/PMD # "
-                                "against IGI's Premium Register.",
+                                "against IGI's Premium Register's own Leader Ref Number (the same column Policy "
+                                "Check matches against) and pulling in the matched IGI Policy Number (Doc Ref #).",
                   foreground=self.COLOR_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 10))
 
         info_badge = tk.Frame(header, bg=self.COLOR_ACCENT_SOFT)
         info_badge.pack(anchor="w")
         tk.Frame(info_badge, bg=self.COLOR_GOLD, width=3).pack(side="left", fill="y")
-        tk.Label(info_badge, text="Same fuzzy digit-run matching engine as Claims Intimation \u2014 unmatched claims are flagged red for manual review, not guessed",
+        tk.Label(info_badge, text="Same fuzzy digit-run matching engine as Policy Check \u2014 unmatched claims are flagged red for manual review, not guessed",
                  bg=self.COLOR_ACCENT_SOFT, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
                  padx=14, pady=8).pack(side="left")
 
@@ -2362,7 +2363,7 @@ class BalanceApp(tk.Tk):
 
         register_row = self._premreg_file_row(
             s1, "IGI Premium Register",
-            "Our own register \u2014 carries the original policy (Base Doc No.) every later transaction, including a claim, is issued/renewed from.",
+            "Our own register \u2014 carries the leader's own reference back to us (Leader Ref Number) alongside our IGI Policy Number (Doc Ref #), the same two columns Policy Check matches on.",
         )
         self.claimscheck_register_icon, self.claimscheck_register_name_var = register_row[0], register_row[1]
         self._make_pill_button(register_row[2], "Browse...", self._browse_claimscheck_register_file,
@@ -2371,7 +2372,8 @@ class BalanceApp(tk.Tk):
         # --- Section 2: Run matching ---
         s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
         claimscheck_s2_note = ttk.Label(s2, text="Every original column from the leader's claims file is preserved, plus the "
-                            "matched IGI Base Doc No., a match score, and a Matched/Not Matched status.",
+                            "matched IGI Policy Number (Doc Ref #), the matched register reference, a match score, "
+                            "and a Matched/Not Matched status.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claimscheck_s2_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(claimscheck_s2_note, s2, side_padding=10)
@@ -2441,13 +2443,13 @@ class BalanceApp(tk.Tk):
             report(f"  {len(leader_df):,} row(s) loaded. Policy/PMD # column detected as '{pmd_col}'.")
 
             report("Loading IGI Premium Register...")
-            register_df, doc_col, base_doc_col = ccp.load_register_file(register_file)
-            report(f"  {len(register_df):,} row(s) loaded. Base Doc No column='{doc_col}'"
-                   + (f", Document No column='{base_doc_col}'." if base_doc_col else " (no Document No column found - matching against Base Doc No only)."))
+            register_df, leader_ref_col, igi_policy_col = ccp.load_register_file(register_file)
+            report(f"  {len(register_df):,} row(s) loaded. Leader Ref Number column='{leader_ref_col}', "
+                   f"IGI Policy Number column='{igi_policy_col}'.")
 
             report(f"\nChecking {len(leader_df):,} claim(s) against {len(register_df):,} register row(s)...")
             report.progress(0, len(leader_df), text=f"Checking 0 / {len(leader_df):,} claim(s)")
-            result = ccp.match_leader_claims_file(leader_df, pmd_col, register_df, doc_col, base_doc_col, report=report)
+            result = ccp.match_leader_claims_file(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=report)
             return result
 
         def on_done(result):
