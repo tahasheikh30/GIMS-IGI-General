@@ -200,8 +200,9 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
 
     # Small summary note below the table
     note_row = len(result_df) + 3
+    match_pct_text = f"{n_matched / n_total:.1%}" if n_total else "N/A"
     ws.cell(row=note_row, column=1,
-             value=f"Matched {n_matched} of {n_total} ({n_matched / n_total:.1%}) - "
+             value=f"Matched {n_matched} of {n_total} ({match_pct_text}) - "
                    f"unmatched rows are highlighted and need manual entry into the Premium Register.")\
         .font = Font(name="Arial", size=9, italic=True, color="6C7A89")
 

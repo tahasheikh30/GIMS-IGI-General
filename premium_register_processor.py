@@ -91,10 +91,21 @@ REGISTER_ALIASES = {
         "leader#", "leader #", "leader no", "leader number", "leader ref no",
         "leader ref. no", "leader ref number", "leader reference number",
         "leader ref", "leaderref",
+        # "Base Doc No." - confirmed real header on the current Premium
+        # Register export (same file/column Claims Register's own
+        # REGISTER_ALIASES already recognizes as its primary matching
+        # column) - this module was still only matching the older
+        # "Leader#"-style header until this was added, so it silently
+        # failed to load the current export format entirely.
+        "base doc no", "base doc no.", "base document no",
     ],
     "IGI Policy Number": [
         "doc ref #", "doc ref#", "doc reference", "doc ref number",
         "igi policy number", "igi policy no", "igi doc ref", "doc no",
+        # "Document No." - the current export's own name for the specific
+        # transaction/document, paired with "Base Doc No." above the same
+        # way Claims Register already treats the two columns.
+        "document no", "document no.", "document number",
     ],
 }
 
@@ -378,8 +389,30 @@ def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hin
     # a real 204,220-row Premium Register that this module would
     # otherwise have silently read only its first 65,523 rows and missed
     # the remaining 138,697 with no warning at all.
-    try:
-        from perf_utils import fast_read_excel_rows
+    ext = os.path.splitext(filepath)[1].lower()
+    # Fast path only for a genuine .xlsx file. A non-.xlsx file (a legacy
+    # .xls, or its LibreOffice-converted .xlsx stand-in) stays on the SAME
+    # reader (xlrd/pandas) used for the header-row PREVIEW scan above -
+    # this mirrors the identical .xlsx-only gate claims_register_processor.py's
+    # own _read_full_sheet() already uses, for the same reason: python-calamine
+    # (perf_utils.fast_read_excel_rows' preferred reader) trims genuinely-
+    # blank leading/trailing columns that xlrd/pandas does not. Confirmed
+    # against a real 204,220-row register split across 4 sheets at Excel's
+    # old 65,536-row cap: Sheet1's own leading blank column made calamine
+    # report 18 columns where the preview scan reported 19, so
+    # _find_continuation_sheets()'s column-count check silently rejected
+    # Sheet2/3/4 as "not real continuations" and this function returned
+    # only Sheet1's ~65,520 rows - 32% of the real register - with no
+    # error or warning at all. Keeping both reads on the same library
+    # removes that discrepancy entirely.
+    use_fast_path = (ext == ".xlsx")
+    if use_fast_path:
+        try:
+            from perf_utils import fast_read_excel_rows
+        except ImportError:
+            use_fast_path = False
+
+    if use_fast_path:
         rows, _n = fast_read_excel_rows(resolved_filepath, sheet_name)
         # Re-locate the header row directly against THESE rows, rather
         # than blindly reusing the row index found by the separate
@@ -420,7 +453,7 @@ def load_raw_data(filepath, aliases_dict, sheet_name=None, prefer_sheet_name_hin
                 cont_rows, _n2 = fast_read_excel_rows(resolved_filepath, sn)
                 frames.append(pd.DataFrame(cont_rows, columns=columns))
             data = pd.concat(frames, ignore_index=True)
-    except ImportError:
+    else:
         raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         columns = _dedupe_columns(raw.iloc[header_row].tolist())
         data = raw.iloc[header_row + 1:].reset_index(drop=True)

@@ -171,8 +171,9 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
         ws.column_dimensions[get_column_letter(j)].width = width
 
     note_row = len(result_df) + 3
+    match_pct_text = f"{n_matched / n_total:.1%}" if n_total else "N/A"
     ws.cell(row=note_row, column=1,
-             value=f"Matched {n_matched} of {n_total} ({n_matched / n_total:.1%}) - "
+             value=f"Matched {n_matched} of {n_total} ({match_pct_text}) - "
                    f"unmatched claims are highlighted and need manual review (the policy they reference "
                    f"could not be found in our own Premium Register).")\
         .font = Font(name="Arial", size=9, italic=True, color="6C7A89")
