@@ -2633,6 +2633,61 @@ class BalanceApp(tk.Tk):
                    command=self.analyze_receivable)
         self.analyze_receivable_btn.grid(row=4, column=0, sticky="w", padx=6, pady=(4, 4))
 
+        # ---- Section: Filters (multi-select, optional) ----
+        # Same "Load Filter Options" + multi-select-listbox pattern used by
+        # Claims Intimation's Unit/Client Name/Department filters: rather
+        # than typing exact names by hand (the text filters above), these
+        # are populated straight from the loaded master file's own real
+        # distinct values, so there's nothing to mistype and nothing to go
+        # stale relative to the actual source data. Applied AFTER the
+        # exact-name text filters above (both narrow further, combined
+        # with AND), on the same "Class" / "Client Name" / "Company"
+        # columns _detect_mode() already resolves for grouping.
+        multiselect_filter_box = ttk.Labelframe(canvas_frame, text="  Filters (multi-select, optional)  ", padding=14)
+        multiselect_filter_box.pack(fill="x", padx=12, pady=8)
+        multiselect_filter_box.columnconfigure(0, weight=1)
+        multiselect_filter_box.columnconfigure(1, weight=1)
+        multiselect_filter_box.columnconfigure(2, weight=1)
+
+        receivable_multiselect_note = ttk.Label(
+            multiselect_filter_box, text="Click \"Load Filter Options\" after \"Load & Validate Data\" above to "
+                                          "populate these lists from that file's own values.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        receivable_multiselect_note.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
+        self._bind_dynamic_wraplength(receivable_multiselect_note, multiselect_filter_box, side_padding=10)
+
+        load_receivable_filters_row = ttk.Frame(multiselect_filter_box, style="Panel.TFrame")
+        load_receivable_filters_row.grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 10))
+        self.receivable_load_filters_btn = ttk.Button(load_receivable_filters_row, text="Load Filter Options",
+                                                        command=self._load_receivable_filter_options)
+        self.receivable_load_filters_btn.pack(side="left")
+        self.receivable_filter_status_var = tk.StringVar(value="")
+        ttk.Label(load_receivable_filters_row, textvariable=self.receivable_filter_status_var, style="Muted.TLabel",
+                  background=self.COLOR_PANEL).pack(side="left", padx=(10, 0))
+
+        def _receivable_filter_listbox_col(parent, col_idx, title):
+            col = ttk.Frame(parent, style="Panel.TFrame")
+            col.grid(row=2, column=col_idx, sticky="nsew", padx=6, pady=4)
+            ttk.Label(col, text=title, style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            ttk.Label(col, text="Ctrl+click to select multiple \u00b7 none = all", style="Muted.TLabel",
+                      background=self.COLOR_PANEL).pack(anchor="w", pady=(0, 4))
+            frame = tk.Frame(col, highlightbackground="#D6DCE1", highlightthickness=1)
+            frame.pack(fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical")
+            listbox = tk.Listbox(frame, selectmode="extended", height=10, width=32,
+                                  exportselection=False, font=("Segoe UI", 10),
+                                  activestyle="none", relief="flat", borderwidth=0,
+                                  selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                  highlightthickness=0, yscrollcommand=scroll.set)
+            scroll.config(command=listbox.yview)
+            listbox.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            return listbox
+
+        self.receivable_class_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 0, "Class filter")
+        self.receivable_filter_client_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 1, "Client Name filter")
+        self.receivable_filter_company_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 2, "Company filter")
+
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
         log_box.pack(fill="both", expand=True, padx=12, pady=(8, 12))
@@ -2847,6 +2902,45 @@ class BalanceApp(tk.Tk):
             on_done=on_done, on_error=on_error,
         )
 
+    def _load_receivable_filter_options(self):
+        """
+        'Load Filter Options' button - populates the Class / Client Name /
+        Company multi-select listboxes with the real distinct values from
+        whatever's already loaded in self.receivable_clean_df (via "Load &
+        Validate Data" above), same "load once, populate a multi-select
+        Listbox" interaction as Claims Intimation's own Unit/Client
+        Name/Department filters (see _load_claims_filter_options). Data is
+        already in memory here (unlike Claims Intimation, which reads its
+        own file fresh), so this runs directly on the main thread rather
+        than through run_in_background.
+        """
+        if self.receivable_clean_df is None:
+            messagebox.showerror("Error", "Click 'Load & Validate Data' above first.")
+            return
+
+        df = self.receivable_clean_df
+        colmap = self.receivable_colmap
+
+        def _populate(listbox, orig_col):
+            listbox.delete(0, "end")
+            if not orig_col or orig_col not in df.columns:
+                return
+            values = sorted(df[orig_col].dropna().astype(str).str.strip().unique())
+            values = [v for v in values if v]
+            for i, v in enumerate(values):
+                listbox.insert("end", v)
+                listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+        _populate(self.receivable_class_listbox, colmap.get("class"))
+        _populate(self.receivable_filter_client_listbox, colmap.get("client"))
+        _populate(self.receivable_filter_company_listbox, colmap.get("company"))
+
+        if not colmap.get("class"):
+            self.receivable_filter_status_var.set(
+                f"Loaded {len(df):,} row(s). No 'Class' column found in this file - that filter is unavailable.")
+        else:
+            self.receivable_filter_status_var.set(f"Loaded {len(df):,} row(s).")
+
     def analyze_receivable(self):
         if self.receivable_clean_df is None:
             messagebox.showerror("Error", "Load data first (tab 1).")
@@ -2854,6 +2948,7 @@ class BalanceApp(tk.Tk):
 
         client_col = self.receivable_colmap["client"]
         company_col = self.receivable_colmap["company"]
+        class_col = self.receivable_colmap.get("class")
         df = self.receivable_clean_df
 
         client_text = self.receivable_client_filter_var.get().strip()
@@ -2865,6 +2960,34 @@ class BalanceApp(tk.Tk):
         if company_text:
             company_filter = [c.strip() for c in company_text.split(",") if c.strip()]
             df = df[df[company_col].isin(company_filter)]
+
+        # Multi-select Class/Client Name/Company filters (see "Load Filter
+        # Options" above) - read from the listboxes here, on the MAIN
+        # thread, since Tkinter widgets must never be queried from a
+        # background thread (same rule Claims Intimation's own listbox
+        # filters follow - see load_and_match_claims). Combines with AND
+        # against the exact-name text filters above, and against each
+        # other, via receivable_processor.filter_receivable_by_fields.
+        selected_classes = [self.receivable_class_listbox.get(i) for i in self.receivable_class_listbox.curselection()]
+        selected_clients_multi = [self.receivable_filter_client_listbox.get(i) for i in self.receivable_filter_client_listbox.curselection()]
+        selected_companies_multi = [self.receivable_filter_company_listbox.get(i) for i in self.receivable_filter_company_listbox.curselection()]
+
+        field_filters = []
+        if selected_classes:
+            if not class_col:
+                self.log_receivable("\nWARNING: Class filter requested, but no 'Class' column was found in this file - filter skipped.")
+            else:
+                field_filters.append((class_col, selected_classes))
+        if selected_clients_multi:
+            field_filters.append((client_col, selected_clients_multi))
+        if selected_companies_multi:
+            field_filters.append((company_col, selected_companies_multi))
+
+        if field_filters:
+            before_count = len(df)
+            df = rvp.filter_receivable_by_fields(df, field_filters)
+            self.log_receivable(f"\nClass/Client Name/Company multi-select filter(s) applied: "
+                                 f"{before_count:,} -> {len(df):,} row(s) kept.")
 
         self.status_var.set("Analyzing / building groups...")
 

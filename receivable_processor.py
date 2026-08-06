@@ -472,7 +472,46 @@ def validate_data(df):
     clean_df["_rec_company"] = clean_df[company_col].astype(str).str.strip()
 
     issues_df = pd.DataFrame(issues)
-    return clean_df, issues_df, dropped_columns, {"mode": mode, "client": client_col, "company": company_col, "leader_ref": ref_col, **cols}
+    # "Class" (aliased to "class"/"department"/"class of business"/"line of
+    # business") isn't otherwise required for grouping, so _detect_mode()'s
+    # own `cols` dict never carried it - but it's a useful filter field
+    # (see filter_receivable_by_fields / app.py's "Load Filter Options"),
+    # so surface its real original column name here too, the same way
+    # client/company already are. inv here is colmap inverted (canonical ->
+    # first original column that mapped to it); None if this source file
+    # doesn't have a recognizable Class-style column at all, in which case
+    # that filter is simply unavailable, same as any other optional column.
+    inv = {}
+    for orig, canon in colmap.items():
+        inv.setdefault(canon, orig)
+    return clean_df, issues_df, dropped_columns, {
+        "mode": mode, "client": client_col, "company": company_col, "leader_ref": ref_col,
+        "class": inv.get("Class"), **cols,
+    }
+
+
+def filter_receivable_by_fields(df, field_filters):
+    """
+    Restrict df to rows matching a set of exact-value column filters - same
+    convention as claims_register_processor.filter_claims_by_fields (used
+    by the Receivable module's own "Filters (optional)" multi-select
+    listboxes: Class / Client Name / Company, Ctrl+click for several
+    values, none selected = all).
+
+    field_filters: list of (original_column_name, [exact_value, ...])
+        tuples. A filter is skipped if its column wasn't found in df
+        (None) or its value list is empty. Multiple filters combine with
+        AND (each narrows further). Matching is on the column's own
+        stripped string value, not normalized/fuzzy - same exact-match
+        behavior as every other comma-separated filter in GIMS.
+
+    Returns the filtered dataframe (index reset).
+    """
+    for col, values in field_filters:
+        if not values or col is None or col not in df.columns:
+            continue
+        df = df[df[col].astype(str).str.strip().isin(values)]
+    return df.reset_index(drop=True)
 
 
 _HELPER_COLS = ["_rec_client", "_rec_company", "_rec_premium_amt", "_rec_claims_amt"]

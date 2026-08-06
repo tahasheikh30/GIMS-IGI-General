@@ -49,6 +49,8 @@ ABBREVIATIONS = {
     "AIC": "Adamjee Insurance",
     "JGE": "Jubilee Insurance",
     "JGI": "Jubilee Insurance",  # common alternate spelling of the same abbreviation
+    "RIC": "Reliance Insurance",
+    "AGI": "Askari General Insurance",
     # NOTE: "UBL" is deliberately NOT mapped to "United Bank" here (it used
     # to be). UBL Insurers and United Insurance Company are two different
     # real companies - but mapping "UBL" -> "United Bank" made
