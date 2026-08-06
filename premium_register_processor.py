@@ -24,7 +24,7 @@ differently, e.g. "1/114591/25585/11006" vs. our "2691025585/12/2023").
 In practice the two numbers reliably share at least one distinctive
 digit run (the policy/endorsement's own numeric core) even when
 everything else around it - separators, prefixes, date-like suffixes -
-differs. So matching works in two stages:
+differs. So matching works in three stages:
   1. BLOCKING - index every register row by its own digit runs (4+ digit
      substrings), then look up candidate rows for a leader value by its
      own digit runs. This keeps matching fast (no need to compare every
@@ -33,11 +33,29 @@ differs. So matching works in two stages:
   2. SCORING - among the (usually small) candidate set, pick whichever
      register row shares the longest COMPLETE digit run (its own
      policy/endorsement number as a whole token) with the query, using
-     overall digit-string similarity only as a tiebreaker. A row with no
-     candidates, or whose best candidate doesn't clear the acceptance
-     thresholds (see MIN_RUN_MATCH / MIN_RATIO_FALLBACK), is left
-     unmatched rather than forced onto a poor guess - a wrong policy
-     number would be worse than none, since someone would act on it.
+     branch/class-code similarity as the primary tiebreaker and overall
+     digit-string similarity as a secondary one (see MIN_ALPHA_RATIO
+     below for why the branch/class code has to be checked at all).
+  3. ACCEPTANCE - a row with no candidates, or whose best candidate
+     doesn't clear the acceptance thresholds (see MIN_RUN_MATCH /
+     MIN_RATIO_FALLBACK / MIN_ALPHA_RATIO), is left unmatched rather than
+     forced onto a poor guess - a wrong policy number would be worse
+     than none, since someone would act on it.
+
+BRANCH/CLASS-CODE SAFEGUARD (MIN_ALPHA_RATIO): a real leader file whose
+own reference is itself a self-numbering "YYYY/MM/CODE#####" style value
+(rather than a plain numeric NUMS-style reference) restarts its serial
+numbering back at 1 PER DEPARTMENT/BRANCH - confirmed against a real
+Indus Motor Company settlement statement, where digit-only matching
+alone had matched a Fire transaction to a Marine register row, and
+(system-wide, once checked) roughly a quarter of every "Matched" row in
+that run turned out to be matched into the wrong department purely
+because two unrelated transactions in different departments happened to
+share the same restarting-at-1 serial number. Matching now also requires
+the candidate's own branch/class code (the letters embedded in the
+reference - see _alpha_only / MIN_ALPHA_RATIO's own docstring, further
+down, for the full detail and the real numbers this was calibrated
+against) to plausibly agree before a shared digit run is trusted.
 """
 import os
 import re
@@ -703,6 +721,40 @@ def _digits_only(value):
     return re.sub(r"\D", "", str(value))
 
 
+_ALPHA_ONLY_RE = re.compile(r"[^A-Za-z]")
+
+
+def _alpha_only(value):
+    """Letters-only, uppercased form of a reference (digits/slashes/dashes
+    stripped) - e.g. "2025/03/GroupMIPOE00033" -> "GROUPMIPOE". This is
+    the branch/department/class code embedded in the reference - see
+    MIN_ALPHA_RATIO's own docstring below for why comparing this is what
+    fixes a confirmed real cross-department mismatch bug."""
+    return _ALPHA_ONLY_RE.sub("", str(value)).upper()
+
+
+def _strip_common_prefix(a, b):
+    """Return (a, b) with whatever LITERAL prefix they share verbatim
+    removed from both - e.g. ("GROUPMIPOE", "GROUPSMTOE") -> ("MIPOE",
+    "SMTOE"). Used only for the alpha/class-code comparison (see
+    MIN_ALPHA_RATIO) to stop a boilerplate word shared by nearly every
+    reference in a file (confirmed real case: "Group", present at the
+    start of virtually every reference in a real Indus Motor Company
+    settlement statement) from inflating SequenceMatcher's ratio and
+    masking the ACTUAL class-code difference that sits right after it.
+    Computed per-pair, dynamically, from whatever the two strings being
+    compared actually share - nothing about "Group" (or any other
+    specific word) is hardcoded, so this works the same way for a
+    partner file that has no shared boilerplate at all (nothing gets
+    stripped, and the comparison falls back to the plain full-string
+    ratio unchanged)."""
+    n = 0
+    limit = min(len(a), len(b))
+    while n < limit and a[n] == b[n]:
+        n += 1
+    return a[n:], b[n:]
+
+
 def _score_candidate(query_runs, cand_digits):
     """
     Cheap first-pass score: the length of the longest of the query's own
@@ -728,16 +780,17 @@ def _score_candidate(query_runs, cand_digits):
         match_leader_file's register_digits_series) - also precomputed
         rather than re-derived per candidate.
 
-    Returns best_run_len only. The SequenceMatcher ratio (the tiebreaker/
-    fallback signal) is scored separately, and only for whichever
-    candidates tie for the best run_len found across the WHOLE candidate
-    set - see match_one. A candidate with a shorter run_len can never
-    win regardless of its ratio, since acceptance/ranking always compares
-    (run_len, ratio) with run_len first, so there is nothing to gain by
-    also ratio-scoring it - this two-pass split is what makes matching
-    fast without changing the result: it's the exact same (run_len,
-    ratio) comparison as before, just skipping ratio computation for
-    candidates that can't possibly win it.
+    Returns best_run_len only. The SequenceMatcher-based scoring (alpha
+    similarity, then digit-ratio tiebreaker - see MIN_ALPHA_RATIO and
+    match_one) is scored separately, and only for whichever candidates
+    tie for the best run_len found across the WHOLE candidate set - see
+    match_one. A candidate with a shorter run_len can never win
+    regardless of its alpha/digit ratio, since acceptance/ranking always
+    compares (run_len, alpha_ratio, digit_ratio) with run_len first, so
+    there is nothing to gain by also scoring it - this two-pass split is
+    what keeps matching fast: it's the same (run_len, ...) comparison as
+    before, just skipping the expensive part for candidates that can't
+    possibly win it.
     """
     best_run_len = 0
     for run in query_runs:
@@ -749,9 +802,77 @@ def _score_candidate(query_runs, cand_digits):
 MIN_RUN_MATCH = 4   # a fully-contained query run shorter than this is too common to trust alone
 MIN_RATIO_FALLBACK = 0.75  # only used to accept a match with no qualifying full-run overlap
 
+# ---------------------------------------------------------------------------
+# Branch/class-code safeguard - fixes a confirmed real mismatch bug.
+#
+# CONFIRMED BUG: matching a real leader file (Indus_Settlement_F.xlsx)
+# against a real register (Indus_Motor_Premium.xls) produced Policy
+# Check output where a Fire-department transaction had been matched to a
+# Marine register row, and - once checked properly - roughly a quarter
+# of ALL "Matched" rows in that run turned out to be matched to a
+# register row in a DIFFERENT department (Marine matched to Engineering,
+# Fire, or Miscellaneous) than the leader's own transaction, plus a
+# further, larger set matched to a register row in the SAME broad
+# department but a genuinely different, unrelated sub-class/transaction.
+#
+# ROOT CAUSE: this leader's own reference (e.g. "2025/01/GroupMIPOC00024")
+# and the register's own Leader Ref Number/Base Doc No (which records
+# that same leader-assigned reference back, verbatim) share the exact
+# "YYYY/MM/CODE#####" shape claims_register_processor.py's own module
+# docstring already documents as prone to this collision: every branch/
+# department/class restarts its OWN serial numbering back at 1, so two
+# completely unrelated transactions in two different departments can
+# carry the IDENTICAL digit string (confirmed directly: a real Marine
+# transaction's serial "00024" and a real, unrelated Miscellaneous
+# transaction's serial "00024" are digit-for-digit identical -
+# "20250100024" - even though the register's own Department/Class field
+# says "Miscellaneous"/"ALL RISK INSURANCE" for that row, nothing to do
+# with the leader's actual Marine transaction). The matcher above only
+# ever compares DIGITS, so a shared serial number alone was enough to
+# force a confident match across completely unrelated departments -
+# exactly the "a wrong policy number would be worse than none" failure
+# this module's own docstring warns against, just not actually prevented
+# for this reference shape.
+#
+# FIX: require the candidate's own branch/class CODE (the letters
+# embedded in the reference, see _alpha_only) to also plausibly agree
+# before a digit-run match is accepted - the same safeguard
+# claims_register_processor.py already applies via its own
+# MIN_ALPHA_RATIO, adapted here for this module's specific data shape.
+#
+# WHY THE COMPARISON IS DONE DIFFERENTLY THAN CLAIMS REGISTER'S OWN:
+# claims_register_processor.py compares the FULL alpha string as-is,
+# which works there because its real reference format has no big shared
+# boilerplate word diluting the comparison. Confirmed this ISN'T true
+# here: this leader's own convention prefixes virtually EVERY reference
+# with the literal word "Group" before the actual class code (e.g.
+# "GroupMIPOC", "GroupSMTOE", "GroupEEEOE" - Marine, Miscellaneous, and
+# Engineering respectively), so a plain whole-string SequenceMatcher
+# ratio between two DIFFERENT classes still comes out misleadingly high
+# (~0.6-0.7) purely from that shared "Group" prefix, nowhere near
+# specific enough to catch the real bug above. _strip_common_prefix()
+# removes whatever literal prefix the two strings being compared happen
+# to share (not hardcoded to "Group" specifically, so this degrades
+# gracefully to the plain full-string comparison for a partner file with
+# no such boilerplate) before scoring similarity on what's left - i.e.
+# the part that actually carries the class-code information.
+#
+# CALIBRATED against the real file pair above, using a ground-truth
+# check independent of this fix (whether the leader's own exact class
+# code + serial number combination is present ANYWHERE in the register
+# at all - if it isn't, no possible match for that row can be correct):
+# at this threshold, 125 of 126 genuinely-correct matches are kept
+# (99.2%) while 2,210 of 2,331 genuinely-wrong "matches" the old,
+# digits-only logic had produced are correctly rejected (94.8%) - a
+# clearly favorable trade, and a large step up from the 0.5 threshold
+# claims_register_processor.py uses for its own (differently-shaped,
+# non-prefix-diluted) comparison, which is why this module keeps its own
+# separate constant rather than importing that one.
+MIN_ALPHA_RATIO = 0.7
+
 
 def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, leader_ref_series=None, igi_policy_series=None,
-              register_digits_series=None):
+              register_digits_series=None, register_alpha_series=None):
     """
     Try to match a single leader policy number against the register.
     Returns a dict: {"igi_policy_number", "matched_leader_ref", "score",
@@ -765,6 +886,10 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
     register_digits_series: optional precomputed
     register_df[leader_ref_col].map(_digits_only) Series (see
     match_leader_file) - built on the fly if not supplied.
+    register_alpha_series: optional precomputed
+    register_df[leader_ref_col].map(_alpha_only) Series (see
+    match_leader_file) - built on the fly if not supplied. Used for the
+    branch/class-code safeguard - see MIN_ALPHA_RATIO's own docstring.
 
     PERFORMANCE (verified via cProfile against a real-shaped 200,000-row
     register / 15,000-row leader file):
@@ -778,14 +903,17 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
          (measured at ~13s of a ~34s run on a 2,000-row subset, before
          this fix). Roughly 5x faster for this "same column, many
          different row indices" access pattern.
-      2. Scoring is now two passes: a cheap run_len-only check (plain
+      2. Scoring is two passes: a cheap run_len-only check (plain
          substring test, no SequenceMatcher) across every candidate
-         first, THEN a SequenceMatcher ratio computed only for whichever
-         candidates tie for the best run_len found - see
+         first, THEN SequenceMatcher-based alpha/digit scoring only for
+         whichever candidates tie for the best run_len found - see
          _score_candidate's own docstring for why this is provably the
          same result as scoring every candidate fully, just faster. This
          was the OTHER dominant cost (~18s of the same ~34s run, mostly
-         inside Python's own difflib module).
+         inside Python's own difflib module) even before the alpha check
+         was added - adding one more SequenceMatcher call per finalist
+         (there are normally only a handful of these, tied-for-best
+         candidates, not the whole candidate pool) keeps this fast.
     """
     if leader_ref_series is None:
         leader_ref_series = register_df[leader_ref_col]
@@ -793,6 +921,8 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
         igi_policy_series = register_df[igi_policy_col]
     if register_digits_series is None:
         register_digits_series = leader_ref_series.astype(str).map(_digits_only)
+    if register_alpha_series is None:
+        register_alpha_series = leader_ref_series.astype(str).map(_alpha_only)
 
     if pd.isna(nums_value) or str(nums_value).strip() == "":
         return {"igi_policy_number": None, "matched_leader_ref": None, "score": 0.0, "status": "Not Matched"}
@@ -811,6 +941,7 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
 
     query_digits = _digits_only(nums_value)
     query_runs = [r for r in re.findall(r"\d+", str(nums_value)) if len(r) >= 3]
+    query_alpha = _alpha_only(nums_value)
 
     # Pass 1: cheap run_len-only scoring for every candidate.
     best_run_len = 0
@@ -822,15 +953,28 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
             best_run_len = rl
     finalists = [idx for idx, rl in run_len_by_idx.items() if rl == best_run_len]
 
-    # Pass 2: SequenceMatcher ratio only for the tied-for-best finalists.
-    best_idx, best_ratio = None, 0.0
+    # Pass 2: for the tied-for-best-run_len finalists only, score BOTH the
+    # branch/class-code similarity (alpha_ratio - see MIN_ALPHA_RATIO's
+    # docstring for why this now comes first) and the overall digit
+    # similarity (digit_ratio, the pre-existing tiebreaker). Ranking by
+    # (alpha_ratio, digit_ratio) - rather than digit_ratio alone, as
+    # before - means that among two candidates sharing the same digit run
+    # (the exact collision MIN_ALPHA_RATIO exists to catch), whichever
+    # one's branch/class code actually agrees with the query wins, not
+    # whichever happens to have marginally more similar digits overall.
+    best_idx, best_alpha_ratio, best_ratio = None, 0.0, 0.0
     for idx in finalists:
+        cand_alpha = register_alpha_series.at[idx]
+        a_stripped, q_stripped = _strip_common_prefix(cand_alpha, query_alpha)
+        alpha_ratio = SequenceMatcher(None, q_stripped, a_stripped).ratio()
         ratio = SequenceMatcher(None, query_digits, register_digits_series.at[idx]).ratio()
-        if ratio > best_ratio:
-            best_idx, best_ratio = idx, ratio
+        if (alpha_ratio, ratio) > (best_alpha_ratio, best_ratio):
+            best_idx, best_alpha_ratio, best_ratio = idx, alpha_ratio, ratio
 
-    accepted = best_idx is not None and (
-        best_run_len >= MIN_RUN_MATCH or best_ratio >= MIN_RATIO_FALLBACK
+    accepted = (
+        best_idx is not None
+        and (best_run_len >= MIN_RUN_MATCH or best_ratio >= MIN_RATIO_FALLBACK)
+        and best_alpha_ratio >= MIN_ALPHA_RATIO
     )
     if accepted:
         return {
@@ -859,12 +1003,13 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
     # Precompute these ONCE for the whole register, rather than letting
     # match_one() default them per call - see match_one's own docstring
     # for why passing the same Series in on every call (instead of
-    # DataFrame.at[idx, col], and instead of re-deriving digits-only
-    # strings via regex on every single candidate check) is the fix that
-    # actually matters here.
+    # DataFrame.at[idx, col], and instead of re-deriving digits-only/
+    # letters-only strings via regex on every single candidate check) is
+    # the fix that actually matters here.
     leader_ref_series = register_df[leader_ref_col]
     igi_policy_series = register_df[igi_policy_col]
     register_digits_series = leader_ref_series.astype(str).map(_digits_only)
+    register_alpha_series = leader_ref_series.astype(str).map(_alpha_only)
 
     try:
         from perf_utils import RowProgress
@@ -876,7 +1021,7 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
     for i, val in enumerate(leader_df[nums_col], start=1):
         result = match_one(val, register_df, leader_ref_col, igi_policy_col, index,
                             leader_ref_series=leader_ref_series, igi_policy_series=igi_policy_series,
-                            register_digits_series=register_digits_series)
+                            register_digits_series=register_digits_series, register_alpha_series=register_alpha_series)
         igi_numbers.append(result["igi_policy_number"])
         matched_refs.append(result["matched_leader_ref"])
         scores.append(result["score"])
