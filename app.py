@@ -43,6 +43,8 @@ import perf_utils
 import bank_statement_processor as bsp
 import bank_position_register as bpr
 import bank_position_generator as bpg
+import upr_processor as uprp
+import upr_generator as uprg
 
 try:
     import keyring
@@ -186,6 +188,14 @@ class BalanceApp(tk.Tk):
         self.bankpos_previous_file_var = None  # set in _build_bank_position_page
         self.bankpos_output_dir = os.path.join(os.getcwd(), "Bank Position")
         self.bankpos_last_warnings = []
+
+        # UPR Automation module state
+        self.upr_register_paths = []           # list of uploaded premium register filepaths
+        self.upr_loaded_df = None               # concatenated, cleaned register rows (Department/Comm Date/Gross Premium)
+        self.upr_period_options = []             # [{"year","month","label"}, ...] populated after loading
+        self.upr_last_result = None              # last run_upr_calculation() result dict
+        self.upr_output_dir = os.path.join(os.getcwd(), "UPR Automation")
+        self.upr_last_output_file = None
 
         self._load_logos()
         self._setup_style()
@@ -568,6 +578,7 @@ class BalanceApp(tk.Tk):
             sidebar, "Finance",
             [
                 ("bank_position", "Bank Position"),
+                ("upr_automation", "UPR Automation"),
             ],
             before=coinsurance_header,
         )
@@ -839,6 +850,11 @@ class BalanceApp(tk.Tk):
         bank_position_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["bank_position"] = bank_position_page
         self._build_bank_position_page(bank_position_page)
+
+        upr_automation_page = ttk.Frame(container)
+        upr_automation_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["upr_automation"] = upr_automation_page
+        self._build_upr_automation_page(upr_automation_page)
 
         pc_email_page = ttk.Frame(container)
         pc_email_page.grid(row=0, column=0, sticky="nsew")
@@ -2023,6 +2039,434 @@ class BalanceApp(tk.Tk):
             self.status_var.set(f"{'[DRY RUN] ' if dry_run else ''}{message}")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- UPR (Unearned Premium Revenue) Automation module ----------
+    def _build_upr_automation_page(self, parent):
+        """UPR Automation: Section 1 manual entries (Premium Direct /
+        Coinsurance / Reinsurance / Admin Surcharge, Opening UPR), a
+        Premium Register upload feeding a period dropdown, and the
+        two-table (Gross Premium Distribution / Unearned Premium
+        Working) calculation described in upr_processor.py - laid out as
+        a 3-tab Notebook, same pattern as the Bank Position page."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="UPR Automation", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        upr_subtitle = ttk.Label(
+            header, text="Computes Closing Unearned Premium Revenue from the Premium Register using the "
+                          "1/24 (most departments) and 1/6 (Marine/Travel) amortization methods, for a "
+                          "selected 12-month period.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        upr_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        def _wrap_upr_subtitle(event):
+            upr_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_upr_subtitle)
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_register = ttk.Frame(notebook)
+        tab_section1 = ttk.Frame(notebook)
+        tab_generate = ttk.Frame(notebook)
+        notebook.add(tab_register, text="1. Premium Register & Period")
+        notebook.add(tab_section1, text="2. Section 1 Entries & Calculate")
+        notebook.add(tab_generate, text="3. Generate & Save")
+
+        self._build_upr_tab_register(tab_register)
+        self._build_upr_tab_section1(tab_section1)
+        self._build_upr_tab_generate(tab_generate)
+
+    def _make_upr_scrollable_body(self, tab):
+        outer = ttk.Frame(tab)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+        return body
+
+    # ---- Tab 1: Premium Register upload + period selection ----
+    def _build_upr_tab_register(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s1 = self._loss_section_card(body, "1", "Premium Register File(s)", PAD_X)
+        upr_s1_note = ttk.Label(
+            s1, text="Upload one consolidated file (with a sheet per year) or several separate per-year "
+                      "files - either works, every qualifying sheet across every file is combined before "
+                      "anything is calculated. Required columns: Department/Class, Comm Date, Gross "
+                      "Premium/Contribution.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        upr_s1_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(upr_s1_note, s1, side_padding=10)
+
+        list_card = tk.Frame(s1, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_card.pack(fill="x")
+        list_outer = tk.Frame(list_card, bg=self.COLOR_PANEL_ALT)
+        list_outer.pack(fill="x", padx=12, pady=10)
+
+        list_frame = tk.Frame(list_outer, bg="white", highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_frame.pack(fill="x")
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        self.upr_register_listbox = tk.Listbox(list_frame, height=5, font=("Segoe UI", 10), selectmode="extended",
+                                                 activestyle="none", relief="flat", borderwidth=0,
+                                                 bg="white", selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                                 highlightthickness=0, yscrollcommand=list_scroll.set)
+        list_scroll.configure(command=self.upr_register_listbox.yview)
+        self.upr_register_listbox.pack(side="left", fill="both", expand=True)
+        list_scroll.pack(side="right", fill="y")
+
+        toolbar = tk.Frame(list_outer, bg=self.COLOR_PANEL_ALT)
+        toolbar.pack(fill="x", pady=(8, 0))
+        self._make_pill_button(toolbar, "Browse...", self._add_upr_register_files, bg=self.COLOR_ACCENT).pack(side="left")
+        self._make_pill_button(toolbar, "Remove Selected", self._remove_upr_register_file,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left", padx=(8, 0))
+        self._make_pill_button(toolbar, "Clear All", self._clear_upr_register_files,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(side="left", padx=(8, 0))
+
+        load_row = ttk.Frame(s1)
+        load_row.pack(fill="x", pady=(10, 0))
+        self.upr_load_btn = self._make_action_button(load_row, "Load Register(s)", self._load_upr_registers, kind="accent")
+        self.upr_load_btn.pack(side="left")
+
+        self.upr_load_progress = perf_utils.ProgressBarPanel(s1)
+        self.upr_load_progress.frame.pack(fill="x", pady=(8, 0))
+
+        s2 = self._loss_section_card(body, "2", "Period", PAD_X, expand_bottom=True)
+        upr_s2_note = ttk.Label(
+            s2, text="Select the period END month - the calculation covers exactly the 12 months ending "
+                      "there (e.g. selecting \"June 2026\" covers July 2025 through June 2026). If the "
+                      "uploaded register(s) don't reach back or forward far enough to cover the full 12 "
+                      "months, an error is raised rather than guessing.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        upr_s2_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(upr_s2_note, s2, side_padding=10)
+
+        period_row = ttk.Frame(s2)
+        period_row.pack(fill="x")
+        ttk.Label(period_row, text="Period (ending month)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.upr_period_var = tk.StringVar()
+        self.upr_period_combo = ttk.Combobox(period_row, textvariable=self.upr_period_var, state="readonly", width=22)
+        self.upr_period_combo.pack(side="left")
+
+        self.upr_register_log = scrolledtext.ScrolledText(s2, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.upr_register_log.pack(fill="both", expand=True, pady=(12, 0))
+
+    def _log_upr(self, msg):
+        self.upr_register_log.insert("end", str(msg) + "\n")
+        self.upr_register_log.see("end")
+
+    def _add_upr_register_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        added = 0
+        for p in paths:
+            if p not in self.upr_register_paths:
+                self.upr_register_paths.append(p)
+                self.upr_register_listbox.insert("end", os.path.basename(p))
+                added += 1
+        if added:
+            self.status_var.set(f"UPR Automation: added {added} file(s) ({len(self.upr_register_paths)} total).")
+
+    def _remove_upr_register_file(self):
+        selected = list(self.upr_register_listbox.curselection())
+        if not selected:
+            return
+        for idx in reversed(selected):
+            self.upr_register_listbox.delete(idx)
+            del self.upr_register_paths[idx]
+
+    def _clear_upr_register_files(self):
+        self.upr_register_listbox.delete(0, "end")
+        self.upr_register_paths.clear()
+
+    def _load_upr_registers(self):
+        if not self.upr_register_paths:
+            messagebox.showerror("No files selected", "Browse to at least one Premium Register file first.")
+            return
+
+        self.upr_register_log.delete("1.0", "end")
+        self.status_var.set("Loading premium register(s)...")
+        self.upr_load_progress.start(total=None, text="Loading...")
+        paths = list(self.upr_register_paths)
+
+        def worker(report):
+            df, meta = uprp.load_premium_registers(paths, report=report)
+            return df, meta
+
+        def on_done(result):
+            df, meta = result
+            self.upr_loaded_df = df
+            self.upr_load_progress.finish(f"Loaded {len(df):,} row(s).")
+            self._log_upr(f"Loaded {len(df):,} usable row(s) from {len(meta['sheets_used'])} sheet(s): "
+                          + ", ".join(f"{fn} [{sn}]" for fn, sn in meta["sheets_used"]))
+            if meta["sheets_skipped"]:
+                self._log_upr(f"Skipped {len(meta['sheets_skipped'])} sheet(s) that didn't look like a premium register:")
+                for fn, sn, reason in meta["sheets_skipped"]:
+                    self._log_upr(f"   {fn} [{sn}]: {reason}")
+            if meta["excluded_rows"]:
+                self._log_upr(f"{meta['excluded_rows']:,} row(s) excluded (missing Department, Comm Date, "
+                              f"or Gross Premium).")
+
+            options = uprp.get_available_period_options(df)
+            self.upr_period_options = options
+            self.upr_period_combo.configure(values=[o["label"] for o in options])
+            if options:
+                self.upr_period_combo.current(0)
+            self.status_var.set(f"UPR Automation: {len(df):,} row(s) loaded. Choose a period, then go to tab 2.")
+
+        def on_error(exc):
+            self.upr_load_progress.finish("Failed - see the log for details.")
+            self._log_upr(f"ERROR: {exc}")
+            messagebox.showerror("Could not load register(s)", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_upr(msg),
+            on_progress_value=self.upr_load_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.upr_load_btn],
+        )
+
+    # ---- Tab 2: Section 1 manual entries + Calculate ----
+    def _build_upr_tab_section1(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s3 = self._loss_section_card(body, "3", "Section 1 - Manual Entries", PAD_X)
+        upr_s3_note = ttk.Label(
+            s3, text="Entered manually for now; Gross Premium and Opening Unearned Premium Revenue will "
+                      "be pulled automatically from the previous period's own output file in a future version.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        upr_s3_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(upr_s3_note, s3, side_padding=10)
+
+        self.upr_section1_vars = {}
+        fields = [
+            ("premium_direct", "Premium Direct"),
+            ("premium_coinsurance", "Premium Income Coinsurance"),
+            ("premium_reinsurance", "Premium Income Reinsurance"),
+            ("admin_surcharge", "Administrative Surcharge"),
+            ("opening_upr", "Opening Unearned Premium Revenue"),
+        ]
+        form = ttk.Frame(s3)
+        form.pack(fill="x")
+        for i, (key, label) in enumerate(fields):
+            ttk.Label(form, text=label, style="Panel.TLabel").grid(row=i, column=0, sticky="w", padx=(0, 10), pady=5)
+            var = tk.StringVar()
+            ttk.Entry(form, textvariable=var, width=22, font=("Segoe UI", 10)).grid(row=i, column=1, sticky="w", pady=5)
+            self.upr_section1_vars[key] = var
+
+        s4 = self._loss_section_card(body, "4", "Run Calculation", PAD_X, expand_bottom=True)
+        ttk.Label(s4, text="Builds both tables (Gross Premium Distribution and Unearned Premium Working) "
+                            "for the period selected on tab 1.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        calc_btn = self._make_action_button(s4, "Calculate", self._run_upr_calculation, kind="accent")
+        calc_btn.pack(anchor="w")
+
+        self.upr_calc_progress = perf_utils.ProgressBarPanel(s4)
+        self.upr_calc_progress.frame.pack(fill="x", pady=(10, 0))
+
+        self.upr_calc_summary_var = tk.StringVar(value="")
+        ttk.Label(s4, textvariable=self.upr_calc_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 8))
+
+        tree_frame = ttk.Frame(s4)
+        tree_frame.pack(fill="both", expand=True)
+        columns = ("department", "method", "gross_total", "unearned_total")
+        self.upr_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        self.upr_results_tree.heading("department", text="Department")
+        self.upr_results_tree.heading("method", text="Method")
+        self.upr_results_tree.heading("gross_total", text="Gross Premium Total")
+        self.upr_results_tree.heading("unearned_total", text="Unearned Total")
+        self.upr_results_tree.column("department", width=180)
+        self.upr_results_tree.column("method", width=80, anchor="center")
+        self.upr_results_tree.column("gross_total", width=170, anchor="e")
+        self.upr_results_tree.column("unearned_total", width=170, anchor="e")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.upr_results_tree.yview)
+        self.upr_results_tree.configure(yscrollcommand=vsb.set)
+        self.upr_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    def _collect_upr_section1_inputs(self):
+        out = {}
+        for key, var in self.upr_section1_vars.items():
+            text = var.get().strip().replace(",", "")
+            if not text:
+                out[key] = 0.0
+                continue
+            try:
+                out[key] = float(text)
+            except ValueError:
+                raise ValueError(f"'{text}' isn't a valid number for that field.")
+        return out
+
+    def _run_upr_calculation(self):
+        if self.upr_loaded_df is None:
+            messagebox.showerror("Error", "Load the Premium Register(s) on tab 1 first.")
+            return
+        if not self.upr_period_options:
+            messagebox.showerror("Error", "No period options available - load a register with usable Comm Date values first.")
+            return
+        selected_label = self.upr_period_var.get()
+        option = next((o for o in self.upr_period_options if o["label"] == selected_label), None)
+        if option is None:
+            messagebox.showerror("Error", "Select a period on tab 1 first.")
+            return
+
+        try:
+            self._collect_upr_section1_inputs()
+        except ValueError as e:
+            messagebox.showerror("Invalid entry", str(e))
+            return
+
+        df = self.upr_loaded_df
+        period_year, period_month = option["year"], option["month"]
+        self.upr_calc_summary_var.set("")
+        self.upr_calc_progress.start(total=None, text="Calculating...")
+
+        def worker(report):
+            period_start, period_end = uprp.compute_period_bounds(period_year, period_month)
+            report(f"Selected period: {period_start:%d-%b-%Y} to {period_end:%d-%b-%Y}.")
+            uprp.validate_coverage(df, period_start, period_end)
+            bucketed = uprp.assign_buckets(df, period_start, period_end)
+            departments, warnings = uprp.resolve_department_list(bucketed)
+            gross_table = uprp.build_gross_premium_table(bucketed, departments)
+            unearned_table, methods = uprp.build_unearned_table(gross_table, departments, period_start)
+            closing_upr = uprp.grand_total(unearned_table, departments)
+            return {
+                "period_start": period_start, "period_end": period_end, "departments": departments,
+                "methods": methods, "gross_table": gross_table, "unearned_table": unearned_table,
+                "closing_upr": closing_upr, "warnings": warnings,
+                "excluded_rows": 0, "sheets_used": [],
+            }
+
+        def on_done(result):
+            self.upr_last_result = result
+            self.upr_calc_progress.finish("Done.")
+            self.upr_calc_summary_var.set(f"Closing Unearned Premium Revenue: PKR {result['closing_upr']:,.0f}")
+
+            self.upr_results_tree.delete(*self.upr_results_tree.get_children())
+            for dept in result["departments"]:
+                gt = uprp.row_total(result["gross_table"][dept])
+                ut = uprp.row_total(result["unearned_table"][dept])
+                self.upr_results_tree.insert("", "end", values=(
+                    dept, result["methods"][dept], f"{gt:,.0f}", f"{ut:,.0f}"
+                ))
+            for w in result["warnings"]:
+                self._log_upr(f"WARNING: {w}")
+            self.status_var.set(f"UPR Automation: Closing UPR = PKR {result['closing_upr']:,.0f}. See tab 3 to generate.")
+
+        def on_error(exc):
+            self.upr_calc_progress.finish("Failed - see the message for details.")
+            messagebox.showerror("Calculation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.upr_calc_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    # ---- Tab 3: Generate & Save ----
+    def _build_upr_tab_generate(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s5 = self._loss_section_card(body, "5", "Generate & Save", PAD_X, expand_bottom=True)
+        out_row = ttk.Frame(s5)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.upr_output_dir_var = tk.StringVar(value=self.upr_output_dir)
+        ttk.Entry(out_row, textvariable=self.upr_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_upr_output_dir).pack(side="left")
+
+        gen_row = ttk.Frame(s5)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate UPR Workbook", self._generate_upr_workbook, kind="accent").pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_upr_output_folder).pack(side="left", padx=(8, 0))
+
+        self.upr_gen_progress = perf_utils.ProgressBarPanel(s5)
+        self.upr_gen_progress.frame.pack(fill="x", pady=(4, 8))
+
+        self.upr_gen_log = scrolledtext.ScrolledText(s5, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.upr_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+
+    def _log_upr_gen(self, msg):
+        self.upr_gen_log.insert("end", str(msg) + "\n")
+        self.upr_gen_log.see("end")
+
+    def _browse_upr_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.upr_output_dir_var.set(path)
+
+    def _generate_upr_workbook(self):
+        if self.upr_last_result is None:
+            messagebox.showerror("Nothing to generate", "Run Calculate on tab 2 first.")
+            return
+        base_output_dir = self.upr_output_dir_var.get().strip()
+        if not base_output_dir:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+
+        try:
+            section1 = self._collect_upr_section1_inputs()
+        except ValueError as e:
+            messagebox.showerror("Invalid entry", str(e))
+            return
+
+        output_dir = self._new_run_folder(base_output_dir)
+        result = self.upr_last_result
+        filename = uprg.build_output_filename(result["period_end"])
+        output_file = os.path.join(output_dir, filename)
+
+        self.upr_gen_log.delete("1.0", "end")
+        self.status_var.set("Generating UPR workbook...")
+        self.upr_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return uprg.build_upr_workbook(result, section1, output_file)
+
+        def on_done(fp):
+            self.upr_last_output_file = fp
+            self.upr_gen_progress.finish("Done.")
+            self._log_upr_gen(f"Generated: {fp}")
+            messagebox.showinfo("Done", f"UPR workbook generated:\n{fp}")
+            self.status_var.set(f"UPR Automation: generated {os.path.basename(fp)}.")
+
+        def on_error(exc):
+            self.upr_gen_progress.finish("Failed - see the log for details.")
+            self._log_upr_gen(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.upr_gen_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _open_upr_output_folder(self):
+        output_dir = os.path.dirname(self.upr_last_output_file) if self.upr_last_output_file else self.upr_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
 
     # ---------- Coinsurance > Premium Register module ----------
     def _build_premium_register_page(self, parent):
