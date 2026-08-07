@@ -45,6 +45,7 @@ import bank_position_register as bpr
 import bank_position_generator as bpg
 import upr_processor as uprp
 import upr_generator as uprg
+import upr_ledger_processor as uprlp
 
 try:
     import keyring
@@ -196,6 +197,8 @@ class BalanceApp(tk.Tk):
         self.upr_last_result = None              # last run_upr_calculation() result dict
         self.upr_output_dir = os.path.join(os.getcwd(), "UPR Automation")
         self.upr_last_output_file = None
+        self.upr_ledger_pdf_path = None          # last-browsed Ledger Balance PDF path
+        self.upr_ledger_parse_result = None      # last upr_ledger_processor.parse_ledger_balance_pdf() result
 
         self._load_logos()
         self._setup_style()
@@ -2312,13 +2315,37 @@ class BalanceApp(tk.Tk):
         body = self._make_upr_scrollable_body(tab)
         PAD_X = 16
 
-        s3 = self._loss_section_card(body, "3", "Section 1 - Manual Entries", PAD_X)
+        s3 = self._loss_section_card(body, "3", "Section 1 - Premium Income Figures", PAD_X)
         upr_s3_note = ttk.Label(
-            s3, text="Entered manually for now; Gross Premium and Opening Unearned Premium Revenue will "
-                      "be pulled automatically from the previous period's own output file in a future version.",
+            s3, text="Premium Direct / Coinsurance / Reinsurance / Administrative Surcharge can be loaded "
+                      "automatically from the \"All Ledgers Balance\" PDF (Report ID GL_LB_LEDGERBALANCE) "
+                      "below, or entered/edited by hand either way. Opening Unearned Premium Revenue isn't "
+                      "on that report - it comes from the prior period's own Closing UPR, entered manually "
+                      "for now until that's automated too.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         upr_s3_note.pack(anchor="w", pady=(0, 10))
         self._bind_dynamic_wraplength(upr_s3_note, s3, side_padding=10)
+
+        # ---- Optional: load the 4 premium-income figures from the Ledger Balance PDF ----
+        pdf_card = tk.Frame(s3, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        pdf_card.pack(fill="x", pady=(0, 14))
+        pdf_inner = tk.Frame(pdf_card, bg=self.COLOR_PANEL_ALT)
+        pdf_inner.pack(fill="x", padx=12, pady=10)
+
+        pdf_row = tk.Frame(pdf_inner, bg=self.COLOR_PANEL_ALT)
+        pdf_row.pack(fill="x")
+        tk.Label(pdf_row, text="Ledger Balance PDF (optional)", font=("Segoe UI", 10, "bold"),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_TEXT, width=24, anchor="w").pack(side="left")
+        self.upr_ledger_pdf_name_var = tk.StringVar(value="No file selected")
+        tk.Label(pdf_row, textvariable=self.upr_ledger_pdf_name_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
+                 fg=self.COLOR_MUTED, anchor="w").pack(side="left", fill="x", expand=True, padx=(6, 10))
+        self._make_pill_button(pdf_row, "Browse...", self._browse_upr_ledger_pdf, bg=self.COLOR_ACCENT).pack(side="left", padx=(0, 8))
+        self._make_pill_button(pdf_row, "Load from PDF", self._load_upr_ledger_pdf,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left")
+
+        self.upr_ledger_status_var = tk.StringVar(value="")
+        tk.Label(pdf_inner, textvariable=self.upr_ledger_status_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
+                 fg=self.COLOR_MUTED, anchor="w", justify="left", wraplength=760).pack(anchor="w", pady=(8, 0))
 
         self.upr_section1_vars = {}
         fields = [
@@ -2335,6 +2362,9 @@ class BalanceApp(tk.Tk):
             var = tk.StringVar()
             ttk.Entry(form, textvariable=var, width=22, font=("Segoe UI", 10)).grid(row=i, column=1, sticky="w", pady=5)
             self.upr_section1_vars[key] = var
+        ttk.Label(form, text="(values above can still be typed/edited by hand at any point)",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 8, "italic"))\
+            .grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         s4 = self._loss_section_card(body, "4", "Run Calculation", PAD_X, expand_bottom=True)
         ttk.Label(s4, text="Builds both tables (Gross Premium Distribution and Unearned Premium Working) "
@@ -2368,6 +2398,59 @@ class BalanceApp(tk.Tk):
         vsb.pack(side="right", fill="y")
 
         self._finalize_scroll_passthrough(body)
+
+    def _browse_upr_ledger_pdf(self):
+        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if path:
+            self.upr_ledger_pdf_path = path
+            self.upr_ledger_pdf_name_var.set(os.path.basename(path))
+
+    def _load_upr_ledger_pdf(self):
+        if not self.upr_ledger_pdf_path:
+            messagebox.showerror("No file selected", "Browse to the Ledger Balance PDF first.")
+            return
+        try:
+            result = uprlp.parse_ledger_balance_pdf(self.upr_ledger_pdf_path)
+        except uprlp.UPRLedgerError as e:
+            self.upr_ledger_status_var.set(f"Could not load: {e}")
+            messagebox.showerror("Could not read PDF", str(e))
+            return
+
+        self.upr_ledger_parse_result = result
+        matched_labels = []
+        for field, label in uprlp.FIELD_LABELS.items():
+            if result[field] is not None:
+                self.upr_section1_vars[field].set(f"{result[field]:,.2f}")
+                matched_labels.append(label)
+            else:
+                matched_labels.append(f"{label} (not found - left as-is)")
+
+        status_lines = [f"Loaded: {', '.join(matched_labels)}."]
+
+        if result["unmatched_lines"]:
+            names = ", ".join(f"{u['description']} ({u['amount']:,.0f})" for u in result["unmatched_lines"][:5])
+            status_lines.append(f"Note: {len(result['unmatched_lines'])} other account line(s) on the report "
+                                 f"weren't one of the four expected accounts and were ignored: {names}.")
+
+        if result["grand_total_reported"] is not None:
+            diff = result["grand_total_matched"] - result["grand_total_reported"]
+            if abs(diff) > 1.0:
+                status_lines.append(f"WARNING: the report's own Grand Total ({result['grand_total_reported']:,.2f}) "
+                                     f"doesn't match the sum of the four matched accounts "
+                                     f"({result['grand_total_matched']:,.2f}) - difference {diff:,.2f}. This usually "
+                                     f"means the report covered other GL accounts too - double-check before relying "
+                                     f"on these figures.")
+
+        if result["as_at_date"] and self.upr_period_options:
+            selected_label = self.upr_period_var.get()
+            option = next((o for o in self.upr_period_options if o["label"] == selected_label), None)
+            if option and (result["as_at_date"].year, result["as_at_date"].month) != (option["year"], option["month"]):
+                status_lines.append(f"WARNING: this PDF is as at {result['as_at_date']:%d-%b-%Y}, but the period "
+                                     f"selected on tab 1 is \"{selected_label}\" - these don't match. Confirm "
+                                     f"you've uploaded the right PDF for this period before generating.")
+
+        self.upr_ledger_status_var.set("\n".join(status_lines))
+        self.status_var.set("UPR Automation: Section 1 figures loaded from the Ledger Balance PDF.")
 
     def _collect_upr_section1_inputs(self):
         out = {}
