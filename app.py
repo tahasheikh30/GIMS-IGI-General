@@ -2100,7 +2100,68 @@ class BalanceApp(tk.Tk):
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
+
+        # Stashed so _finalize_scroll_passthrough (called once, after all
+        # of this tab's own widgets are built) can extend the same
+        # Enter/Leave pair down onto every descendant - see that method's
+        # own docstring for why the canvas-only binding above isn't
+        # enough on a tab with several stacked Entry fields / a results
+        # Treeview, both of which this module has plenty of.
+        body._scroll_canvas = canvas
+        body._scroll_handler = _on_mousewheel
         return body
+
+    def _finalize_scroll_passthrough(self, body, skip_types=None):
+        """
+        Extends `body`'s own canvas-level mousewheel Enter/Leave binding
+        (see _make_upr_scrollable_body / _enable_mousewheel) down onto
+        every descendant widget, so scrolling keeps working no matter
+        where inside the tab the cursor happens to be - not just over
+        the bare background between widgets.
+
+        WHY THIS IS NEEDED: Tk fires <Enter>/<Leave> on every real
+        window-boundary crossing, and each child widget embedded in the
+        canvas (a Label, Entry, Button, Frame...) is its own separate
+        window. Moving the cursor from the canvas's own background onto
+        ANY child fires <Leave> on the canvas - which tears down the
+        page's global mousewheel binding - and nothing re-establishes it,
+        since the child itself has no binding of its own. On a page with
+        just a couple of small buttons this is barely noticeable; on a
+        tab with several stacked Entry fields (this module's Section 1
+        form) or a wide static Label, large parts of the visible area
+        end up "dead" for scrolling - not something a person would think
+        to work around by nudging the mouse a few pixels first.
+
+        Call this ONCE, at the end of a tab-builder method, after every
+        widget for that tab has already been created (binding has to
+        walk the real widget tree, so it can't run before the tree
+        exists). Not needed again afterward unless more widgets are
+        added to that same body later.
+
+        skip_types: widget classes deliberately left out of the
+        pass-through, because they already scroll their OWN content on
+        the wheel via their built-in class binding (Listbox, Treeview,
+        Text/ScrolledText) - adding our page-level handler on top of
+        that would fight with their native behavior instead of just
+        letting them handle their own scrolling, which is what a person
+        actually wants when hovering directly over one of them (e.g. the
+        register file list, or the department results table).
+        """
+        canvas = getattr(body, "_scroll_canvas", None)
+        handler = getattr(body, "_scroll_handler", None)
+        if canvas is None or handler is None:
+            return
+        skip_types = skip_types or (tk.Listbox, ttk.Treeview, tk.Text)
+
+        def _bind(widget):
+            if not isinstance(widget, skip_types):
+                widget.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", handler), add="+")
+                widget.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"), add="+")
+            for child in widget.winfo_children():
+                _bind(child)
+
+        for child in body.winfo_children():
+            _bind(child)
 
     # ---- Tab 1: Premium Register upload + period selection ----
     def _build_upr_tab_register(self, tab):
@@ -2168,6 +2229,8 @@ class BalanceApp(tk.Tk):
 
         self.upr_register_log = scrolledtext.ScrolledText(s2, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
         self.upr_register_log.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._finalize_scroll_passthrough(body)
 
     def _log_upr(self, msg):
         self.upr_register_log.insert("end", str(msg) + "\n")
@@ -2304,6 +2367,8 @@ class BalanceApp(tk.Tk):
         self.upr_results_tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        self._finalize_scroll_passthrough(body)
+
     def _collect_upr_section1_inputs(self):
         out = {}
         for key, var in self.upr_section1_vars.items():
@@ -2406,6 +2471,8 @@ class BalanceApp(tk.Tk):
 
         self.upr_gen_log = scrolledtext.ScrolledText(s5, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
         self.upr_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._finalize_scroll_passthrough(body)
 
     def _log_upr_gen(self, msg):
         self.upr_gen_log.insert("end", str(msg) + "\n")
