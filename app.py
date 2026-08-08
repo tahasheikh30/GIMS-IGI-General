@@ -2288,7 +2288,18 @@ class BalanceApp(tk.Tk):
                     self._log_upr(f"   {fn} [{sn}]: {reason}")
             if meta["excluded_rows"]:
                 self._log_upr(f"{meta['excluded_rows']:,} row(s) excluded (missing Department, Comm Date, "
-                              f"or Gross Premium).")
+                              f"Gross Premium, or an implausible Comm Date).")
+            if meta.get("implausible_date_rows"):
+                self._log_upr(f"  Of those, {meta['implausible_date_rows']:,} had a Comm Date so far out of "
+                              f"range (e.g. year 5026) that it looks like a corrupted date value in the source "
+                              f"export rather than a real policy date - excluded so it doesn't clutter the "
+                              f"period list or distort the Previous/Future Policies buckets. This is a source "
+                              f"file data issue, worth fixing at the export level. Example(s):")
+                for s in meta["implausible_date_samples"][:5]:
+                    cd = s["comm_date"]
+                    cd_text = cd.strftime("%d-%b-%Y") if hasattr(cd, "strftime") else str(cd)
+                    doc_ref_text = f" ({s['doc_ref']})" if s.get("doc_ref") else ""
+                    self._log_upr(f"    {s['department']}: {cd_text}{doc_ref_text}")
 
             options = uprp.get_available_period_options(df)
             self.upr_period_options = options

@@ -94,6 +94,14 @@ DEPARTMENT_METHOD = {
     "BIMA": METHOD_ZERO,
 }
 
+# See load_premium_registers' own comment above the plausibility check for
+# the full rationale - this is a corruption filter (catches a Comm Date
+# that's decades or centuries off, from a bad Excel date serial in the
+# source export), not a "recent years only" filter, so it's kept
+# deliberately generous rather than tied to "this year".
+MIN_PLAUSIBLE_COMM_YEAR = 1990
+MAX_PLAUSIBLE_COMM_YEAR_AHEAD = 15  # years beyond today - wide enough for legitimate multi-year installment/travel schedules
+
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
 PREVIOUS_LABEL = "Previous"
@@ -205,11 +213,17 @@ def load_premium_registers(filepaths, report=None):
       df - concatenated rows with canonical columns "Department",
           "Comm Date" (datetime), "Gross Premium" (float), and "Doc Ref"
           if that column was found in at least one sheet (else omitted).
-          Only rows with a usable Department + Comm Date + Gross Premium
-          are included - excluded_rows in meta reports how many weren't.
+          Only rows with a usable Department + Comm Date + Gross Premium,
+          AND a plausible Comm Date (see the plausibility check further
+          down - catches a corrupted Excel date serial in the source
+          export, e.g. a Comm Date landing in the year 5026), are
+          included - excluded_rows in meta reports how many weren't.
       meta - dict: {"sheets_used": [(filename, sheet_name), ...],
           "sheets_skipped": [(filename, sheet_name, reason), ...],
-          "excluded_rows": int, "total_rows_read": int}
+          "excluded_rows": int, "implausible_date_rows": int,
+          "implausible_date_samples": [{"department", "comm_date",
+              "doc_ref"}, ...] (up to 10, for surfacing in the UI),
+          "total_rows_read": int}
     """
     if not filepaths:
         raise UPRError("No premium register file(s) provided.")
@@ -269,7 +283,49 @@ def load_premium_registers(filepaths, report=None):
     df["Gross Premium"] = pd.to_numeric(df["Gross Premium"], errors="coerce")
     df["Department"] = df["Department"].astype(str).str.strip()
 
-    valid_mask = df["Comm Date"].notna() & df["Gross Premium"].notna() & (df["Department"] != "") & (df["Department"].str.lower() != "nan")
+    base_valid_mask = df["Comm Date"].notna() & df["Gross Premium"].notna() & (df["Department"] != "") & (df["Department"].str.lower() != "nan")
+
+    # ---- Comm Date plausibility check ----
+    # CONFIRMED against a real Crystal Reports export: a handful of rows
+    # carry a Comm Date cell that Excel itself already stored as a
+    # genuine date type, but whose underlying numeric date SERIAL is
+    # corrupted (a real example: raw serial 1,141,848, which is what a
+    # normal Excel date serial looks like roughly 3,000 years from now).
+    # pandas/xlrd faithfully convert that into a nonsense calendar date -
+    # year 5026, 2302, 2206, 2066, 2062, etc. This isn't a parsing bug on
+    # this module's side, the file's own stored value is wrong, but left
+    # unfiltered it does two real things downstream: every one of those
+    # nonsense years shows up as its own separate entry in the period
+    # dropdown (get_available_period_options lists every distinct
+    # (year, month) actually present in Comm Date, which is what actually
+    # surfaced this), and that row's premium silently lands in the
+    # "Future Policies" bucket in Table 1/2 at the wrong weight.
+    #
+    # This is deliberately NOT the same thing as filtering out a
+    # genuinely far-future but real Comm Date. Multi-year installment or
+    # travel policies in real data legitimately carry Comm Dates several
+    # years out (confirmed: several groups of rows share the same
+    # day/month across 3-4 consecutive future years under sibling Doc
+    # Refs, e.g. 2027-04-12 / 2028-04-12 / 2029-04-12 / 2030-04-12 -
+    # clearly an intentional installment schedule, not a typo), so the
+    # bound below is a wide corruption filter, not a "recent years only"
+    # filter - it only excludes a date that's decades or centuries out,
+    # which no legitimate policy commencement date can ever be.
+    today_year = date.today().year
+    plausible_mask = df["Comm Date"].dt.year.between(MIN_PLAUSIBLE_COMM_YEAR, today_year + MAX_PLAUSIBLE_COMM_YEAR_AHEAD)
+    valid_mask = base_valid_mask & plausible_mask
+
+    implausible_date_rows = int((base_valid_mask & ~plausible_mask).sum())
+    implausible_date_samples = []
+    if implausible_date_rows:
+        sample_df = df.loc[base_valid_mask & ~plausible_mask].head(10)
+        for _, r in sample_df.iterrows():
+            implausible_date_samples.append({
+                "department": r["Department"],
+                "comm_date": r["Comm Date"],
+                "doc_ref": r["Doc Ref"] if "Doc Ref" in df.columns else None,
+            })
+
     excluded_rows = int((~valid_mask).sum())
     clean_df = df.loc[valid_mask].reset_index(drop=True)
 
@@ -277,6 +333,8 @@ def load_premium_registers(filepaths, report=None):
         "sheets_used": sheets_used,
         "sheets_skipped": sheets_skipped,
         "excluded_rows": excluded_rows,
+        "implausible_date_rows": implausible_date_rows,
+        "implausible_date_samples": implausible_date_samples,
         "total_rows_read": total_rows_read,
     }
     return clean_df, meta

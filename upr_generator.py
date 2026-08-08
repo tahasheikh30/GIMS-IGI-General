@@ -1,12 +1,16 @@
 """
-Writes the UPR Automation output workbook: three sheets, styled
-consistently with the rest of GIMS (navy header, Arial body, thin
-borders) and mirroring the real manually-built working file this module
-was reverse-engineered from - "Gross Premium Distribution" and "Unearned
-Premium Working" both use live Excel formulas (SUM totals, and Table 2's
-cells reference Table 1's cells multiplied by a driver-row fraction),
-exactly like the original, so the sheet stays auditable and recalculates
-correctly if a cell is ever edited by hand.
+Writes the UPR Automation output workbook, styled consistently with the
+rest of GIMS (navy header, Arial body, thin borders) and mirroring the
+real manually-built working file this module was reverse-engineered
+from: BOTH tables live on a single "Unearned Premium Working" sheet -
+Table 1 (Gross Premium Distribution) first, then the driver rows, then
+Table 2 (Unearned Premium Working) directly below it - exactly the
+layout the original file uses (confirmed by inspecting it: rows 27-36
+are the Gross Premium table, rows 38-42 the driver rows, rows 44-53 the
+weighted working table, all on that same one sheet). Both tables use
+live Excel formulas (SUM totals, and Table 2's cells reference Table 1's
+own cells multiplied by a driver-row fraction), so the sheet stays
+auditable and recalculates correctly if a cell is ever edited by hand.
 """
 import os
 import subprocess
@@ -27,60 +31,70 @@ TOTAL_FILL = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
 DRIVER_FONT = Font(name="Arial", size=9, italic=True, color="6C7A89")
 NOTE_FONT = Font(name="Arial", size=9, italic=True, color="6C7A89")
 SUBTITLE_FONT = Font(name="Arial", size=10, color="6C7A89")
+SECTION_TITLE_FONT = Font(name="Arial", bold=True, size=12, color="1F4E78")
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NUM_FORMAT = "#,##0;(#,##0);-"
 
 SUMMARY_SHEET = "Premium Earned Breakup"
-GROSS_SHEET = "Gross Premium Distribution"
-UNEARNED_SHEET = "Unearned Premium Working"
+WORKING_SHEET = "Unearned Premium Working"
 
-# Row layout on the two table sheets - department rows start at DATA_START_ROW
-HEADER_ROW = 3
-DATA_START_ROW = 4
+# Column widths - sized to comfortably fit real PKR figures with commas
+# (confirmed against the real reference file: a single department's own
+# Total can run past 8 billion, and the grand Total-of-Totals past 21
+# billion - "21,026,406,428" is 14 characters). Too narrow here is
+# exactly what produces Excel's "####" display (the number itself
+# calculates fine - Excel just has nowhere to draw it).
+DEPT_COL_WIDTH = 22
+DATA_COL_WIDTH = 16
+TOTAL_COL_WIDTH = 20
 
 
 def _col_letter(idx):
     return get_column_letter(idx)
 
 
-def _write_table_sheet(ws, title, subtitle, departments, table_dict, value_formula_fn=None):
+def _write_table_block(ws, start_row, section_label, departments, table_dict, value_formula_fn=None):
     """
-    Shared layout for both Table 1 and Table 2: a title row, a header row
-    (Previous, Jan..Dec, Future Policies, Total), one row per department,
-    a bold Total row, with SUM formulas for every row/column total.
+    Writes one full table (a section label, a header row, one row per
+    department, and a bold Total row with SUM formulas) starting at
+    `start_row` on an already-open worksheet - used twice on the SAME
+    sheet (Table 1 then Table 2, stacked, matching the real reference
+    file's own single-sheet layout - see the module docstring) rather
+    than writing each table to its own separate sheet.
 
     value_formula_fn(dept, dept_row, col_idx, col_name) -> a value or
-        formula string for that cell. If None, the raw numeric value from
-        table_dict is written directly (used for Table 1). Table 2 passes
-        a function that instead writes a formula referencing Table 1 and
-        the driver rows below the grid.
-    Returns the row index of the Total row (so the caller can reference
-    the grand-total cell afterwards).
+        formula string for that cell. If None, the raw numeric value
+        from table_dict is written directly (used for Table 1). Table 2
+        passes a function that instead writes a formula referencing
+        Table 1's own cells and the driver rows below Table 2.
+
+    Returns (header_row, data_start_row, total_row) - the caller needs
+    these to place whatever comes next, and to build a cross-reference
+    to this table's own grand-total cell.
     """
-    ws.sheet_view.showGridLines = False
-    ws.cell(row=1, column=2, value=title).font = Font(name="Arial", bold=True, size=14, color="1F4E78")
-    if subtitle:
-        ws.cell(row=2, column=2, value=subtitle).font = SUBTITLE_FONT
+    ws.cell(row=start_row, column=2, value=section_label).font = SECTION_TITLE_FONT
+    header_row = start_row + 1
+    data_start_row = header_row + 1
 
     columns = up.TABLE_COLUMNS + [up.TOTAL_LABEL]
-    ws.cell(row=HEADER_ROW, column=2, value="Department").font = HEADER_FONT
-    ws.cell(row=HEADER_ROW, column=2).fill = HEADER_FILL
-    ws.cell(row=HEADER_ROW, column=2).alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    ws.cell(row=HEADER_ROW, column=2).border = BORDER
+    ws.cell(row=header_row, column=2, value="Department").font = HEADER_FONT
+    ws.cell(row=header_row, column=2).fill = HEADER_FILL
+    ws.cell(row=header_row, column=2).alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.cell(row=header_row, column=2).border = BORDER
     for j, col in enumerate(columns, start=3):
-        c = ws.cell(row=HEADER_ROW, column=j, value=col)
+        c = ws.cell(row=header_row, column=j, value=col)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         c.border = BORDER
-    ws.row_dimensions[HEADER_ROW].height = 30
+    ws.row_dimensions[header_row].height = 30
 
     n_depts = len(departments)
-    total_row = DATA_START_ROW + n_depts
+    total_row = data_start_row + n_depts
 
     for i, dept in enumerate(departments):
-        r = DATA_START_ROW + i
+        r = data_start_row + i
         name_cell = ws.cell(row=r, column=2, value=dept)
         name_cell.font = BODY_FONT
         name_cell.border = BORDER
@@ -108,26 +122,30 @@ def _write_table_sheet(ws, title, subtitle, departments, table_dict, value_formu
     ws.cell(row=total_row, column=2).border = Border(top=Side(style="thin", color="1F4E78"), left=THIN, right=THIN, bottom=THIN)
     for j in range(3, 3 + len(up.TABLE_COLUMNS) + 1):
         col_letter = _col_letter(j)
-        cell = ws.cell(row=total_row, column=j, value=f"=SUM({col_letter}{DATA_START_ROW}:{col_letter}{total_row - 1})")
+        cell = ws.cell(row=total_row, column=j, value=f"=SUM({col_letter}{data_start_row}:{col_letter}{total_row - 1})")
         cell.font = BOLD_FONT
         cell.fill = TOTAL_FILL
         cell.number_format = NUM_FORMAT
         cell.border = Border(top=Side(style="thin", color="1F4E78"), left=THIN, right=THIN, bottom=THIN)
 
-    ws.column_dimensions["A"].width = 2
-    ws.column_dimensions["B"].width = 20
-    for j in range(3, 3 + len(columns)):
-        ws.column_dimensions[_col_letter(j)].width = 13
-    ws.freeze_panes = ws.cell(row=DATA_START_ROW, column=3).coordinate
+    return header_row, data_start_row, total_row
 
-    return total_row
+
+def _apply_working_sheet_column_widths(ws):
+    """Set once per sheet (not per table-block) since Table 1 and Table 2
+    now share the exact same columns on the same sheet."""
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = DEPT_COL_WIDTH
+    for j, _col in enumerate(up.TABLE_COLUMNS, start=3):
+        ws.column_dimensions[_col_letter(j)].width = DATA_COL_WIDTH
+    ws.column_dimensions[_col_letter(3 + len(up.TABLE_COLUMNS))].width = TOTAL_COL_WIDTH
 
 
 def _write_driver_rows(ws, start_row, period_start, label):
     """
     Writes the two small "Period" / "Year" driver rows used by Table 2's
     formulas - exactly the same transparency device the original working
-    file uses (see claims of module docstring): rather than hardcoding a
+    file uses (see the module docstring): rather than hardcoding a
     fraction into each cell, the fraction is built from a period-position
     numerator (this row) divided by a fixed denominator (the row below
     it), so the driver values themselves are visible and auditable, not
@@ -171,10 +189,9 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
     result: the dict returned by upr_processor.run_upr_calculation().
     section1_inputs: dict with keys "premium_direct", "premium_coinsurance",
         "premium_reinsurance", "admin_surcharge", "opening_upr" - all
-        plain numbers, entered manually by the user for now (per the
-        initial-development spec; a future version can pull Gross
-        Premium and Opening UPR automatically from the previous period's
-        own output file instead).
+        plain numbers (see upr_ledger_processor.py for the four
+        premium-income ones being pulled from a PDF instead of typed by
+        hand; Opening UPR stays manual for now).
     Returns output_path.
     """
     run_date = run_date or date.today()
@@ -187,53 +204,51 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
     wb = Workbook()
     wb.remove(wb.active)
 
-    # ---- Sheet 2: Gross Premium Distribution (Table 1) ----
-    ws_gross = wb.create_sheet(GROSS_SHEET)
+    # ---- "Unearned Premium Working" - BOTH tables on one sheet, Table 1
+    # then Table 2 stacked directly below it, matching the real reference
+    # file's own layout exactly (see the module docstring). ----
+    ws_working = wb.create_sheet(WORKING_SHEET)
+    ws_working.sheet_view.showGridLines = False
     subtitle = f"Period: {period_start:%d-%b-%Y} to {period_end:%d-%b-%Y}  \u2022  generated {run_date:%d-%b-%Y}"
-    gross_total_row = _write_table_sheet(ws_gross, "Gross Premium Distribution", subtitle, departments, gross_table)
-    gross_grand_total_cell = f"{_col_letter(3 + len(up.TABLE_COLUMNS))}{gross_total_row}"
+    ws_working.cell(row=1, column=2, value="Unearned Premium Working").font = Font(name="Arial", bold=True, size=14, color="1F4E78")
+    ws_working.cell(row=2, column=2, value=subtitle).font = SUBTITLE_FONT
 
-    # ---- Sheet 3: Unearned Premium Working (Table 2) ----
-    ws_unearned = wb.create_sheet(UNEARNED_SHEET)
+    # Table 1 - Gross Premium Distribution
+    gross_header_row, gross_data_row, gross_total_row = _write_table_block(
+        ws_working, 4, "Table 1 \u2014 Gross Premium Distribution", departments, gross_table)
+
+    # Driver rows (1/24 then 1/6), sitting between the two tables - same
+    # relative position as the original file (right after Table 1's own
+    # Total row, right before Table 2 starts).
+    driver_gap = gross_total_row + 2
+    driver_1_24_rows = _write_driver_rows(ws_working, driver_gap, period_start, "1/24")
+    driver_1_6_rows = _write_driver_rows(ws_working, driver_gap + 3, period_start, "1/6")
+    ws_working.cell(row=driver_gap - 1, column=2,
+                     value="Driver rows below feed Table 2's formulas (numerator / denominator per column).").font = NOTE_FONT
 
     def _unearned_formula(dept, dept_row, col_idx, col_name):
         method = methods[dept]
-        gross_cell = f"'{GROSS_SHEET}'!{_col_letter(col_idx)}{dept_row}"
         if method == up.METHOD_ZERO:
             return 0
+        gross_row = gross_data_row + departments.index(dept)
+        col_letter = _col_letter(col_idx)
+        gross_cell = f"{col_letter}{gross_row}"
         driver_rows = driver_1_24_rows if method == up.METHOD_1_24 else driver_1_6_rows
         period_row, year_row = driver_rows
-        col_letter = _col_letter(col_idx)
         return f"={gross_cell}*{col_letter}${period_row}/{col_letter}${year_row}"
 
-    unearned_total_row = _write_table_sheet(ws_unearned, "Unearned Premium Working", subtitle, departments,
-                                              unearned_table, value_formula_fn=None)
-    # _write_table_sheet already wrote placeholder numeric values above;
-    # now overwrite the department cells with the live formulas, since
-    # the driver rows (written below the grid) need to already exist at
-    # fixed row numbers before the formulas can reference them. Simpler
-    # to lay the driver rows out first, then rewrite the grid - done here
-    # rather than restructuring _write_table_sheet's signature further.
-    driver_gap = unearned_total_row + 2
-    driver_1_24_rows = _write_driver_rows(ws_unearned, driver_gap, period_start, "1/24")
-    driver_1_6_rows = _write_driver_rows(ws_unearned, driver_gap + 3, period_start, "1/6")
+    # Table 2 - Unearned Premium Working, starting right after the driver rows
+    table2_start = driver_gap + 3 + 2 + 1  # driver block (2 rows) + gap + blank spacer
+    unearned_header_row, unearned_data_row, unearned_total_row = _write_table_block(
+        ws_working, table2_start, "Table 2 \u2014 Unearned Premium Working", departments, unearned_table,
+        value_formula_fn=_unearned_formula)
 
-    for i, dept in enumerate(departments):
-        r = DATA_START_ROW + i
-        method = methods[dept]
-        for j, col in enumerate(up.TABLE_COLUMNS, start=3):
-            cell = ws_unearned.cell(row=r, column=j)
-            if method == up.METHOD_ZERO:
-                cell.value = 0
-            else:
-                cell.value = _unearned_formula(dept, r, j, col)
+    _apply_working_sheet_column_widths(ws_working)
+    ws_working.freeze_panes = ws_working.cell(row=gross_data_row, column=3).coordinate
 
-    ws_unearned.cell(row=driver_gap - 1, column=2,
-                      value="Driver rows below feed the formulas above (numerator / denominator per column).").font = NOTE_FONT
+    unearned_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(up.TABLE_COLUMNS))}{unearned_total_row}"
 
-    unearned_grand_total_cell = f"'{UNEARNED_SHEET}'!{_col_letter(3 + len(up.TABLE_COLUMNS))}{unearned_total_row}"
-
-    # ---- Sheet 1: Premium Earned Breakup (Section 1 summary) ----
+    # ---- "Premium Earned Breakup" (Section 1 summary) ----
     ws_summary = wb.create_sheet(SUMMARY_SHEET)
     ws_summary.sheet_view.showGridLines = False
     ws_summary.cell(row=2, column=2, value="Premium Earned Breakup").font = Font(name="Arial", bold=True, size=14, color="1F4E78")
@@ -305,7 +320,7 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
 
     ws_summary.column_dimensions["A"].width = 2
     ws_summary.column_dimensions["B"].width = 40
-    ws_summary.column_dimensions["C"].width = 22
+    ws_summary.column_dimensions["C"].width = 24
 
     note_row = r + 3
     if result.get("warnings"):
@@ -321,7 +336,7 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
     if sheets_used:
         ws_summary.cell(row=note_row, column=2, value=f"Source sheet(s): {sheets_used}").font = NOTE_FONT
 
-    wb.move_sheet(SUMMARY_SHEET, offset=-2)  # Summary first
+    wb.move_sheet(SUMMARY_SHEET, offset=-1)  # Summary first, ahead of the working sheet
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     wb.save(output_path)
