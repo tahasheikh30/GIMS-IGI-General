@@ -471,7 +471,7 @@ class BalanceApp(tk.Tk):
     def _build_sidebar(self, parent):
         """Persistent left sidebar. Every section now lives under one of
         two collapsible parent menus: 'General Operations' (Outstanding
-        Premium, Loss Ratio, Renewal) and 'Coinsurance' (its existing
+        Premium, Loss Ratio) and 'Coinsurance' (its existing
         three sub-items). The active section is shown with a gold accent
         bar, full-white bold text, and a clearly brighter "pill"
         background, so the current page is unmistakable at a glance.
@@ -578,7 +578,6 @@ class BalanceApp(tk.Tk):
             [
                 ("outstanding_premium", "Outstanding Premium"),
                 ("loss_ratio", "Loss Ratio"),
-                ("renewal", "Renewal"),
             ],
             before=finance_header,
         )
@@ -861,28 +860,7 @@ class BalanceApp(tk.Tk):
         self.nav_pages["coinsurance_claims_check"] = claims_check_page
         self._build_claims_check_page(claims_check_page)
 
-        renewal_page = self._build_placeholder_page(container, "Renewal")
-        renewal_page.grid(row=0, column=0, sticky="nsew")
-        self.nav_pages["renewal"] = renewal_page
-
         self.select_nav("outstanding_premium")
-
-    def _build_placeholder_page(self, parent, title):
-        """Clean, on-brand empty state for modules not built yet."""
-        page = tk.Frame(parent, bg=self.COLOR_BG)
-        center = tk.Frame(page, bg=self.COLOR_BG)
-        center.place(relx=0.5, rely=0.42, anchor="center")
-
-        icon = tk.Canvas(center, width=64, height=64, bg=self.COLOR_BG, highlightthickness=0)
-        icon.pack(pady=(0, 16))
-        icon.create_oval(2, 2, 62, 62, outline=self.COLOR_BORDER, width=2, fill=self.COLOR_PANEL)
-        icon.create_text(32, 34, text="+", fill=self.COLOR_ACCENT, font=("Segoe UI", 26, "bold"))
-
-        tk.Label(center, text=title, font=("Segoe UI Semibold", 18, "bold"),
-                 bg=self.COLOR_BG, fg=self.COLOR_PRIMARY).pack(pady=(0, 6))
-        tk.Label(center, text="This module is coming soon.", font=("Segoe UI", 11),
-                 bg=self.COLOR_BG, fg=self.COLOR_MUTED).pack()
-        return page
 
     # ---------- Loss Ratio module ----------
     def _build_loss_ratio_page(self, parent):

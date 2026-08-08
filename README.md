@@ -3,14 +3,13 @@
 A desktop tool for the Finance department, built around a persistent sidebar
 with two collapsible menus, each expanding to its own set of sections:
 
-- **General Operations** — a collapsible menu with three sub-items:
+- **General Operations** — a collapsible menu with two sub-items:
   - **Outstanding Premium** — fully built: upload the client balance sheet,
     set a threshold, generate per-client Excel PivotTable reports, and
     draft/send reminder emails through your own Outlook account.
   - **Loss Ratio** — fully built: calculate Loss Ratio (Claims Paid ÷ Gross
     Premium) for one company or a group of companies from their own Excel
     files, with a styled, color-flagged summary report.
-  - **Renewal** — placeholder, reserved for a future module.
 - **Coinsurance** — a collapsible menu with three sub-items:
   - **Premium/Claims Email Automation** — fully built: reads a co-insurance
     outstanding-position export, generates one two-sheet Excel statement
@@ -86,16 +85,15 @@ python app.py
 
 On launch you'll see a fixed header with the GIMS wordmark, and a left
 sidebar with two collapsible menus: **General Operations** (click it to
-expand/collapse its three sub-items: **Outstanding Premium**, **Loss
-Ratio**, **Renewal**) and **Coinsurance** (click it to expand/collapse its
+expand/collapse its two sub-items: **Outstanding Premium**, **Loss
+Ratio**) and **Coinsurance** (click it to expand/collapse its
 own three sub-items: **Premium/Claims Email Automation**, **Premium
 Register**, **Claims Register**). Both menus start expanded, and each can
 be collapsed independently without affecting the other. The active section
 is highlighted with an accent bar and bold text. All the functionality
 below (Steps 1–3) lives inside **Outstanding Premium**, under General
-Operations — click it in the sidebar if it isn't already selected. Renewal
-is a placeholder reserved for a future module; Claims Register is fully
-built (see its own section below).
+Operations — click it in the sidebar if it isn't already selected. Claims
+Register is fully built (see its own section below).
 
 ### Step 1 — Upload & Filter
 1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
