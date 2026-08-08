@@ -3957,7 +3957,7 @@ class BalanceApp(tk.Tk):
         self.tab_claims_groups = ttk.Frame(notebook)
         self.tab_claims_emails = ttk.Frame(notebook)
         notebook.add(self.tab_claims_setup, text="1. Upload & Match")
-        notebook.add(self.tab_claims_groups, text="2. Insurance Company Files")
+        notebook.add(self.tab_claims_groups, text="2. Coinsurer Files")
         notebook.add(self.tab_claims_emails, text="3. Review & Send Emails")
 
         self._build_claims_setup_tab()
