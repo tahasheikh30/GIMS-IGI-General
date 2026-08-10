@@ -419,18 +419,24 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
 
     n_clients = len(client_breakdown_df)
 
-    # Row plan, top to bottom, with a fixed gap after the KPI/pie-chart
-    # band so nothing placed below it can ever collide with the pie chart
-    # regardless of how many client rows the table ends up with:
+    # Row plan, top to bottom. The per-client bar chart now sits ABOVE the
+    # table (previously it was below), so it reads as part of the
+    # dashboard overview at a glance rather than being buried under a
+    # potentially long table. bar_chart_row is placed well clear of the
+    # pie chart's own row range (the pie sits at "M8" and, at its own
+    # fixed height, never runs past roughly row 24) so the two charts
+    # never overlap regardless of how many client rows follow, and
+    # table_header_row leaves enough vertical room below bar_chart_row for
+    # the bar chart's own fixed height before the table starts:
     #   rows 2-5   banner
     #   rows 8-12  KPI cards (+ pie chart floating beside them, columns K+)
-    #   row 23     "Client Breakdown" title
-    #   row 25     table header
+    #   row 26     per-client bar chart, full width
+    #   row 53     "Client Breakdown" title
+    #   row 55     table header
     #   ...        table data + Total row
-    #   +3 rows    bar chart, full width, always BELOW the table so it
-    #              never shares a row range with the pie chart above
     card_row = 8
-    table_header_row = 25
+    bar_chart_row = 26
+    table_header_row = 55
     first_data_row = table_header_row + 1
     last_data_row = table_header_row + n_clients if n_clients else table_header_row
     total_row = last_data_row + 1
@@ -521,61 +527,14 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     pie.width = 12.6
     ws.add_chart(pie, "M8")
 
-    # ---- Client Breakdown section title ----
-    ws.cell(row=table_header_row - 2, column=2, value="Client Breakdown").font = TABLE_TITLE_FONT
-
-    # ---- per-client breakdown table + bar chart ----
-    for j, h in enumerate(["Client Name", "Premium Receivable", "Claims Receivable"], start=2):
-        c = ws.cell(row=table_header_row, column=j, value=h)
-        c.font = HEADER_FONT
-        c.fill = HEADER_FILL
-        c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
-    ws.row_dimensions[table_header_row].height = 20
-
-    if n_clients == 0:
-        ws.cell(row=first_data_row, column=2, value="No client data available.").font = EMPTY_FONT
-    else:
-        style_cache = StyleIndexCache()
-        ALIGN_NAME = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
-        ALIGN_AMOUNT = Alignment(horizontal="right", vertical="center", indent=1)
-        for i, row in enumerate(client_breakdown_df.itertuples(index=False), start=first_data_row):
-            stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
-            name_cell = ws.cell(row=i, column=2, value=str(row[0]))
-            # Wrap rather than clip - even at the wider column B, a handful
-            # of client names run long enough to still overflow a single
-            # line, so this lets those wrap onto a second line instead of
-            # being cut off.
-            style_cache.apply(name_cell, font=BODY_FONT, border=BORDER, fill=stripe, alignment=ALIGN_NAME)
-            prem_cell = ws.cell(row=i, column=3, value=float(row[1]))
-            style_cache.apply(prem_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
-            claim_cell = ws.cell(row=i, column=4, value=float(row[2]))
-            style_cache.apply(claim_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
-            ws.row_dimensions[i].height = 26
-
-        # Bold formula-driven Total row, so it always reflects the table above
-        total_label = ws.cell(row=total_row, column=2, value="TOTAL")
-        total_premium = ws.cell(row=total_row, column=3, value=f"=SUM(C{first_data_row}:C{last_data_row})")
-        total_claims = ws.cell(row=total_row, column=4, value=f"=SUM(D{first_data_row}:D{last_data_row})")
-        total_premium.number_format = NUM_FORMAT
-        total_claims.number_format = NUM_FORMAT
-        for cell in (total_label, total_premium, total_claims):
-            cell.font = TOTAL_FONT
-            cell.fill = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
-            cell.border = Border(top=Side(style="thin", color=NAVY), left=THIN, right=THIN, bottom=THIN)
-
-        # Switched from a horizontal "bar" chart to a vertical "column"
-        # chart. The horizontal version needed its category axis order
-        # reversed (largest client on top, to match the table), and that
-        # reversal is what dragged the value-axis numbers up to the top of
-        # the plot area in real Excel, overlapping the title, no matter how
-        # explicitly axPos/tickLblPos/crosses were pinned back down - a
-        # known rendering quirk with reversed category axes on bar-
-        # direction charts. A column chart needs no such reversal at all:
-        # the source rows are already sorted largest-first, so the first
-        # (leftmost) column is naturally the largest, reading left-to-right
-        # like a normal Pareto-style chart, and the value axis has always
-        # sat at the bottom by default for a column chart - nothing to
-        # fight with Excel over.
+    # ---- per-client bar chart, placed ABOVE the table (see the row-plan
+    # note at the top of this function) - built here, before the table
+    # itself is written, using row numbers (table_header_row/first_data_row)
+    # that are already fixed regardless of write order; openpyxl only
+    # needs valid cell coordinates for a chart's data/category references,
+    # not for those cells to already contain data at the time the chart
+    # object is created. ----
+    if n_clients > 0:
         MAX_CHART_CLIENTS = 12
         chart_rows_shown = min(n_clients, MAX_CHART_CLIENTS)
         chart_last_row = first_data_row + chart_rows_shown - 1
@@ -584,6 +543,13 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
         if n_clients > MAX_CHART_CLIENTS:
             chart_title_text += f"  (Top {MAX_CHART_CLIENTS} of {n_clients})"
 
+        # Column chart (not a horizontal "bar" chart) - see the original
+        # note this comment used to sit next to, kept here since the
+        # rationale is unchanged: a reversed category axis on a bar-
+        # direction chart drags the value-axis numbers up into the title
+        # in real Excel, a known rendering quirk. A column chart needs no
+        # axis reversal at all, since the source rows are already sorted
+        # largest-first.
         chart = BarChart()
         chart.type = "col"
         chart.title = _chart_title(chart_title_text, size=1200)
@@ -633,11 +599,52 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
         # and don't crowd into each other as more clients are added.
         chart.width = max(20, min(34, 1.7 * chart_rows_shown + 6))
         chart.height = 13
-        # Anchored two rows below the Total row (i.e. below the whole
-        # table), not beside it - this guarantees it never shares a row
-        # range with the pie chart above, regardless of how tall either
-        # chart ends up rendering or how many client rows the table has.
-        ws.add_chart(chart, f"B{total_row + 2}")
+        # Anchored at bar_chart_row, well clear of the pie chart above it
+        # and well above the table below it (see the row-plan note at the
+        # top of this function).
+        ws.add_chart(chart, f"B{bar_chart_row}")
+
+    # ---- Client Breakdown section title ----
+    ws.cell(row=table_header_row - 2, column=2, value="Client Breakdown").font = TABLE_TITLE_FONT
+
+    # ---- per-client breakdown table + bar chart ----
+    for j, h in enumerate(["Client Name", "Premium Receivable", "Claims Receivable"], start=2):
+        c = ws.cell(row=table_header_row, column=j, value=h)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
+    ws.row_dimensions[table_header_row].height = 20
+
+    if n_clients == 0:
+        ws.cell(row=first_data_row, column=2, value="No client data available.").font = EMPTY_FONT
+    else:
+        style_cache = StyleIndexCache()
+        ALIGN_NAME = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+        ALIGN_AMOUNT = Alignment(horizontal="right", vertical="center", indent=1)
+        for i, row in enumerate(client_breakdown_df.itertuples(index=False), start=first_data_row):
+            stripe = ROW_WHITE_FILL if (i - first_data_row) % 2 == 0 else ROW_ALT_FILL
+            name_cell = ws.cell(row=i, column=2, value=str(row[0]))
+            # Wrap rather than clip - even at the wider column B, a handful
+            # of client names run long enough to still overflow a single
+            # line, so this lets those wrap onto a second line instead of
+            # being cut off.
+            style_cache.apply(name_cell, font=BODY_FONT, border=BORDER, fill=stripe, alignment=ALIGN_NAME)
+            prem_cell = ws.cell(row=i, column=3, value=float(row[1]))
+            style_cache.apply(prem_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
+            claim_cell = ws.cell(row=i, column=4, value=float(row[2]))
+            style_cache.apply(claim_cell, border=BORDER, fill=stripe, alignment=ALIGN_AMOUNT, number_format=NUM_FORMAT)
+            ws.row_dimensions[i].height = 26
+
+        # Bold formula-driven Total row, so it always reflects the table above
+        total_label = ws.cell(row=total_row, column=2, value="TOTAL")
+        total_premium = ws.cell(row=total_row, column=3, value=f"=SUM(C{first_data_row}:C{last_data_row})")
+        total_claims = ws.cell(row=total_row, column=4, value=f"=SUM(D{first_data_row}:D{last_data_row})")
+        total_premium.number_format = NUM_FORMAT
+        total_claims.number_format = NUM_FORMAT
+        for cell in (total_label, total_premium, total_claims):
+            cell.font = TOTAL_FONT
+            cell.fill = PatternFill("solid", start_color="D9E1F2", end_color="D9E1F2")
+            cell.border = Border(top=Side(style="thin", color=NAVY), left=THIN, right=THIN, bottom=THIN)
 
     # ---- Column widths ----
     # Cards sit at Premium=B-C, Claims=D-E, Total=G-H (F is the only true
