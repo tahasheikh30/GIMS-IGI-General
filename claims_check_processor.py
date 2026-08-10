@@ -321,6 +321,39 @@ def match_leader_claims_file_strict(leader_df, pmd_col, register_df, leader_ref_
     return out
 
 
+def _reference_has_no_letters(series, sample_size=200):
+    """
+    True if this claims file's own reference column is a purely numeric/
+    punctuation format (e.g. this module's own confirmed real Centegy
+    'POLICY' shape, 'DocNo/CertNo/EndtNo/MM/YYYY' - no letters anywhere)
+    - i.e. exactly the shape match_leader_claims_file_strict() exists
+    for, where the normal engine's own branch/class-code safeguard
+    (MIN_ALPHA_RATIO, in premium_register_processor) is a silent no-op
+    (see the module-level note above match_leader_claims_file_strict for
+    the full rationale and the real false-positive rate this was
+    confirmed to produce).
+
+    Deliberately checked on the DATA, not assumed from a filename or a
+    fixed format list - a different leader/claims file (e.g. one using
+    the 'YYYY/MM/CODE#####' shape, where the LEADING segment is a year,
+    not a Doc-No) must keep using the normal engine, since the strict
+    matcher's own core assumption - the leading '/'-segment IS the real
+    Doc-No - simply isn't true for that shape, and forcing it there
+    would make matching worse, not safer.
+
+    Sampled (not scanned in full) since this only needs to be "clearly
+    one shape or the other", not exact - checked against up to
+    sample_size non-blank values; returns True only if NONE of them
+    contain a single letter.
+    """
+    from premium_register_processor import _alpha_only
+    sample = series.dropna().astype(str)
+    sample = sample[sample.str.strip() != ""].head(sample_size)
+    if len(sample) == 0:
+        return False
+    return not sample.map(_alpha_only).str.len().gt(0).any()
+
+
 if __name__ == "__main__":
     import sys
 

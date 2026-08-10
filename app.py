@@ -2348,7 +2348,27 @@ class BalanceApp(tk.Tk):
 
             report(f"\nChecking {len(leader_df):,} claim(s) against {len(register_df):,} register row(s)...")
             report.progress(0, len(leader_df), text=f"Checking 0 / {len(leader_df):,} claim(s)")
-            result = ccp.match_leader_claims_file(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=report)
+            # Auto-select the matching engine based on the claims file's
+            # own reference shape (see claims_check_processor's own
+            # module-level note above match_leader_claims_file_strict):
+            # a purely numeric reference (no letters at all - e.g. a
+            # GIMS/Centegy system-generated 'POLICY' column) makes the
+            # normal engine's branch/class-code safeguard a silent no-op,
+            # confirmed to produce real false positives (a claim's own
+            # cert/endorsement number coincidentally matching an
+            # unrelated policy) - the strict, Doc-No-only matcher is used
+            # instead for that shape. Any reference with letters in it
+            # (e.g. 'YYYY/MM/CODE#####'-style leader files) keeps using
+            # the normal engine, since the strict matcher's own
+            # assumption - the leading segment IS the real Doc-No -
+            # doesn't hold for that shape.
+            if ccp._reference_has_no_letters(leader_df[pmd_col]):
+                report("  Reference column has no letters (a purely numeric Doc-No/Cert/Endt/MM/YYYY "
+                       "style reference) - using the strict Doc-No-only matcher to avoid false positives "
+                       "from a coincidentally-shared cert/endorsement number.")
+                result = ccp.match_leader_claims_file_strict(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=report)
+            else:
+                result = ccp.match_leader_claims_file(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=report)
             return result
 
         def on_done(result):
