@@ -145,6 +145,12 @@ class BalanceApp(tk.Tk):
         self.receivable_poc_lookup = {}
         self.receivable_drafts = []
         self.receivable_last_run_dir = None  # set to the current generation's own dated/timed subfolder once generated
+        # Path the currently-cached receivable_raw_df/clean_df/colmap were
+        # loaded from - lets "Load, Validate & Build Groups" reuse
+        # whatever "Load Filter Options" already read (if it's for this
+        # same file) instead of reading it a second time, same cache-reuse
+        # pattern Claims Intimation's own filter loading already uses.
+        self.receivable_loaded_path = None
 
         self.premreg_leader_file = ""
         self.premreg_register_file = ""
@@ -2530,38 +2536,18 @@ class BalanceApp(tk.Tk):
         receivable_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(receivable_email_lookup_note, source_box)
 
-        ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
-                   command=self.load_receivable_data).grid(row=6, column=0, sticky="w", padx=10, pady=(10, 4))
-
-        # ---- Section: Filters ----
-        filter_box = ttk.Labelframe(canvas_frame, text="  Filters  ", padding=14)
-        filter_box.pack(fill="x", padx=12, pady=8)
-        filter_box.columnconfigure(0, weight=1)
-
-        ttk.Label(filter_box, text="Client filter (optional, comma-separated exact names)",
-                  style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=6, pady=(0, 2))
-        self.receivable_client_filter_var = tk.StringVar()
-        ttk.Entry(filter_box, textvariable=self.receivable_client_filter_var, width=90).grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 8))
-
-        ttk.Label(filter_box, text="Company filter (optional, comma-separated exact co-insurance company names)",
-                  style="Panel.TLabel").grid(row=2, column=0, sticky="w", padx=6, pady=(0, 2))
-        self.receivable_company_filter_var = tk.StringVar()
-        ttk.Entry(filter_box, textvariable=self.receivable_company_filter_var, width=90).grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 8))
-
-        self.analyze_receivable_btn = ttk.Button(filter_box, text="Analyze / Build Groups", style="Accent.TButton", width=24,
-                   command=self.analyze_receivable)
-        self.analyze_receivable_btn.grid(row=4, column=0, sticky="w", padx=6, pady=(4, 4))
-
         # ---- Section: Filters (multi-select, optional) ----
         # Same "Load Filter Options" + multi-select-listbox pattern used by
-        # Claims Intimation's Unit/Client Name/Department filters: rather
-        # than typing exact names by hand (the text filters above), these
-        # are populated straight from the loaded master file's own real
-        # distinct values, so there's nothing to mistype and nothing to go
-        # stale relative to the actual source data. Applied AFTER the
-        # exact-name text filters above (both narrow further, combined
-        # with AND), on the same "Class" / "Client Name" / "Company"
-        # columns _detect_mode() already resolves for grouping.
+        # Claims Intimation's own Unit/Client Name/Department filters -
+        # populated straight from the master file's own real distinct
+        # values, so there's nothing to mistype and nothing to go stale
+        # relative to the actual source data. This is now the ONLY filter
+        # on this tab (the old exact-name text-entry Filters section was
+        # removed as redundant with this one) and can be used before the
+        # data is formally "loaded" for analysis - "Load Filter Options"
+        # reads the file itself to populate these lists, independent of
+        # "Load, Validate & Build Groups" below, so the filter can be set
+        # up first if that's the more natural order for a given run.
         multiselect_filter_box = ttk.Labelframe(canvas_frame, text="  Filters (multi-select, optional)  ", padding=14)
         multiselect_filter_box.pack(fill="x", padx=12, pady=8)
         multiselect_filter_box.columnconfigure(0, weight=1)
@@ -2569,8 +2555,10 @@ class BalanceApp(tk.Tk):
         multiselect_filter_box.columnconfigure(2, weight=1)
 
         receivable_multiselect_note = ttk.Label(
-            multiselect_filter_box, text="Click \"Load Filter Options\" after \"Load & Validate Data\" above to "
-                                          "populate these lists from that file's own values.",
+            multiselect_filter_box, text="Click \"Load Filter Options\" (after browsing to the Master Workbook "
+                                          "above) to populate these lists from that file's own values, then make "
+                                          "your selections here before clicking \"Load, Validate & Build Groups\" "
+                                          "below.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         receivable_multiselect_note.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
         self._bind_dynamic_wraplength(receivable_multiselect_note, multiselect_filter_box, side_padding=10)
@@ -2606,6 +2594,22 @@ class BalanceApp(tk.Tk):
         self.receivable_class_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 0, "Class filter")
         self.receivable_filter_client_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 1, "Client Name filter")
         self.receivable_filter_company_listbox = _receivable_filter_listbox_col(multiselect_filter_box, 2, "Company filter")
+
+        # ---- Section: Load, Validate & Build Groups ----
+        # Deliberately placed AFTER the filter section above, not before
+        # it - this single action now does what used to take two separate
+        # button clicks ("Load & Validate Data" then "Analyze / Build
+        # Groups"), and sitting at the end lets a person set their filter
+        # selections first (if they have any) before triggering the load,
+        # rather than having to load, then filter, then load again.
+        load_box = ttk.Labelframe(canvas_frame, text="  Load, Validate & Build Groups  ", padding=14)
+        load_box.pack(fill="x", padx=12, pady=8)
+        ttk.Label(load_box, text="Loads the master workbook, validates it, applies any filter selections above, "
+                                  "and builds the per-company output groups shown on tab 2 - all in one step.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        self.receivable_load_analyze_btn = self._make_action_button(
+            load_box, "Load, Validate & Build Groups", self.load_and_analyze_receivable_data, kind="accent")
+        self.receivable_load_analyze_btn.pack(anchor="w")
 
         # ---- Section: Log ----
         log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
@@ -2772,14 +2776,31 @@ class BalanceApp(tk.Tk):
         self.receivable_setup_log.insert("end", str(msg) + "\n")
         self.receivable_setup_log.see("end")
 
-    def load_receivable_data(self):
+    def _load_receivable_filter_options(self):
+        """
+        'Load Filter Options' button - reads the master workbook currently
+        browsed to (Data Source, above) and populates the Class / Client
+        Name / Company multi-select listboxes with that file's own real
+        distinct values, same "load once, populate a multi-select
+        Listbox" interaction as Claims Intimation's own Unit/Client
+        Name/Department filters (see _load_claims_filter_options).
+
+        Deliberately independent of "Load, Validate & Build Groups" below
+        - this reads and validates the file itself rather than requiring
+        that button to have been clicked first, so the filter can be set
+        up before the load/build-groups step if that's the more natural
+        order for a given run. The loaded dataframe and colmap are cached
+        (self.receivable_raw_df/clean_df/issues_df/colmap plus
+        self.receivable_loaded_path) so "Load, Validate & Build Groups"
+        can reuse this same read instead of re-reading the file from disk,
+        as long as the file path hasn't changed since.
+        """
         path = self.receivable_file_var.get().strip()
         if not path or not os.path.exists(path):
-            messagebox.showerror("Error", "Please select a valid master workbook.")
+            messagebox.showerror("Error", "Browse to a valid master workbook first.")
             return
 
-        self.receivable_setup_log.delete("1.0", "end")
-        self.status_var.set("Loading receivable data...")
+        self.receivable_filter_status_var.set("Loading...")
 
         def worker(report):
             report(f"Reading {os.path.basename(path)}...")
@@ -2789,8 +2810,129 @@ class BalanceApp(tk.Tk):
             return raw_df, clean_df, issues_df, dropped_columns, colmap
 
         def on_done(result):
-            (self.receivable_raw_df, self.receivable_clean_df, self.receivable_issues_df,
-             dropped_columns, self.receivable_colmap) = result
+            raw_df, clean_df, issues_df, dropped_columns, colmap = result
+            self.receivable_raw_df = raw_df
+            self.receivable_clean_df = clean_df
+            self.receivable_issues_df = issues_df
+            self.receivable_colmap = colmap
+            self.receivable_loaded_path = path
+
+            def _populate(listbox, orig_col):
+                listbox.delete(0, "end")
+                if not orig_col or orig_col not in clean_df.columns:
+                    return
+                values = sorted(clean_df[orig_col].dropna().astype(str).str.strip().unique())
+                values = [v for v in values if v]
+                for i, v in enumerate(values):
+                    listbox.insert("end", v)
+                    listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            _populate(self.receivable_class_listbox, colmap.get("class"))
+            _populate(self.receivable_filter_client_listbox, colmap.get("client"))
+            _populate(self.receivable_filter_company_listbox, colmap.get("company"))
+
+            if not colmap.get("class"):
+                self.receivable_filter_status_var.set(
+                    f"Loaded {len(clean_df):,} row(s). No 'Class' column found in this file - that filter is unavailable.")
+            else:
+                self.receivable_filter_status_var.set(f"Loaded {len(clean_df):,} row(s).")
+            self.status_var.set("Receivable: filter options loaded.")
+
+        def on_error(exc):
+            self.receivable_filter_status_var.set("Load failed - see error.")
+            messagebox.showerror("Could not load file", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_done=on_done, on_error=on_error,
+            busy_widgets=[self.receivable_load_filters_btn],
+        )
+
+    def load_and_analyze_receivable_data(self):
+        """
+        'Load, Validate & Build Groups' button - the single action that
+        replaces what used to be two separate clicks ("Load & Validate
+        Data" then "Analyze / Build Groups"): loads the master workbook
+        (or reuses whatever "Load Filter Options" already read, if it's
+        for this same file), validates it, applies any Class/Client
+        Name/Company selections made in the multi-select Filters section
+        above, and builds the per-company output groups shown on tab 2 -
+        all in one step.
+        """
+        path = self.receivable_file_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Please select a valid master workbook.")
+            return
+
+        # Multi-select Class/Client Name/Company filters - read from the
+        # listboxes here, on the MAIN thread, since Tkinter widgets must
+        # never be queried from a background thread (same rule Claims
+        # Intimation's own listbox filters follow - see
+        # load_and_match_claims).
+        selected_classes = [self.receivable_class_listbox.get(i) for i in self.receivable_class_listbox.curselection()]
+        selected_clients_multi = [self.receivable_filter_client_listbox.get(i) for i in self.receivable_filter_client_listbox.curselection()]
+        selected_companies_multi = [self.receivable_filter_company_listbox.get(i) for i in self.receivable_filter_company_listbox.curselection()]
+
+        self.receivable_setup_log.delete("1.0", "end")
+        self.status_var.set("Loading, validating, and building groups...")
+
+        def worker(report):
+            # Reuse the cached load from "Load Filter Options" (above) if
+            # it's for this exact same file - skips reading a potentially
+            # huge file from disk a second time. Falls back to loading
+            # fresh here if that button was never clicked, or was clicked
+            # for a different file than what's currently browsed to.
+            if self.receivable_clean_df is not None and self.receivable_loaded_path == path:
+                raw_df = self.receivable_raw_df
+                clean_df = self.receivable_clean_df
+                issues_df = self.receivable_issues_df
+                colmap = self.receivable_colmap
+                report(f"Using already-loaded file: {os.path.basename(path)} ({len(raw_df):,} row(s)).")
+            else:
+                report(f"Reading {os.path.basename(path)}...")
+                raw_df = rvp.load_raw_data(path, report=report)
+                report(f"Loaded {len(raw_df):,} rows. Validating...")
+                clean_df, issues_df, dropped_columns, colmap = rvp.validate_data(raw_df)
+                if dropped_columns:
+                    report(f"Removed {len(dropped_columns)} completely empty column(s): {', '.join(dropped_columns)}")
+
+            df = clean_df
+            client_col = colmap["client"]
+            company_col = colmap["company"]
+            class_col = colmap.get("class")
+
+            # Combines with AND against each other, via
+            # receivable_processor.filter_receivable_by_fields.
+            field_filters = []
+            if selected_classes:
+                if not class_col:
+                    report("\nWARNING: Class filter requested, but no 'Class' column was found in this file - filter skipped.")
+                else:
+                    field_filters.append((class_col, selected_classes))
+            if selected_clients_multi:
+                field_filters.append((client_col, selected_clients_multi))
+            if selected_companies_multi:
+                field_filters.append((company_col, selected_companies_multi))
+
+            if field_filters:
+                before_count = len(df)
+                df = rvp.filter_receivable_by_fields(df, field_filters)
+                report(f"\nClass/Client Name/Company filter(s) applied: {before_count:,} -> {len(df):,} row(s) kept.")
+
+            # analyze_buckets() computes the company/OFC bucket assignment
+            # ONCE and derives groups, totals, AND every bucket's client
+            # breakdown from that single pass - see receivable_processor.py.
+            # Buckets here are grouped by each row's own exact Company
+            # name - merging branch-name/spelling variants together is a
+            # separate, optional step (the "Merge files" checkbox on tab 2).
+            report("\nBuilding groups...")
+            groups, totals, breakdowns = rvp.analyze_buckets(df)
+            return raw_df, clean_df, issues_df, colmap, df, groups, totals, breakdowns
+
+        def on_done(result):
+            (self.receivable_raw_df, self.receivable_clean_df, self.receivable_issues_df, self.receivable_colmap,
+             self.receivable_filtered_df, self.receivable_groups, self.receivable_totals,
+             self.receivable_breakdowns) = result
+            self.receivable_loaded_path = path
 
             source_sheet = self.receivable_raw_df.attrs.get("source_sheet")
             if source_sheet is not None:
@@ -2799,8 +2941,6 @@ class BalanceApp(tk.Tk):
             self.log_receivable(f"Detected layout: {mode} mode "
                                  f"({'Premium Receivable + Claim Receivable amount columns' if mode == 'dual' else 'Type/Category + single Amount column'}).")
             self.log_receivable(f"Loaded {len(self.receivable_raw_df)} rows, {len(self.receivable_clean_df)} valid after validation.")
-            if dropped_columns:
-                self.log_receivable(f"Removed {len(dropped_columns)} completely empty column(s): {', '.join(dropped_columns)}")
             if len(self.receivable_issues_df) > 0:
                 self.log_receivable(f"{len(self.receivable_issues_df)} row(s) flagged with issues:")
                 issue_counts = self.receivable_issues_df["issue"].value_counts()
@@ -2809,142 +2949,21 @@ class BalanceApp(tk.Tk):
             else:
                 self.log_receivable("No data issues found.")
 
-            self.status_var.set("Receivable data loaded. Set filters and click Analyze / Build Groups.")
+            self._refresh_receivable_results_tree()
+
+            self.log_receivable(f"\nDone: {len(self.receivable_groups)} output file(s) identified "
+                                 f"(one per insurance company, OFC-named companies pooled into one shared file).")
+            self.status_var.set(f"{len(self.receivable_groups)} files. See tab 2.")
 
         def on_error(exc):
-            messagebox.showerror("Error loading file", str(exc))
+            messagebox.showerror("Error", str(exc))
             self.status_var.set("Load failed.")
 
         perf_utils.run_in_background(
             self, worker,
             on_progress=lambda msg: self.log_receivable(msg),
             on_done=on_done, on_error=on_error,
-        )
-
-    def _load_receivable_filter_options(self):
-        """
-        'Load Filter Options' button - populates the Class / Client Name /
-        Company multi-select listboxes with the real distinct values from
-        whatever's already loaded in self.receivable_clean_df (via "Load &
-        Validate Data" above), same "load once, populate a multi-select
-        Listbox" interaction as Claims Intimation's own Unit/Client
-        Name/Department filters (see _load_claims_filter_options). Data is
-        already in memory here (unlike Claims Intimation, which reads its
-        own file fresh), so this runs directly on the main thread rather
-        than through run_in_background.
-        """
-        if self.receivable_clean_df is None:
-            messagebox.showerror("Error", "Click 'Load & Validate Data' above first.")
-            return
-
-        df = self.receivable_clean_df
-        colmap = self.receivable_colmap
-
-        def _populate(listbox, orig_col):
-            listbox.delete(0, "end")
-            if not orig_col or orig_col not in df.columns:
-                return
-            values = sorted(df[orig_col].dropna().astype(str).str.strip().unique())
-            values = [v for v in values if v]
-            for i, v in enumerate(values):
-                listbox.insert("end", v)
-                listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
-
-        _populate(self.receivable_class_listbox, colmap.get("class"))
-        _populate(self.receivable_filter_client_listbox, colmap.get("client"))
-        _populate(self.receivable_filter_company_listbox, colmap.get("company"))
-
-        if not colmap.get("class"):
-            self.receivable_filter_status_var.set(
-                f"Loaded {len(df):,} row(s). No 'Class' column found in this file - that filter is unavailable.")
-        else:
-            self.receivable_filter_status_var.set(f"Loaded {len(df):,} row(s).")
-
-    def analyze_receivable(self):
-        if self.receivable_clean_df is None:
-            messagebox.showerror("Error", "Load data first (tab 1).")
-            return
-
-        client_col = self.receivable_colmap["client"]
-        company_col = self.receivable_colmap["company"]
-        class_col = self.receivable_colmap.get("class")
-        df = self.receivable_clean_df
-
-        client_text = self.receivable_client_filter_var.get().strip()
-        if client_text:
-            client_filter = [c.strip() for c in client_text.split(",") if c.strip()]
-            df = df[df[client_col].isin(client_filter)]
-
-        company_text = self.receivable_company_filter_var.get().strip()
-        if company_text:
-            company_filter = [c.strip() for c in company_text.split(",") if c.strip()]
-            df = df[df[company_col].isin(company_filter)]
-
-        # Multi-select Class/Client Name/Company filters (see "Load Filter
-        # Options" above) - read from the listboxes here, on the MAIN
-        # thread, since Tkinter widgets must never be queried from a
-        # background thread (same rule Claims Intimation's own listbox
-        # filters follow - see load_and_match_claims). Combines with AND
-        # against the exact-name text filters above, and against each
-        # other, via receivable_processor.filter_receivable_by_fields.
-        selected_classes = [self.receivable_class_listbox.get(i) for i in self.receivable_class_listbox.curselection()]
-        selected_clients_multi = [self.receivable_filter_client_listbox.get(i) for i in self.receivable_filter_client_listbox.curselection()]
-        selected_companies_multi = [self.receivable_filter_company_listbox.get(i) for i in self.receivable_filter_company_listbox.curselection()]
-
-        field_filters = []
-        if selected_classes:
-            if not class_col:
-                self.log_receivable("\nWARNING: Class filter requested, but no 'Class' column was found in this file - filter skipped.")
-            else:
-                field_filters.append((class_col, selected_classes))
-        if selected_clients_multi:
-            field_filters.append((client_col, selected_clients_multi))
-        if selected_companies_multi:
-            field_filters.append((company_col, selected_companies_multi))
-
-        if field_filters:
-            before_count = len(df)
-            df = rvp.filter_receivable_by_fields(df, field_filters)
-            self.log_receivable(f"\nClass/Client Name/Company multi-select filter(s) applied: "
-                                 f"{before_count:,} -> {len(df):,} row(s) kept.")
-
-        self.status_var.set("Analyzing / building groups...")
-
-        def worker(report):
-            # analyze_buckets() computes the company/OFC bucket assignment
-            # ONCE and derives groups, totals, AND every bucket's client
-            # breakdown from that single pass - see receivable_processor.py.
-            # This replaces what used to be build_company_groups() +
-            # company_totals() as two separate full-dataset scans, and
-            # (critically) precomputes every bucket's client breakdown up
-            # front so generate_receivable_reports() below never needs to
-            # re-scan the whole dataset per company again. Buckets here are
-            # grouped by each row's own exact Company name - merging
-            # branch-name/spelling variants together is a separate,
-            # optional step (the "Merge files" checkbox on tab 2).
-            groups, totals, breakdowns = rvp.analyze_buckets(df)
-            return groups, totals, breakdowns
-
-        def on_done(result):
-            groups, totals, breakdowns = result
-            self.receivable_filtered_df = df  # kept for reference/consistency with the rest of the module
-            self.receivable_groups = groups
-            self.receivable_totals = totals
-            self.receivable_breakdowns = breakdowns
-
-            self._refresh_receivable_results_tree()
-
-            self.log_receivable(f"\nAnalysis complete: {len(self.receivable_groups)} output file(s) "
-                                 f"(one per insurance company, OFC-named companies pooled into one shared file).")
-            self.status_var.set(f"{len(self.receivable_groups)} files. See tab 2.")
-
-        def on_error(exc):
-            messagebox.showerror("Analysis failed", str(exc))
-            self.status_var.set("Analysis failed.")
-
-        perf_utils.run_in_background(
-            self, worker, on_done=on_done, on_error=on_error,
-            busy_widgets=[self.analyze_receivable_btn],
+            busy_widgets=[self.receivable_load_analyze_btn],
         )
 
     def _refresh_receivable_results_tree(self):
