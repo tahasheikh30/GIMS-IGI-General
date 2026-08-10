@@ -61,6 +61,16 @@ LEADER_CLAIMS_ALIASES = {
         # side of this exact kind of statement).
         "policy /pmd#", "policy/pmd#", "policy /pmd #", "policy/pmd #",
         "policy pmd #", "policy/pmd number", "pmd #", "policy no", "policy number",
+        # "POLICY" - confirmed real header on a GIMS/Centegy system-
+        # generated claims recovery statement (e.g. a
+        # "CLM_RCOV_COINS_..." export, single "Data" sheet, no "IGI
+        # Claims"-named sheet at all). This export's own "POLICY" column
+        # carries the reference to match against the register (e.g.
+        # "2691121895/1/0/12/2024" = DocNo/CertNo/EndtNo/MM/YYYY) - a bare
+        # "policy" alias is added here (distinct from "policy no"/"policy
+        # number" above, which require a trailing word) so this exact
+        # single-word header is recognized too.
+        "policy",
     ],
 }
 
