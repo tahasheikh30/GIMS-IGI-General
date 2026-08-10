@@ -39,6 +39,10 @@ Matched" for manual entry - one row per claim, no fan-out (Claims Check
 never needs to identify a coinsurer, only confirm a policy exists).
 """
 import os
+import re
+from difflib import SequenceMatcher
+
+import pandas as pd
 
 import premium_register_processor as prp
 
@@ -163,6 +167,158 @@ def match_leader_claims_file(leader_df, pmd_col, register_df, leader_ref_col, ig
     is matched exactly the way a premium row's own policy number is.
     """
     return prp.match_leader_file(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=report)
+
+
+# ---------------------------------------------------------------------------
+# Strict Doc-No matching - for leader/claim files whose own reference
+# column has NO letters at all (e.g. a GIMS/Centegy SYSTEM-GENERATED
+# claims recovery statement, "CLM_RCOV_COINS_..." export, whose own
+# "POLICY" column is a plain "DocNo/CertNo/EndtNo/MM/YYYY" string - e.g.
+# "269327938/1/18269/04/2024" - confirmed against a real such file).
+#
+# WHY THE NORMAL ENGINE (match_leader_claims_file, above) ISN'T SAFE ON
+# THIS SHAPE: premium_register_processor.match_leader_file's own
+# branch/class-code safeguard (MIN_ALPHA_RATIO) exists specifically to
+# stop a coincidentally-shared digit run (e.g. a claim's own endorsement
+# number happening to also appear inside a totally unrelated register
+# row's Doc-No) from being accepted as a match on digits alone - see
+# that module's own MIN_ALPHA_RATIO docstring. That safeguard compares
+# the LETTERS embedded in each reference (_alpha_only) - but a reference
+# like "269327938/1/18269/04/2024" has no letters at all, so both sides
+# of that comparison are always the empty string, SequenceMatcher scores
+# an empty-vs-empty comparison as a perfect 1.0 match, and the safeguard
+# silently passes every candidate rather than actually filtering
+# anything. Confirmed via a real sanity check against a real KU4 Premium
+# Register (20,851 rows) and a real 81-claim Centegy export: 25 of 74
+# "Matched" rows the normal engine produced turned out to have been
+# accepted purely because the claim's own CERT or ENDORSEMENT number
+# happened to appear as a digit run somewhere inside a completely
+# unrelated register row's own Doc-No - one confirmed case, claim
+# "269327938/1/18269/04/2024", was matched to a register row whose real
+# Doc-No has no relationship to the claim's own true Doc-No
+# ("269327938") at all - that Doc-No doesn't exist ANYWHERE in the
+# register, yet the claim came back "Matched" with a 0.811 score that
+# looks confident.
+#
+# FIX: only ever accept a match on the strength of the claim's own
+# LEADING Doc-No segment (the text before the first "/" - this format's
+# own real policy reference, confirmed structurally consistent across
+# every real sample row) being found as a genuine embedded digit run
+# inside the CANDIDATE register row's own Leader Ref Number / IGI Policy
+# Number digit string - never on a cert/endorsement number, and never on
+# any other digit run found elsewhere in the claim's own reference.
+# MIN_DOC_NO_LEN guards against a false-generic Doc-No (a very short
+# leading run would collide constantly) - real Doc-Nos on this file
+# shape run 8-10 digits, comfortably clear of it. A claim whose own
+# Doc-No isn't found anywhere in the register - even if some OTHER part
+# of its reference happens to coincidentally match something - is left
+# "Not Matched" for manual review, rather than falling back to a weaker
+# signal the way the normal engine's own MIN_RATIO_FALLBACK does. Never
+# force a bad match - same "wrong is worse than none" principle as every
+# other matcher in this project.
+# ---------------------------------------------------------------------------
+
+MIN_DOC_NO_LEN = 6  # a shorter leading run is too generic to trust as the sole match signal
+
+
+def _leading_doc_no(pmd_value):
+    """The claim's own true policy Doc-No: the digits-only form of the
+    text before the FIRST '/' in its reference - e.g.
+    '269327938/1/18269/04/2024' -> '269327938'. Returns '' for a blank/
+    unparseable value (caller treats that the same as "no candidates")."""
+    if pd.isna(pmd_value):
+        return ""
+    first_segment = str(pmd_value).split("/", 1)[0]
+    return re.sub(r"\D", "", first_segment)
+
+
+def match_leader_claims_file_strict(leader_df, pmd_col, register_df, leader_ref_col, igi_policy_col, report=None):
+    """
+    Strict Doc-No-only counterpart to match_leader_claims_file() - see the
+    module-level note above for why this exists and when to use it
+    (any claims file whose own reference column has no letters in it at
+    all, e.g. a GIMS/Centegy system-generated 'CLM_RCOV_COINS_...' claims
+    recovery statement's own 'POLICY' column).
+
+    SAME parameter shape as match_leader_claims_file (this is a drop-in
+    swap, not a different call convention): leader_ref_col is the
+    register's own single matching column (e.g. 'Leader#' - what the
+    claim's Doc-No is searched against), igi_policy_col is the column
+    PULLED IN as the result once a match is accepted (e.g. 'Doc Ref #') -
+    igi_policy_col is never itself searched as a second matching column
+    (unlike claims_register_processor's fan-out matcher, which has a
+    genuinely different Base-Doc-No/Document-No pairing - conflating the
+    two here was an earlier bug in this function, caught before this
+    module shipped, by matching claim Doc-Nos against the IGI Policy
+    Number's own different format, e.g. '2024/12/KU4MInIP05584', which
+    would only ever coincidentally collide, not genuinely match).
+
+    Returns a NEW dataframe = leader_df (every original column,
+    untouched) plus NEW_COLUMNS (IDENTICAL shape/column names to
+    match_leader_claims_file's own output), so this is a drop-in
+    replacement wherever that function's result is consumed downstream
+    (claims_check_generator.build_match_output, the app's own summary/
+    log lines, etc.) - only the ACCEPTANCE rule differs, not the output
+    contract.
+    """
+    from premium_register_processor import _digits_only
+
+    leader_ref_digits = register_df[leader_ref_col].astype(str).map(_digits_only)
+
+    try:
+        from perf_utils import RowProgress
+        progress = RowProgress(report, total=len(leader_df), label="claims matched") if report else None
+    except ImportError:
+        progress = None
+
+    igi_numbers, matched_refs, scores, statuses = [], [], [], []
+    for i, val in enumerate(leader_df[pmd_col], start=1):
+        doc_no = _leading_doc_no(val)
+        best_idx, best_ratio = None, 0.0
+
+        if len(doc_no) >= MIN_DOC_NO_LEN:
+            mask = leader_ref_digits.str.contains(doc_no, regex=False, na=False)
+            candidates = register_df.index[mask]
+
+            if len(candidates):
+                query_digits = _digits_only(val)
+                for idx in candidates:
+                    # Among genuine Doc-No matches (there's almost always
+                    # exactly one, occasionally a small handful sharing the
+                    # same Doc-No across different endorsements/cert
+                    # numbers on the same policy), the overall digit-string
+                    # similarity ratio breaks the tie in favor of whichever
+                    # candidate's own full reference (incl. its own
+                    # cert/endt/date suffix) most closely resembles the
+                    # claim's own full reference - not just the Doc-No
+                    # prefix both already share.
+                    cand_digits = leader_ref_digits.at[idx]
+                    ratio = SequenceMatcher(None, query_digits, cand_digits).ratio()
+                    if ratio > best_ratio:
+                        best_idx, best_ratio = idx, ratio
+
+        if best_idx is not None:
+            igi_numbers.append(register_df.at[best_idx, igi_policy_col])
+            matched_refs.append(register_df.at[best_idx, leader_ref_col])
+            scores.append(round(best_ratio, 3))
+            statuses.append("Matched")
+        else:
+            igi_numbers.append(None)
+            matched_refs.append(None)
+            scores.append(round(best_ratio, 3))
+            statuses.append("Not Matched")
+
+        if progress:
+            progress.maybe(i)
+    if progress:
+        progress.final()
+
+    out = leader_df.copy()
+    out["IGI Policy Number"] = igi_numbers
+    out["Matched Leader Ref (Register)"] = matched_refs
+    out["Match Score"] = scores
+    out["Match Status"] = statuses
+    return out
 
 
 if __name__ == "__main__":
