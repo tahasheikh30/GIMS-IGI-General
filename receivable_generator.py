@@ -514,6 +514,19 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     pie.dataLabels.showPercent = True
     pie.dataLabels.showCatName = False
     pie.dataLabels.showVal = False
+    # showSerName is left unset by openpyxl's own DataLabelList default,
+    # which Excel renders as ON - and since add_data(titles_from_data=True)
+    # takes the series name from the little labeled-table's own header
+    # cell (K{pie_src_row}, literally "Total"), every data label was
+    # rendering as "Total, 91.6%" / "Total, 8.4%" instead of a bare
+    # percentage. With only one series and only two slices, that extra
+    # "Total, " prefix on the small slice's outEnd label was wide enough
+    # to run up into the "Premium vs Claims Share" title directly above
+    # it. Explicitly disabling it leaves just the percentage, which is
+    # both correct (there's no real "Total" series being distinguished
+    # from anything) and short enough to no longer collide with the title.
+    pie.dataLabels.showSerName = False
+    pie.dataLabels.showLegendKey = False
     pie.dataLabels.numFmt = "0.0%"
     pie.dataLabels.dLblPos = "outEnd"
     pie.dataLabels.txPr = _chart_text(size=1000, color=SLATE_TEXT, bold=True)

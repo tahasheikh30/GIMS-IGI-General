@@ -447,6 +447,16 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
 
     pie.dataLabels = DataLabelList()
     pie.dataLabels.showPercent = True
+    pie.dataLabels.showCatName = False
+    pie.dataLabels.showVal = False
+    # See the identical fix (and full rationale) in receivable_generator.py's
+    # own Summary-sheet pie chart: without this, openpyxl/Excel's default
+    # is to also show the series name - which, since add_data() takes it
+    # from this table's own header cell (literally "Total"), rendered
+    # every label as "Total, 91.6%" instead of "91.6%" and ran the small
+    # slice's label up into the "Paid vs Outstanding Share" title above it.
+    pie.dataLabels.showSerName = False
+    pie.dataLabels.showLegendKey = False
     pie.dataLabels.numFmt = "0.0%"
     pie.dataLabels.dLblPos = "outEnd"
     pie.dataLabels.txPr = _chart_text(size=1000, color=SLATE_TEXT, bold=True)
