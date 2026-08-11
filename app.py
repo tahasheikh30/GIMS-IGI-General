@@ -5010,5 +5010,26 @@ class BalanceApp(tk.Tk):
 
 
 if __name__ == "__main__":
+    # REQUIRED for a PyInstaller-frozen build that uses
+    # concurrent.futures.ProcessPoolExecutor (receivable_generator.py,
+    # claims_register_generator.py, report_generator.py all use it for
+    # parallel workbook generation). On Windows, spawning a worker
+    # process re-imports and re-runs this whole script from scratch. In
+    # a normal "python app.py" run, multiprocessing's own bookkeeping
+    # correctly recognizes a spawned worker and skips straight to running
+    # its target function, never reaching the BalanceApp()/mainloop()
+    # lines below. In a FROZEN exe, that recognition depends entirely on
+    # freeze_support() being called here, as literally the first thing
+    # inside this guard, before anything else. Without it, every worker
+    # process falls straight through into "app = BalanceApp();
+    # app.mainloop()" - i.e. it opens a brand new, fully separate copy of
+    # the whole GUI. That's the exact bug: extra windows appearing right
+    # before/during "Generate Excel Reports" (when the batch is large
+    # enough to trigger the parallel path), and closing the original
+    # window kills every one of them at once, since PyInstaller ties
+    # spawned children to the parent through a Windows Job Object.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     app = BalanceApp()
     app.mainloop()
