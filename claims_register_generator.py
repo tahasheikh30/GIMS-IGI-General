@@ -32,6 +32,7 @@ from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.chart.axis import ChartLines
 from openpyxl.chart.title import Title
 from openpyxl.chart.text import RichText, Text
+from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
@@ -463,6 +464,21 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
     pie.legend.position = "b"
     pie.legend.overlay = False
     pie.legend.txPr = _chart_text(size=900, color=SLATE_TEXT)
+
+    # Reserve top space for the title, same fix (and full rationale) as
+    # receivable_generator.py's own pie chart: Excel's automatic layout
+    # otherwise lets the pie fill almost the whole chart canvas, so an
+    # outEnd label on a small slice near 12 o'clock has nowhere to sit
+    # but on top of the title text right above it. Shrinking and pushing
+    # the pie down via a manual plot-area layout opens up a real gap.
+    pie.layout = Layout(
+        manualLayout=ManualLayout(
+            layoutTarget="inner",
+            xMode="edge", yMode="edge",
+            x=0.06, y=0.24, w=0.88, h=0.62,
+        )
+    )
+
     _style_chart_frame(pie)
     pie.height = 8.6
     pie.width = 12.6

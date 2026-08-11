@@ -31,6 +31,7 @@ from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.chart.axis import ChartLines
 from openpyxl.chart.title import Title
 from openpyxl.chart.text import RichText, Text
+from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.drawing.line import LineProperties
 from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties, RegularTextRun, Font as DrawFont
 
@@ -534,6 +535,28 @@ def _write_summary_sheet(ws, bucket_label, client_breakdown_df, premium_total, c
     pie.legend.position = "b"
     pie.legend.overlay = False
     pie.legend.txPr = _chart_text(size=900, color=SLATE_TEXT)
+
+    # Reserve top space for the title so an outEnd data label on a small
+    # slice near 12 o'clock can never collide with it. Excel's own
+    # "automatic" layout sizes the plot area (the pie itself) to fill
+    # almost the entire chart canvas and only leaves the title its own
+    # thin strip - fine for a label that sits well inside the pie, but
+    # an outEnd label is drawn just OUTSIDE the pie's edge, so with the
+    # pie already touching the top of its plot area there's nowhere for
+    # that label to go except into the title text right above it (this
+    # is exactly what's shown in the "8.4%" screenshot). A manual
+    # plot-area layout explicitly shrinks the pie and pushes it down
+    # within the chart, opening up a real gap between the title and the
+    # topmost slice/label - fixed fractions of the chart's own
+    # width/height (xMode/yMode="edge"), not data-dependent, so this
+    # holds regardless of which slice ends up smallest in a given file.
+    pie.layout = Layout(
+        manualLayout=ManualLayout(
+            layoutTarget="inner",
+            xMode="edge", yMode="edge",
+            x=0.06, y=0.24, w=0.88, h=0.62,
+        )
+    )
 
     _style_chart_frame(pie)
     pie.height = 8.6
