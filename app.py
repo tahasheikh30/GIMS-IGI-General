@@ -1588,14 +1588,25 @@ class BalanceApp(tk.Tk):
                     self._log_upr(f"   {fn} [{sn}]: {reason}")
             if meta["excluded_rows"]:
                 self._log_upr(f"{meta['excluded_rows']:,} row(s) excluded (missing Department, Comm Date, "
-                              f"Gross Premium, or an implausible Comm Date).")
+                              f"Gross Premium, or an implausibly OLD Comm Date).")
             if meta.get("implausible_date_rows"):
-                self._log_upr(f"  Of those, {meta['implausible_date_rows']:,} had a Comm Date so far out of "
-                              f"range (e.g. year 5026) that it looks like a corrupted date value in the source "
-                              f"export rather than a real policy date - excluded so it doesn't clutter the "
-                              f"period list or distort the Previous/Future Policies buckets. This is a source "
-                              f"file data issue, worth fixing at the export level. Example(s):")
+                self._log_upr(f"  Of those, {meta['implausible_date_rows']:,} had a Comm Date implausibly far in "
+                              f"the past - excluded, since a corrupted date landing decades/centuries too early "
+                              f"has no sensible bucket to land in. This is a source file data issue, worth fixing "
+                              f"at the export level. Example(s):")
                 for s in meta["implausible_date_samples"][:5]:
+                    cd = s["comm_date"]
+                    cd_text = cd.strftime("%d-%b-%Y") if hasattr(cd, "strftime") else str(cd)
+                    doc_ref_text = f" ({s['doc_ref']})" if s.get("doc_ref") else ""
+                    self._log_upr(f"    {s['department']}: {cd_text}{doc_ref_text}")
+            if meta.get("far_future_rows"):
+                self._log_upr(f"{meta['far_future_rows']:,} row(s) had a Comm Date implausibly far in the future "
+                              f"(e.g. year 5026) - possibly a corrupted date value in the source export, but NOT "
+                              f"excluded: they're kept and counted under \"Future Policies\" (fully unearned) "
+                              f"wherever the selected period, no matter how far out the date is. They're also kept "
+                              f"out of the Period dropdown itself, so a corrupted year never shows up there as a "
+                              f"selectable period. Example(s):")
+                for s in meta["far_future_date_samples"][:5]:
                     cd = s["comm_date"]
                     cd_text = cd.strftime("%d-%b-%Y") if hasattr(cd, "strftime") else str(cd)
                     doc_ref_text = f" ({s['doc_ref']})" if s.get("doc_ref") else ""

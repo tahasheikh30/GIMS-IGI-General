@@ -213,16 +213,26 @@ def load_premium_registers(filepaths, report=None):
       df - concatenated rows with canonical columns "Department",
           "Comm Date" (datetime), "Gross Premium" (float), and "Doc Ref"
           if that column was found in at least one sheet (else omitted).
-          Only rows with a usable Department + Comm Date + Gross Premium,
-          AND a plausible Comm Date (see the plausibility check further
-          down - catches a corrupted Excel date serial in the source
-          export, e.g. a Comm Date landing in the year 5026), are
-          included - excluded_rows in meta reports how many weren't.
+          A row is only EXCLUDED for missing Department/Comm Date/Gross
+          Premium, or a Comm Date implausibly far in the PAST (see
+          MIN_PLAUSIBLE_COMM_YEAR below - catches a corrupted Excel date
+          serial landing centuries before any real policy could exist).
+          A Comm Date implausibly far in the FUTURE is never excluded -
+          see the plausibility check further down for why - it's kept
+          and always lands in the Future Policies bucket regardless of
+          how far out it is. excluded_rows in meta reports how many rows
+          were dropped for the reasons above.
       meta - dict: {"sheets_used": [(filename, sheet_name), ...],
           "sheets_skipped": [(filename, sheet_name, reason), ...],
           "excluded_rows": int, "implausible_date_rows": int,
           "implausible_date_samples": [{"department", "comm_date",
-              "doc_ref"}, ...] (up to 10, for surfacing in the UI),
+              "doc_ref"}, ...] (up to 10, for surfacing in the UI) -
+          these are the EXCLUDED, implausibly-OLD rows,
+          "far_future_rows": int, "far_future_date_samples": [...] -
+          these are NOT excluded (they're included, folded into Future
+          Policies) - reported purely so an unusually far-out date is
+          still visible to the person running the report, not silently
+          invisible either way,
           "total_rows_read": int}
     """
     if not filepaths:
@@ -293,34 +303,56 @@ def load_premium_registers(filepaths, report=None):
     # normal Excel date serial looks like roughly 3,000 years from now).
     # pandas/xlrd faithfully convert that into a nonsense calendar date -
     # year 5026, 2302, 2206, 2066, 2062, etc. This isn't a parsing bug on
-    # this module's side, the file's own stored value is wrong, but left
-    # unfiltered it does two real things downstream: every one of those
-    # nonsense years shows up as its own separate entry in the period
-    # dropdown (get_available_period_options lists every distinct
-    # (year, month) actually present in Comm Date, which is what actually
-    # surfaced this), and that row's premium silently lands in the
-    # "Future Policies" bucket in Table 1/2 at the wrong weight.
+    # this module's side, the file's own stored value is wrong.
     #
-    # This is deliberately NOT the same thing as filtering out a
-    # genuinely far-future but real Comm Date. Multi-year installment or
-    # travel policies in real data legitimately carry Comm Dates several
-    # years out (confirmed: several groups of rows share the same
-    # day/month across 3-4 consecutive future years under sibling Doc
-    # Refs, e.g. 2027-04-12 / 2028-04-12 / 2029-04-12 / 2030-04-12 -
-    # clearly an intentional installment schedule, not a typo), so the
-    # bound below is a wide corruption filter, not a "recent years only"
-    # filter - it only excludes a date that's decades or centuries out,
-    # which no legitimate policy commencement date can ever be.
+    # PAST vs FUTURE are handled differently here, per instruction:
+    #   - An implausibly OLD date (before MIN_PLAUSIBLE_COMM_YEAR) is
+    #     still EXCLUDED - a corrupted date landing decades/centuries
+    #     before any real policy could exist has no sensible bucket to
+    #     land in anyway (it isn't really "Previous", it's garbage), and
+    #     including it would silently inflate Table 1's Previous column
+    #     and the Gross Premium total with a bogus figure.
+    #   - An implausibly FAR-FUTURE date is NO LONGER excluded. Per
+    #     spec: any Comm Date after the selected period's own end is, by
+    #     definition, not yet earned - genuinely far-future installment/
+    #     travel schedules already land here correctly (confirmed: real
+    #     rows several years out under sibling Doc Refs), and an
+    #     obviously-corrupted far-future serial (year 5026 etc.) still
+    #     describes a date after the period end either way. Rather than
+    #     dropping that row's premium from the register entirely (which
+    #     would understate Gross Premium), it's kept and folded into the
+    #     "Future Policies" bucket at its normal, fully-unearned (weight
+    #     1.0) treatment - assign_buckets()'s own is_future check
+    #     (Comm Date > period_end) already does this correctly for any
+    #     date, however far out, once the row isn't excluded up front.
+    #     far_future_rows/far_future_date_samples below are still
+    #     reported (not acted on) purely so an unusually far-out date
+    #     stays visible to whoever's running the report, in case it's
+    #     worth a source-data cleanup, without silently changing the
+    #     calculated figures.
     today_year = date.today().year
-    plausible_mask = df["Comm Date"].dt.year.between(MIN_PLAUSIBLE_COMM_YEAR, today_year + MAX_PLAUSIBLE_COMM_YEAR_AHEAD)
-    valid_mask = base_valid_mask & plausible_mask
+    low_plausible_mask = df["Comm Date"].dt.year >= MIN_PLAUSIBLE_COMM_YEAR
+    valid_mask = base_valid_mask & low_plausible_mask
 
-    implausible_date_rows = int((base_valid_mask & ~plausible_mask).sum())
+    implausible_date_rows = int((base_valid_mask & ~low_plausible_mask).sum())
     implausible_date_samples = []
     if implausible_date_rows:
-        sample_df = df.loc[base_valid_mask & ~plausible_mask].head(10)
+        sample_df = df.loc[base_valid_mask & ~low_plausible_mask].head(10)
         for _, r in sample_df.iterrows():
             implausible_date_samples.append({
+                "department": r["Department"],
+                "comm_date": r["Comm Date"],
+                "doc_ref": r["Doc Ref"] if "Doc Ref" in df.columns else None,
+            })
+
+    far_future_mask = df["Comm Date"].dt.year > (today_year + MAX_PLAUSIBLE_COMM_YEAR_AHEAD)
+    far_future_included_mask = base_valid_mask & low_plausible_mask & far_future_mask
+    far_future_rows = int(far_future_included_mask.sum())
+    far_future_date_samples = []
+    if far_future_rows:
+        sample_df = df.loc[far_future_included_mask].head(10)
+        for _, r in sample_df.iterrows():
+            far_future_date_samples.append({
                 "department": r["Department"],
                 "comm_date": r["Comm Date"],
                 "doc_ref": r["Doc Ref"] if "Doc Ref" in df.columns else None,
@@ -335,6 +367,8 @@ def load_premium_registers(filepaths, report=None):
         "excluded_rows": excluded_rows,
         "implausible_date_rows": implausible_date_rows,
         "implausible_date_samples": implausible_date_samples,
+        "far_future_rows": far_future_rows,
+        "far_future_date_samples": far_future_date_samples,
         "total_rows_read": total_rows_read,
     }
     return clean_df, meta
@@ -356,12 +390,24 @@ def get_available_period_options(df, date_col="Comm Date"):
     file with a narrower range than expected should surface as a clear
     validation error when picked, not silently disappear from the list.
 
+    A far-future, likely-corrupted Comm Date (see load_premium_registers'
+    own plausibility check - year 5026 etc.) is no longer EXCLUDED from
+    the loaded data (it's kept and folded into whatever period's own
+    Future Policies bucket), but it still has no business showing up as
+    its own SELECTABLE PERIOD here - nobody is ever choosing "January
+    5026" as the period they're closing. So this list is capped at
+    MAX_PLAUSIBLE_COMM_YEAR_AHEAD years out from today, same bound the
+    loader uses to decide what counts as "far-future" - only the
+    candidate-period list is filtered by it; the underlying row is still
+    present in df and still counted at calculation time.
+
     Returns a list of dicts: {"year": int, "month": int, "label": str}.
     """
     dates = df[date_col].dropna()
     if len(dates) == 0:
         return []
-    pairs = sorted({(d.year, d.month) for d in dates}, reverse=True)
+    max_selectable_year = date.today().year + MAX_PLAUSIBLE_COMM_YEAR_AHEAD
+    pairs = sorted({(d.year, d.month) for d in dates if d.year <= max_selectable_year}, reverse=True)
     return [{"year": y, "month": m, "label": f"{calendar.month_name[m]} {y}"} for y, m in pairs]
 
 
