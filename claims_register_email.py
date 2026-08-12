@@ -14,6 +14,7 @@ key "OFC".
 """
 from datetime import date
 
+import company_alias_resolver as car
 import email_generator as eg
 import outlook_sender as osend
 
@@ -52,12 +53,19 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
 
+    # Precomputed once per run (see company_alias_resolver.resolve_company_email's
+    # own docstring for why exact-match alone misses almost every real
+    # company - the bucket label is the coinsurer's raw name straight off
+    # the Premium Register's own "Ins" column, e.g. "AIC Corp. Division
+    # Karachi", while the Email Lookup File's own Company Name column
+    # spells the same real company differently, e.g. "ADAMJEE INSURANCE
+    # COMPANY LTD" - the merge-key fallback is what actually bridges that).
+    merge_index = car.build_email_merge_index(email_lookup, poc_lookup)
+
     drafts = []
     for bucket_label in groups:
         t = totals[bucket_label]
-        key = _normalize_key(bucket_label)
-        email = email_lookup.get(key)
-        poc_name = poc_lookup.get(key)
+        email, poc_name = car.resolve_company_email(bucket_label, email_lookup, poc_lookup, merge_index=merge_index)
         num_claims = t["num_claims"]
 
         subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)

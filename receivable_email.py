@@ -24,6 +24,7 @@ than guessing which of the pooled companies' contacts to use.
 """
 from datetime import date
 
+import company_alias_resolver as car
 import email_generator as eg
 import outlook_sender as osend
 
@@ -68,12 +69,18 @@ def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None,
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
 
+    # See company_alias_resolver.resolve_company_email's own docstring -
+    # same fix as claims_register_email.py: an exact string match between
+    # the bucket's own raw Company name and the Email Lookup File's own
+    # (differently-worded) Company Name essentially never holds, so this
+    # falls back to the same merge-key logic the "Merge files for the
+    # same company" checkbox already uses, computed once per run.
+    merge_index = car.build_email_merge_index(email_lookup, poc_lookup)
+
     drafts = []
     for bucket_label, _rows in groups.items():
         t = totals[bucket_label]
-        key = _normalize_key(bucket_label)
-        email = email_lookup.get(key)
-        poc_name = poc_lookup.get(key)
+        email, poc_name = car.resolve_company_email(bucket_label, email_lookup, poc_lookup, merge_index=merge_index)
         num_clients = t["num_clients"]
 
         subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)

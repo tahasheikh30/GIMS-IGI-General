@@ -99,6 +99,91 @@ def get_merge_key(label):
 
 
 # ---------------------------------------------------------------------------
+# Email-lookup resolution - fixes a confirmed real bug: the coinsurer name
+# a claim gets bucketed under is the raw, unmodified value from the Premium
+# Register's own "Ins" column (e.g. "AIC Corp. Division Karachi", "Century
+# Insurance Co. Karachi Br.", "UBL INSURERS LIMITED"), while the Email
+# Lookup File's own Company Name column is a different, cleaner wording of
+# the SAME real company (e.g. "ADAMJEE INSURANCE COMPANY LTD", "CENTURY
+# INSURANCE COMPANY LTD", "UBL INSURANCE COMPANY LTD"). Both
+# claims_register_email.py and receivable_email.py used to look an email
+# up by an EXACT normalized (upper/stripped) string match between the two -
+# which essentially never holds for two independently-typed company names,
+# so every single draft came back "Missing email" even when the lookup
+# file plainly had that company listed. Confirmed against a real run: 0 of
+# 11 coinsurer files matched under the old exact-match lookup; every one of
+# them resolves correctly once matched by get_merge_key() instead (the
+# exact same leading-token/abbreviation logic the "Merge similar company
+# names automatically" checkbox already uses to decide two raw bucket
+# labels are the same real company - this just applies that same,
+# already-trusted logic to the email-lookup step too).
+#
+# Exact match is still tried FIRST (cheap, and correct wherever the two
+# sources do happen to agree word-for-word) - the merge-key match is only
+# a fallback for whatever exact match doesn't catch, so this can only ever
+# find MORE emails than before, never fewer or different ones for a name
+# that already matched exactly.
+# ---------------------------------------------------------------------------
+
+def build_email_merge_index(email_lookup, poc_lookup=None):
+    """
+    {merge_key: (email, poc_name)} built once from every entry in
+    email_lookup (keys are already the normalized-upper company names
+    load_canonical_companies_and_emails / the simple lookup parser
+    produce). Built once per run and passed into resolve_company_email()
+    for every bucket, rather than rebuilt per lookup.
+
+    If two distinctly-different lookup-file companies happen to reduce to
+    the same merge key (rare - would mean their own leading tokens
+    collide), the FIRST one encountered wins and the rest are silently
+    shadowed for fallback purposes only - exact-match lookups for either
+    company are completely unaffected either way, since exact match is
+    always tried first and never goes through this index at all.
+    """
+    poc_lookup = poc_lookup or {}
+    index = {}
+    for key, email in email_lookup.items():
+        mk = get_merge_key(key)
+        if mk not in index:
+            index[mk] = (email, poc_lookup.get(key))
+    return index
+
+
+def resolve_company_email(company_name, email_lookup, poc_lookup=None, merge_index=None):
+    """
+    Look up a coinsurer/company's email (and POC name, if any) from the
+    Email Lookup File's own email_lookup/poc_lookup dicts (both keyed by
+    normalized-upper company name).
+
+    1. Exact match on the normalized (upper/stripped) name - the
+       original, already-correct behavior wherever the two sources agree
+       word-for-word.
+    2. Falls back to a get_merge_key() match against every lookup-file
+       company (see the module note above) - this is what actually
+       resolves "AIC Corp. Division Karachi" -> Adamjee's email, "Century
+       Insurance Co. Karachi Br." -> Century's email, etc.
+
+    merge_index: optional precomputed build_email_merge_index() result -
+        pass this in when resolving many companies in a loop (e.g. one
+        per coinsurer bucket) so the fallback index is only built once
+        per run, not once per company.
+
+    Returns (email, poc_name) - either may be None if nothing matched.
+    """
+    poc_lookup = poc_lookup or {}
+    norm_key = str(company_name).strip().upper()
+    if norm_key in email_lookup:
+        return email_lookup[norm_key], poc_lookup.get(norm_key)
+
+    if merge_index is None:
+        merge_index = build_email_merge_index(email_lookup, poc_lookup)
+    mk = get_merge_key(company_name)
+    if mk in merge_index:
+        return merge_index[mk]
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Canonical output filenames for a fixed list of known companies. Used by
 # the Claims Register and Receivable generators to name a bucket's output
 # file/workbook after the company using this exact, requested convention,
