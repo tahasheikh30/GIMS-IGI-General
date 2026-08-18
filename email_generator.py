@@ -2,9 +2,18 @@
 Email drafting: fills a template with per-client data.
 Templates use {placeholder} syntax, e.g.:
     "Dear {client_name}, your outstanding balance of {amount} ..."
+
+PERSISTENCE: signature.json and templates.json are stored in a local,
+per-machine folder (see app_paths.py), not next to this script, and are
+written atomically (see safe_io.py). Both together are what stop these
+files from corrupting when the project itself is shared across laptops
+via a synced OneDrive folder. See either module's own docstring for the
+full rationale.
 """
-import json
 import os
+
+import app_paths
+import safe_io
 
 DEFAULT_SIGNATURE = "Finance Department\nIGI General Takaful"
 
@@ -25,39 +34,34 @@ DEFAULT_TEMPLATE = {
     ),
 }
 
-TEMPLATES_FILE = os.path.join(os.path.dirname(__file__), "templates.json")
-SIGNATURE_FILE = os.path.join(os.path.dirname(__file__), "signature.json")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATES_FILE = app_paths.resolve_state_file("templates.json", legacy_dir=_APP_DIR)
+SIGNATURE_FILE = app_paths.resolve_state_file("signature.json", legacy_dir=_APP_DIR)
 
 
 def load_signature():
-    """Load the user's personal signature (persisted locally per machine/user)."""
-    if os.path.exists(SIGNATURE_FILE):
-        try:
-            with open(SIGNATURE_FILE, "r") as f:
-                data = json.load(f)
-                return data.get("signature", DEFAULT_SIGNATURE)
-        except Exception:
-            pass
+    """Load the user's personal signature (persisted locally, per machine)."""
+    data = safe_io.safe_read_json(SIGNATURE_FILE, default=None)
+    if data:
+        return data.get("signature", DEFAULT_SIGNATURE)
     return DEFAULT_SIGNATURE
 
 
 def save_signature(signature_text):
-    with open(SIGNATURE_FILE, "w") as f:
-        json.dump({"signature": signature_text}, f, indent=2)
+    safe_io.atomic_write_json(SIGNATURE_FILE, {"signature": signature_text})
 
 
 def load_templates():
-    if os.path.exists(TEMPLATES_FILE):
-        with open(TEMPLATES_FILE, "r") as f:
-            return json.load(f)
+    data = safe_io.safe_read_json(TEMPLATES_FILE, default=None)
+    if data:
+        return data
     return {"Standard Reminder": DEFAULT_TEMPLATE}
 
 
 def save_template(template_name, subject, body):
     templates = load_templates()
     templates[template_name] = {"name": template_name, "subject": subject, "body": body}
-    with open(TEMPLATES_FILE, "w") as f:
-        json.dump(templates, f, indent=2)
+    safe_io.atomic_write_json(TEMPLATES_FILE, templates)
 
 
 def fill_template(template, fields):

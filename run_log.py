@@ -1,16 +1,21 @@
-"""Simple JSON-based audit log of past runs."""
-import json
+"""Simple JSON-based audit log of past runs (Outstanding Premium module).
+
+Stored per-machine (see app_paths.py) and written atomically (see
+safe_io.py), so this file can never be corrupted by OneDrive syncing a
+half-written save, and two laptops never race over the same file.
+"""
 import os
 from datetime import datetime
 
-LOG_FILE = os.path.join(os.path.dirname(__file__), "run_history.json")
+import app_paths
+import safe_io
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = app_paths.resolve_state_file("run_history.json", legacy_dir=_APP_DIR)
 
 
 def load_history():
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            return json.load(f)
-    return []
+    return safe_io.safe_read_json(LOG_FILE, default=[])
 
 
 def log_run(threshold, company_filter, department_filter, num_qualifying, num_sent, num_failed, dry_run):
@@ -25,5 +30,4 @@ def log_run(threshold, company_filter, department_filter, num_qualifying, num_se
         "num_failed": num_failed,
         "dry_run": dry_run,
     })
-    with open(LOG_FILE, "w") as f:
-        json.dump(history, f, indent=2)
+    safe_io.atomic_write_json(LOG_FILE, history)
