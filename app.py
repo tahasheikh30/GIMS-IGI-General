@@ -2706,11 +2706,39 @@ class BalanceApp(tk.Tk):
                                             kind="quiet", compact=True)
         sig_btn.pack(expand=True)
 
-        body = ttk.Frame(f)
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # ---- Scrollable body ----
+        # Same fix as the Claims Register tab's own email preview panel
+        # (see _build_claims_emails_tab): wrapped in a canvas+scrollbar so
+        # the Body field and the Save/Send buttons stay reachable on a
+        # window shorter than the panel's natural height, instead of being
+        # silently clipped by the window edge.
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
         body.columnconfigure(0, weight=0)
         body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1, minsize=560)
 
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
@@ -2736,30 +2764,42 @@ class BalanceApp(tk.Tk):
         right = ttk.Labelframe(body, text="  Email Preview  ", padding=14)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)
+        right.rowconfigure(8, weight=1)
 
         ttk.Label(right, text="To (recipient email - separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
             .grid(row=0, column=0, sticky="w", pady=(0, 2))
         self.receivable_email_to_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.receivable_email_to_var, font=("Segoe UI", 10))\
-            .grid(row=1, column=0, sticky="ew", pady=(0, 12))
+            .grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Cc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self.receivable_email_cc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.receivable_email_cc_var, font=("Segoe UI", 10))\
+            .grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Bcc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=4, column=0, sticky="w", pady=(0, 2))
+        self.receivable_email_bcc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.receivable_email_bcc_var, font=("Segoe UI", 10))\
+            .grid(row=5, column=0, sticky="ew", pady=(0, 12))
 
         ttk.Label(right, text="Subject", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
-            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+            .grid(row=6, column=0, sticky="w", pady=(0, 2))
         self.receivable_subject_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.receivable_subject_var, font=("Segoe UI", 10))\
-            .grid(row=2, column=0, sticky="ew")
+            .grid(row=7, column=0, sticky="ew")
 
         body_wrap = ttk.Frame(right)
-        body_wrap.grid(row=3, column=0, sticky="nsew", pady=(14, 10))
+        body_wrap.grid(row=8, column=0, sticky="nsew", pady=(14, 10))
         body_wrap.columnconfigure(0, weight=1)
         body_wrap.rowconfigure(1, weight=1)
         ttk.Label(body_wrap, text="Body", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.receivable_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.receivable_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1, height=14)
         self.receivable_body_text.grid(row=1, column=0, sticky="nsew", pady=(2, 0))
 
         btn_row = ttk.Frame(right)
-        btn_row.grid(row=4, column=0, sticky="w")
+        btn_row.grid(row=9, column=0, sticky="w", pady=(10, 0))
 
         save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_receivable_email_edit, kind="accent")
         save_btn.pack(side="left", padx=(0, 8))
@@ -3172,6 +3212,8 @@ class BalanceApp(tk.Tk):
         idx = self.receivable_email_tree.index(sel[0])
         d = self.receivable_drafts[idx]
         self.receivable_email_to_var.set(d.get("email") or "")
+        self.receivable_email_cc_var.set(d.get("cc") or "")
+        self.receivable_email_bcc_var.set(d.get("bcc") or "")
         self.receivable_subject_var.set(d["subject"])
         self.receivable_body_text.delete("1.0", "end")
         self.receivable_body_text.insert("1.0", d["body"])
@@ -3184,6 +3226,8 @@ class BalanceApp(tk.Tk):
         idx = self.receivable_email_tree.index(sel[0])
         new_email = self.receivable_email_to_var.get().strip()
         self.receivable_drafts[idx]["email"] = new_email or None
+        self.receivable_drafts[idx]["cc"] = self.receivable_email_cc_var.get().strip()
+        self.receivable_drafts[idx]["bcc"] = self.receivable_email_bcc_var.get().strip()
         self.receivable_drafts[idx]["subject"] = self.receivable_subject_var.get()
         self.receivable_drafts[idx]["body"] = self.receivable_body_text.get("1.0", "end").strip()
 
@@ -3277,7 +3321,8 @@ class BalanceApp(tk.Tk):
         row_id = self.receivable_email_tree.get_children()[idx]
 
         def worker():
-            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run,
+                                                 cc=d.get("cc"), bcc=d.get("bcc"))
             self.receivable_email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
             prefix = "[DRY RUN] " if dry_run else ""
             messagebox.showinfo("Done", f"{prefix}{message}")
@@ -3604,11 +3649,47 @@ class BalanceApp(tk.Tk):
                                             kind="quiet", compact=True)
         sig_btn.pack(expand=True)
 
-        body = ttk.Frame(f)
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # ---- Scrollable body ----
+        # The coinsurer list + email preview panel (Body textbox, Save/Send
+        # buttons, etc.) used to sit in a plain fixed-height frame, so on a
+        # window shorter than the panel's natural height everything below
+        # "Subject" was silently clipped by the window edge, with no
+        # scrollbar to reach it. Wrapped in the same canvas+scrollbar
+        # pattern every other scrollable page in the app already uses (see
+        # _build_claims_setup_tab) so the Body field and the Save/Send
+        # buttons are always reachable regardless of window size.
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
         body.columnconfigure(0, weight=0)
         body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
+        # A fixed minsize keeps the list/preview panel at a sensible
+        # working height instead of collapsing to a cramped size just
+        # because it now lives inside a scrollable canvas rather than a
+        # fixed-size parent (a canvas child has nothing to expand
+        # against, so weight=1 alone isn't enough here).
+        body.rowconfigure(0, weight=1, minsize=560)
 
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
@@ -3634,30 +3715,42 @@ class BalanceApp(tk.Tk):
         right = ttk.Labelframe(body, text="  Email Preview  ", padding=14)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)
+        right.rowconfigure(8, weight=1)
 
         ttk.Label(right, text="To (recipient email - separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
             .grid(row=0, column=0, sticky="w", pady=(0, 2))
         self.claims_email_to_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.claims_email_to_var, font=("Segoe UI", 10))\
-            .grid(row=1, column=0, sticky="ew", pady=(0, 12))
+            .grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Cc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self.claims_email_cc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.claims_email_cc_var, font=("Segoe UI", 10))\
+            .grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Bcc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=4, column=0, sticky="w", pady=(0, 2))
+        self.claims_email_bcc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.claims_email_bcc_var, font=("Segoe UI", 10))\
+            .grid(row=5, column=0, sticky="ew", pady=(0, 12))
 
         ttk.Label(right, text="Subject", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
-            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+            .grid(row=6, column=0, sticky="w", pady=(0, 2))
         self.claims_subject_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.claims_subject_var, font=("Segoe UI", 10))\
-            .grid(row=2, column=0, sticky="ew")
+            .grid(row=7, column=0, sticky="ew")
 
         body_wrap = ttk.Frame(right)
-        body_wrap.grid(row=3, column=0, sticky="nsew", pady=(14, 10))
+        body_wrap.grid(row=8, column=0, sticky="nsew", pady=(14, 10))
         body_wrap.columnconfigure(0, weight=1)
         body_wrap.rowconfigure(1, weight=1)
         ttk.Label(body_wrap, text="Body", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.claims_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.claims_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1, height=14)
         self.claims_body_text.grid(row=1, column=0, sticky="nsew", pady=(2, 0))
 
         btn_row = ttk.Frame(right)
-        btn_row.grid(row=4, column=0, sticky="w")
+        btn_row.grid(row=9, column=0, sticky="w", pady=(10, 0))
 
         save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_claims_register_email_edit, kind="accent")
         save_btn.pack(side="left", padx=(0, 8))
@@ -4142,6 +4235,8 @@ class BalanceApp(tk.Tk):
         idx = self.claims_email_tree.index(sel[0])
         d = self.claims_drafts[idx]
         self.claims_email_to_var.set(d.get("email") or "")
+        self.claims_email_cc_var.set(d.get("cc") or "")
+        self.claims_email_bcc_var.set(d.get("bcc") or "")
         self.claims_subject_var.set(d["subject"])
         self.claims_body_text.delete("1.0", "end")
         self.claims_body_text.insert("1.0", d["body"])
@@ -4154,6 +4249,8 @@ class BalanceApp(tk.Tk):
         idx = self.claims_email_tree.index(sel[0])
         new_email = self.claims_email_to_var.get().strip()
         self.claims_drafts[idx]["email"] = new_email or None
+        self.claims_drafts[idx]["cc"] = self.claims_email_cc_var.get().strip()
+        self.claims_drafts[idx]["bcc"] = self.claims_email_bcc_var.get().strip()
         self.claims_drafts[idx]["subject"] = self.claims_subject_var.get()
         self.claims_drafts[idx]["body"] = self.claims_body_text.get("1.0", "end").strip()
 
@@ -4255,7 +4352,8 @@ class BalanceApp(tk.Tk):
         row_id = self.claims_email_tree.get_children()[idx]
 
         def worker():
-            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run,
+                                                 cc=d.get("cc"), bcc=d.get("bcc"))
             self.claims_email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
             prefix = "[DRY RUN] " if dry_run else ""
             messagebox.showinfo("Done", f"{prefix}{message}")
@@ -4493,13 +4591,41 @@ class BalanceApp(tk.Tk):
                                             kind="quiet", compact=True)
         sig_btn.pack(expand=True)
 
-        body = ttk.Frame(f)
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # ---- Scrollable body ----
+        # Same fix as the Coinsurance modules' own email preview panels
+        # (see _build_claims_emails_tab): wrapped in a canvas+scrollbar so
+        # the Body field and the Save/Send buttons stay reachable on a
+        # window shorter than the panel's natural height, instead of being
+        # silently clipped by the window edge.
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
         # Give the list a fixed proportion and the preview panel the rest,
         # using grid so the split stays consistent as the window resizes.
         body.columnconfigure(0, weight=0)
         body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1, minsize=560)
 
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
@@ -4523,27 +4649,39 @@ class BalanceApp(tk.Tk):
         right = ttk.Labelframe(body, text="  Email Preview  ", padding=14)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)  # body text area gets the extra vertical space
+        right.rowconfigure(8, weight=1)  # body text area gets the extra vertical space
 
         ttk.Label(right, text="To (recipient email)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
             .grid(row=0, column=0, sticky="w", pady=(0, 2))
         self.email_to_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.email_to_var, font=("Segoe UI", 10))\
-            .grid(row=1, column=0, sticky="ew", pady=(0, 12))
+            .grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Cc", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self.email_cc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.email_cc_var, font=("Segoe UI", 10))\
+            .grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Bcc", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=4, column=0, sticky="w", pady=(0, 2))
+        self.email_bcc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.email_bcc_var, font=("Segoe UI", 10))\
+            .grid(row=5, column=0, sticky="ew", pady=(0, 12))
 
         ttk.Label(right, text="Subject", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
-            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+            .grid(row=6, column=0, sticky="w", pady=(0, 2))
         self.subject_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.subject_var, font=("Segoe UI", 10))\
-            .grid(row=2, column=0, sticky="ew")
+            .grid(row=7, column=0, sticky="ew")
 
         # Body label + text area share the remaining vertical space
         body_wrap = ttk.Frame(right)
-        body_wrap.grid(row=3, column=0, sticky="nsew", pady=(14, 10))
+        body_wrap.grid(row=8, column=0, sticky="nsew", pady=(14, 10))
         body_wrap.columnconfigure(0, weight=1)
         body_wrap.rowconfigure(1, weight=1)
         ttk.Label(body_wrap, text="Body", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1)
+        self.body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1, height=14)
         self.body_text.grid(row=1, column=0, sticky="nsew", pady=(2, 0))
 
         # Plain tk.Button (not ttk) for this action: on some Windows ttk
@@ -4552,7 +4690,7 @@ class BalanceApp(tk.Tk):
         # itself exactly to its own text, so the full label is guaranteed
         # to render.
         btn_row = ttk.Frame(right)
-        btn_row.grid(row=4, column=0, sticky="w")
+        btn_row.grid(row=9, column=0, sticky="w", pady=(10, 0))
 
         save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_email_edit, kind="accent")
         save_btn.pack(side="left", padx=(0, 8))
@@ -4894,6 +5032,8 @@ class BalanceApp(tk.Tk):
         idx = self.email_tree.index(sel[0])
         d = self.drafts[idx]
         self.email_to_var.set(d.get("email") or "")
+        self.email_cc_var.set(d.get("cc") or "")
+        self.email_bcc_var.set(d.get("bcc") or "")
         self.subject_var.set(d["subject"])
         self.body_text.delete("1.0", "end")
         self.body_text.insert("1.0", d["body"])
@@ -4906,6 +5046,8 @@ class BalanceApp(tk.Tk):
         idx = self.email_tree.index(sel[0])
         new_email = self.email_to_var.get().strip()
         self.drafts[idx]["email"] = new_email or None
+        self.drafts[idx]["cc"] = self.email_cc_var.get().strip()
+        self.drafts[idx]["bcc"] = self.email_bcc_var.get().strip()
         self.drafts[idx]["subject"] = self.subject_var.get()
         self.drafts[idx]["body"] = self.body_text.get("1.0", "end").strip()
 
@@ -5000,7 +5142,8 @@ class BalanceApp(tk.Tk):
         row_id = self.email_tree.get_children()[idx]
 
         def worker():
-            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run)
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run,
+                                                 cc=d.get("cc"), bcc=d.get("bcc"))
             self.email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
             prefix = "[DRY RUN] " if dry_run else ""
             messagebox.showinfo("Done", f"{prefix}{message}")

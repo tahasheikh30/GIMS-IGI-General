@@ -61,8 +61,11 @@ def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None,
         -> email address (semicolon-joined if the source listed several)
     poc_lookup: optional dict, same normalized Company-name keys -> contact
         person name, used in the greeting
-    Returns list of draft dicts: {company_name, email, poc_name, subject,
-        body, num_clients, premium_total, claims_total, status}
+    Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
+        subject, body, num_clients, premium_total, claims_total, status}
+    cc/bcc start blank - there's no lookup-file source for them, they're
+    filled in (and saved per-draft) by hand on the Review & Send Emails
+    tab, same manual-entry convention as a missing "email" value.
     """
     poc_lookup = poc_lookup or {}
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
@@ -98,6 +101,8 @@ def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None,
         drafts.append({
             "company_name": bucket_label,
             "email": email,
+            "cc": "",
+            "bcc": "",
             "poc_name": poc_name,
             "subject": subject,
             "body": body,
@@ -136,7 +141,8 @@ def send_receivable_emails(drafts, attachments_dir, filename_lookup, dry_run=Fal
             if os.path.exists(candidate):
                 attachment_path = candidate
 
-        success, message = osend.send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run)
+        success, message = osend.send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run,
+                                             cc=d.get("cc"), bcc=d.get("bcc"))
         result = {**d, "sent": success, "send_message": message}
         results.append(result)
         if progress_callback:

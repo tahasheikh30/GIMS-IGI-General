@@ -14,16 +14,25 @@ except ImportError:
     OUTLOOK_AVAILABLE = False
 
 
-def send_email(to_address, subject, body, attachment_path=None, dry_run=False):
+def send_email(to_address, subject, body, attachment_path=None, dry_run=False, cc=None, bcc=None):
     """
     Send a single email via Outlook.
+    cc / bcc: optional strings (semicolon-separated for multiple
+        addresses, same convention Outlook's own To field uses) - either
+        may be None/blank to leave that field empty.
     Returns (success: bool, message: str).
     """
     if not to_address:
         return False, "No recipient email address"
 
     if dry_run:
-        return True, f"[DRY RUN] Would send to {to_address}: '{subject}'" + \
+        extra = []
+        if cc:
+            extra.append(f"cc: {cc}")
+        if bcc:
+            extra.append(f"bcc: {bcc}")
+        extra_text = f" ({', '.join(extra)})" if extra else ""
+        return True, f"[DRY RUN] Would send to {to_address}{extra_text}: '{subject}'" + \
                       (f" with attachment {attachment_path}" if attachment_path else "")
 
     if not OUTLOOK_AVAILABLE:
@@ -33,6 +42,10 @@ def send_email(to_address, subject, body, attachment_path=None, dry_run=False):
         outlook = win32com.client.Dispatch("Outlook.Application")
         mail = outlook.CreateItem(0)  # olMailItem
         mail.To = to_address
+        if cc:
+            mail.CC = cc
+        if bcc:
+            mail.BCC = bcc
         mail.Subject = subject
         mail.Body = body
         if attachment_path:
@@ -63,7 +76,8 @@ def send_bulk(drafts, attachments_dir=None, dry_run=False, progress_callback=Non
             if os.path.exists(candidate):
                 attachment_path = candidate
 
-        success, message = send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run)
+        success, message = send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run,
+                                       cc=d.get("cc"), bcc=d.get("bcc"))
         result = {**d, "sent": success, "send_message": message}
         results.append(result)
         if progress_callback:

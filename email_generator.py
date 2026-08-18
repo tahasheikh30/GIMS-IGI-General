@@ -87,7 +87,10 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
         ("Dear John,") instead of the company name ("Dear ACME CORP,").
     signature: text shown after "Regards," at the end of every email. Falls
         back to DEFAULT_SIGNATURE if not provided or blank.
-    Returns list of draft dicts: {client_name, email, subject, body, amount, status}
+    Returns list of draft dicts: {client_name, email, cc, bcc, subject, body, amount, status}
+    cc/bcc start blank - there's no source column for them, they're filled
+    in (and saved per-draft) by hand on the Review & Send Emails tab,
+    same manual-entry convention as a missing "email" value.
     """
     if template is None:
         template = DEFAULT_TEMPLATE
@@ -109,6 +112,8 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
         drafts.append({
             "client_name": client,
             "email": email,
+            "cc": "",
+            "bcc": "",
             "poc_name": poc_name,
             "subject": subject,
             "body": body,

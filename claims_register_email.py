@@ -45,8 +45,11 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     groups: {bucket_label: claims_df} from claims_register_processor.build_coinsurer_buckets
     totals: {bucket_label: {"num_claims", "total_share_paid", "total_share_os"}}
     email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) coinsurer name
-    Returns list of draft dicts: {company_name, email, poc_name, subject, body,
-        num_claims, paid_total, os_total, status}
+    Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
+        subject, body, num_claims, paid_total, os_total, status}
+    cc/bcc start blank - there's no lookup-file source for them, they're
+    filled in (and saved per-draft) by hand on the Review & Send Emails
+    tab, same manual-entry convention as a missing "email" value.
     """
     poc_lookup = poc_lookup or {}
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
@@ -83,6 +86,8 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
         drafts.append({
             "company_name": bucket_label,
             "email": email,
+            "cc": "",
+            "bcc": "",
             "poc_name": poc_name,
             "subject": subject,
             "body": body,
@@ -109,7 +114,8 @@ def send_claims_register_emails(drafts, attachments_dir, filename_lookup, dry_ru
             if os.path.exists(candidate):
                 attachment_path = candidate
 
-        success, message = osend.send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run)
+        success, message = osend.send_email(d.get("email"), d["subject"], d["body"], attachment_path, dry_run,
+                                             cc=d.get("cc"), bcc=d.get("bcc"))
         result = {**d, "sent": success, "send_message": message}
         results.append(result)
         if progress_callback:
