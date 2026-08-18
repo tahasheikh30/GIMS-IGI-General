@@ -18,21 +18,34 @@ import company_alias_resolver as car
 import email_generator as eg
 import outlook_sender as osend
 
-# Default Bcc recipients for every Claims Intimation (Claims Register)
+# Default Cc/Bcc recipients for every Claims Intimation (Claims Register)
 # email, per Finance's own standing instruction - always included unless
-# a person clears/edits the Bcc field by hand on the Review & Send Emails
-# tab for a specific draft. Only the bare address is kept from each
-# "Name/Dept/City <email>" entry Finance supplied, since that's the only
-# part Outlook's own Bcc field actually needs; the name/department/city
-# portion was just how the addresses were originally copied out of Outlook.
+# a person clears/edits the Cc/Bcc field by hand on the Review & Send
+# Emails tab for a specific draft. Only the bare address is kept from
+# each "Name/Dept/City <email>" entry Finance supplied, since that's the
+# only part Outlook's own Cc/Bcc fields actually need; the name/
+# department/city portion was just how the addresses were originally
+# copied out of Outlook.
 DEFAULT_BCC_RECIPIENTS = [
     "Faisal.Khan@IGI.COM.PK",
-    "waqas.muhammad@IGI.COM.PK",
-    "murtaza.feroz@IGI.COM.PK",
-    "kashif.qayyum@IGI.COM.PK",
     "muhammad.hisham@IGI.COM.PK",
+    "awais.amjad@IGI.COM.PK",
+    "murtaza.feroz@IGI.COM.PK",
 ]
 DEFAULT_BCC = ";".join(DEFAULT_BCC_RECIPIENTS)
+
+DEFAULT_CC_RECIPIENTS = [
+    "kashif.qayyum@IGI.COM.PK",
+    "abdul.rauf@IGI.COM.PK",
+    "majid.masood@IGI.COM.PK",
+    "zahid.mehmood@IGI.COM.PK",
+    "waqas.muhammad@IGI.COM.PK",
+    "fazal.abbas@IGI.COM.PK",
+    "Haider.Ali@IGI.COM.PK",
+    "nadeem.alvi@IGI.COM.PK",
+    "Muhammad.Nadeem@IGI.COM.PK",
+]
+DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
 
 SUBJECT_TEMPLATE = "Claims Recovery Statement \u2013 {company_name} \u2013 {date}"
 
@@ -47,9 +60,19 @@ BODY_TEMPLATE = (
     "convenience. If payment has already been made against any of these claims, please disregard that "
     "line and share the payment confirmation with us.\n\n"
     "Please do not hesitate to contact us if you have any questions.\n\n"
+    "For any queries, please feel free to contact Abdul Rauf ({abdul_rauf_email}) or "
+    "Muhammad Majid Masood ({majid_masood_email}).\n\n"
     "Regards,\n"
     "{signature}"
 )
+
+# Bare addresses reused in BODY_TEMPLATE's contact line above - kept as
+# their own constants (rather than hardcoded inline in the template
+# string) so they stay in sync with DEFAULT_CC_RECIPIENTS above if either
+# person's address is ever updated, without needing to edit the template
+# text itself.
+ABDUL_RAUF_EMAIL = "abdul.rauf@IGI.COM.PK"
+MAJID_MASOOD_EMAIL = "majid.masood@IGI.COM.PK"
 
 
 def _normalize_key(text):
@@ -63,13 +86,10 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) coinsurer name
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_claims, paid_total, os_total, status}
-    cc starts blank - there's no lookup-file source for it, it's filled
-    in (and saved per-draft) by hand on the Review & Send Emails tab,
-    same manual-entry convention as a missing "email" value. bcc starts
-    pre-filled with DEFAULT_BCC_RECIPIENTS (Finance's own standing list),
-    on every draft - still fully editable/clearable per draft on the
-    Review & Send Emails tab like any other field, this is just the
-    default it starts at.
+    cc and bcc both start pre-filled with Finance's own standing lists
+    (DEFAULT_CC_RECIPIENTS / DEFAULT_BCC_RECIPIENTS) on every draft -
+    still fully editable/clearable per draft on the Review & Send Emails
+    tab like any other field, this is just the default each one starts at.
     """
     poc_lookup = poc_lookup or {}
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
@@ -101,12 +121,14 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
             paid_total=f"{t['total_share_paid']:,.0f}",
             os_total=f"{t['total_share_os']:,.0f}",
             signature=signature,
+            abdul_rauf_email=ABDUL_RAUF_EMAIL,
+            majid_masood_email=MAJID_MASOOD_EMAIL,
         )
 
         drafts.append({
             "company_name": bucket_label,
             "email": email,
-            "cc": "",
+            "cc": DEFAULT_CC,
             "bcc": DEFAULT_BCC,
             "poc_name": poc_name,
             "subject": subject,
