@@ -62,11 +62,36 @@ ABBREVIATIONS = {
 }
 
 
+_HONORIFIC_PREFIX_RE = re.compile(r"^\s*(?:M/S\.?|MESSRS\.?|MESSERS\.?)\s+", re.IGNORECASE)
+
+
+def _strip_honorific_prefix(text):
+    """Strip a leading business-name honorific ("M/S", "M/S.", "Messrs",
+    "Messrs.") if present, before any first-token extraction happens.
+
+    WHY THIS MATTERS: a real coinsurer name is very often written with
+    this prefix in a source Premium/Claims Register (e.g. "M/S SALAAM
+    TAKAFUL LIMITED"), while the same company's own row in the Email
+    Lookup File is written without it ("SALAAM TAKAFUL LTD") - confirmed
+    as a real cause of a company's email silently failing to resolve:
+    _first_token() treats "M/S" itself as the leading token, so
+    get_merge_key() (and therefore resolve_company_email()'s merge-key
+    fallback) reduced the whole name down to "MS" instead of "SALAAM",
+    which never matches anything in the lookup file. Stripping this
+    prefix before token extraction means both spellings of the same
+    company reduce to the identical merge key again, the same way two
+    branch-name variants already do."""
+    return _HONORIFIC_PREFIX_RE.sub("", str(text).strip())
+
+
 def _first_token(label):
     """The text before the first underscore, or (if there's no
     underscore) before the first space - e.g. "Atlas" from
-    "Atlas_Insurance_Faisalabad", "Atlas" from "Atlas Insurance Ltd"."""
-    text = str(label).strip()
+    "Atlas_Insurance_Faisalabad", "Atlas" from "Atlas Insurance Ltd". A
+    leading "M/S"/"Messrs"-style honorific prefix is stripped first (see
+    _strip_honorific_prefix) so it's never mistaken for the company's
+    own distinguishing first word."""
+    text = _strip_honorific_prefix(str(label).strip())
     if "_" in text:
         return text.split("_", 1)[0].strip()
     if " " in text:
@@ -239,6 +264,37 @@ CANONICAL_COMPANY_FILENAMES = [
 ]
 
 
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def _label_tokens(text):
+    """Every letters-only, uppercased WORD in text, in order - e.g.
+    "Jublee General Insurance" -> ["JUBLEE", "GENERAL", "INSURANCE"].
+    Digits and punctuation are word BREAKS here (never merged into a
+    token), which is exactly what makes the matching below immune to a
+    canonical token like "UBL" coincidentally sitting mid-word inside a
+    longer/misspelled word like "JUBLEE" - "JUBLEE" is one whole token,
+    never "UBL" + "EE"."""
+    return [m.group(0).upper() for m in _WORD_RE.finditer(str(text))]
+
+
+def _contiguous_token_joins(tokens):
+    """Every CONTIGUOUS run of tokens, concatenated - e.g. ["EAST",
+    "WEST", "INSURANCE"] -> {"EAST", "EASTWEST", "EASTWESTINSURANCE",
+    "WEST", "WESTINSURANCE", "INSURANCE"}. This is what lets a multi-word
+    canonical entry like "EASTWEST" (which stands for the two real words
+    "East West") still match by whole words, without ever falling back to
+    a raw, boundary-free substring search over the whole label."""
+    joins = set()
+    n = len(tokens)
+    for i in range(n):
+        joined = ""
+        for j in range(i, n):
+            joined += tokens[j]
+            joins.add(joined)
+    return joins
+
+
 def canonical_filename_for_label(label):
     """
     Return the fixed canonical filename stub (no date suffix, no
@@ -252,11 +308,38 @@ def canonical_filename_for_label(label):
     to its real company name first (the same ABBREVIATIONS lookup
     get_merge_key() already uses), so it matches by real name rather than
     needing its own separate substring entry here.
+
+    MATCHING IS WORD-BOUNDARY ONLY, never a raw substring search over the
+    whole label. A raw "is this text anywhere inside this other text"
+    check (the previous behavior here) is exactly what let a short
+    canonical token like "UBL" falsely match against a completely
+    unrelated - or simply MISSPELLED - company name that happens to
+    contain those same three letters mid-word: a real source register
+    carried a coinsurer misspelled "JUBLEE GENERAL INSURANCE" (missing
+    the "I" in "JUBILEE"), and "UBL" sits right there inside "JUBLEE" -
+    so the old substring check silently resolved that misspelled
+    coinsurer to UBL's own canonical filename, and whichever of the two
+    companies' workbooks was generated second silently overwrote the
+    other's file on disk (and, downstream, the wrong workbook got
+    attached to that coinsurer's email). Every canonical token is now
+    only ever matched against a genuine whole word, or a genuine
+    contiguous run of whole words (for a multi-word entry like "EAST
+    WEST" -> "EASTWEST") - "JUBLEE" is its own single token and is never
+    equal to "UBL", so this exact collision (and the same latent risk for
+    every other short token - TPL, IGI, EFU, ASIA, ...) is gone by
+    construction, not just patched for this one case.
     """
     token_letters = _letters_upper(_first_token(label))
-    search_text = _letters_upper(ABBREVIATIONS.get(token_letters, "")) + _letters_upper(label)
+    token_lists = [_label_tokens(label)]
+    if token_letters in ABBREVIATIONS:
+        token_lists.append(_label_tokens(ABBREVIATIONS[token_letters]))
+
+    match_candidates = set()
+    for tokens in token_lists:
+        match_candidates |= _contiguous_token_joins(tokens)
+
     for substring, filename in CANONICAL_COMPANY_FILENAMES:
-        if substring in search_text:
+        if substring in match_candidates:
             return filename
     return None
 
