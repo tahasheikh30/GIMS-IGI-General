@@ -19,14 +19,14 @@ import outlook_sender as osend
 # Default Cc/Bcc recipients for every Premium Register email, per
 # Finance's own standing instruction - identical to Claims Intimation's
 # own lists (see claims_register_email.py) with a few substitutions/
-# additions on the Cc list: Muhammad Majid Masood is replaced by Usama
-# Jahangir (Underwriting, Lahore), and Sabeen Ahmed Nomani and Jahanzaib
-# Khan (this module's own three named contacts in the body below - Abdul
-# Rauf and Sabeen for Karachi, Jahanzaib for Lahore) are added alongside
-# him. Always included unless a person clears/edits the Cc/Bcc field by
-# hand on the Review & Send Emails tab for a specific draft. Only the
-# bare address is kept, same convention as claims_register_email.py's
-# own DEFAULT_BCC_RECIPIENTS.
+# additions on the Cc list: Muhammad Majid Masood is replaced by Shakir
+# Ali (Underwriting, Islamabad), and Sabeen Ahmed Nomani and Jahanzaib
+# Khan (this module's own four named contacts in the body below - Abdul
+# Rauf and Sabeen for Karachi, Shakir for Islamabad, Jahanzaib for
+# Lahore) are added alongside him. Always included unless a person
+# clears/edits the Cc/Bcc field by hand on the Review & Send Emails tab
+# for a specific draft. Only the bare address is kept, same convention
+# as claims_register_email.py's own DEFAULT_BCC_RECIPIENTS.
 DEFAULT_BCC_RECIPIENTS = [
     "Faisal.Khan@IGI.COM.PK",
     "muhammad.hisham@IGI.COM.PK",
@@ -38,7 +38,7 @@ DEFAULT_BCC = ";".join(DEFAULT_BCC_RECIPIENTS)
 DEFAULT_CC_RECIPIENTS = [
     "kashif.qayyum@IGI.COM.PK",
     "abdul.rauf@IGI.COM.PK",
-    "usama.jahangir@IGI.COM.PK",
+    "shakir.ali@IGI.COM.PK",
     "sabeen.nomani@IGI.COM.PK",
     "jahanzaib.khan@IGI.COM.PK",
     "zahid.mehmood@IGI.COM.PK",
@@ -61,8 +61,9 @@ BODY_TEMPLATE = (
     "For any queries or if any additional/missing documents are required, please feel free to "
     "coordinate directly with the following representatives:\n\n"
     "1. Abdul Rauf \u2013 {abdul_rauf_email} (Karachi Region)\n"
-    "2. Sabeen Nomani \u2013 {sabeen_email} (Karachi Region)\n"
-    "3. Jahanzaib Khan \u2013 {jahanzaib_email} (Lahore Region)\n\n"
+    "2. Shakir Ali \u2013 {shakir_email} (Islamabad Region)\n"
+    "3. Sabeen Nomani \u2013 {sabeen_email} (Karachi Region)\n"
+    "4. Jahanzaib Khan \u2013 {jahanzaib_email} (Lahore Region)\n\n"
     "Regular sharing and reconciliation of premium registers will help both companies maintain "
     "accurate records and ensure that our books are reconciled on a timely basis.\n\n"
     "Your cooperation in this regard will be highly appreciated.\n\n"
@@ -72,11 +73,14 @@ BODY_TEMPLATE = (
 
 ABDUL_RAUF_EMAIL = "abdul.rauf@IGI.COM.PK"
 SABEEN_EMAIL = "sabeen.nomani@IGI.COM.PK"
-# Lahore Region point of contact, added alongside the two existing Karachi
-# Region contacts (Abdul Rauf, Sabeen Nomani) - named in this module's own
-# body template so recipients outside Karachi have a Lahore-based contact
-# to coordinate with directly, rather than defaulting to Karachi contacts
-# regardless of the coinsurer's own region.
+# Islamabad Region point of contact, added alongside Abdul Rauf and Sabeen
+# Nomani (both Karachi Region) - named in this module's own body template
+# right under Rauf so a coinsurer working with the Islamabad desk has a
+# direct contact rather than defaulting to a Karachi-based one.
+SHAKIR_EMAIL = "shakir.ali@IGI.COM.PK"
+# Lahore Region point of contact, named in this module's own body template
+# so recipients outside Karachi/Islamabad have a Lahore-based contact to
+# coordinate with directly.
 JAHANZAIB_EMAIL = "jahanzaib.khan@IGI.COM.PK"
 
 
@@ -122,6 +126,7 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
             period_text=period_text,
             signature=signature,
             abdul_rauf_email=ABDUL_RAUF_EMAIL,
+            shakir_email=SHAKIR_EMAIL,
             sabeen_email=SABEEN_EMAIL,
             jahanzaib_email=JAHANZAIB_EMAIL,
         )
