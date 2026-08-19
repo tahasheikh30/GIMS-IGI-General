@@ -39,6 +39,10 @@ import claims_register_email as cre
 import claims_register_run_log as crlog
 import claims_check_processor as ccp
 import claims_check_generator as ccg
+import premium_register_company_processor as prcp
+import premium_register_company_generator as prcg2
+import premium_register_company_email as prce2
+import premium_register_company_run_log as prclog2
 import perf_utils
 import upr_processor as uprp
 import upr_generator as uprg
@@ -183,6 +187,21 @@ class BalanceApp(tk.Tk):
         self.claims_intimation_pmd_col = None
         self.claims_intimation_colmap = None
         self.claims_intimation_loaded_path = None
+
+        # Premium Register (Coinsurance company split) module state
+        self.premregsplit_file = ""
+        self.premregsplit_df = None
+        self.premregsplit_colmap = None
+        self.premregsplit_loaded_path = None
+        self.premregsplit_groups = None
+        self.premregsplit_totals = None
+        self.premregsplit_breakdowns = None
+        self.premregsplit_filename_lookup = {}
+        self.premregsplit_email_lookup = {}
+        self.premregsplit_poc_lookup = {}
+        self.premregsplit_drafts = []
+        self.premregsplit_output_dir = os.path.join(os.getcwd(), "Premium Register")
+        self.premregsplit_last_run_dir = None
 
         # UPR Automation module state
         self.upr_register_paths = []           # list of uploaded premium register filepaths
@@ -555,6 +574,7 @@ class BalanceApp(tk.Tk):
                 # the sidebar changed, same treatment as "Claims" below.
                 (None, "Premium", [
                     ("coinsurance_premium_register", "Policy Check"),
+                    ("coinsurance_premium_register_split", "Premium Register"),
                 ]),
                 # Nested submenu marker (None, label, [(key, label), ...]) -
                 # "Claims" is itself a further collapsible menu, currently
@@ -865,6 +885,11 @@ class BalanceApp(tk.Tk):
         claims_check_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["coinsurance_claims_check"] = claims_check_page
         self._build_claims_check_page(claims_check_page)
+
+        premregsplit_page = ttk.Frame(container)
+        premregsplit_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["coinsurance_premium_register_split"] = premregsplit_page
+        self._build_premium_register_split_page(premregsplit_page)
 
         self.select_nav("outstanding_premium")
 
@@ -5151,6 +5176,803 @@ class BalanceApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+
+    # ---------- Coinsurance > Premium > Premium Register (company split) module ----------
+    def _build_premium_register_split_page(self, parent):
+        """Premium Register (Coinsurance company split) - splits IGI's own
+        raw Premium Register export by coinsurer and drafts/sends a
+        statement email per company file. Same three-tab structure as
+        Claims Intimation / Premium-Claims Email Automation."""
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+
+        self.tab_premregsplit_setup = ttk.Frame(notebook)
+        self.tab_premregsplit_groups = ttk.Frame(notebook)
+        self.tab_premregsplit_emails = ttk.Frame(notebook)
+        notebook.add(self.tab_premregsplit_setup, text="1. Upload & Build Groups")
+        notebook.add(self.tab_premregsplit_groups, text="2. Company Files")
+        notebook.add(self.tab_premregsplit_emails, text="3. Review & Send Emails")
+
+        self._build_premregsplit_setup_tab()
+        self._build_premregsplit_groups_tab()
+        self._build_premregsplit_emails_tab()
+
+    def _build_premregsplit_setup_tab(self):
+        f = self.tab_premregsplit_setup
+        f.configure(style="TFrame")
+
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        canvas_frame = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=canvas_frame, anchor="nw")
+
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas_frame.bind("<Configure>", _on_frame_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        pad = {"padx": 10, "pady": 8}
+
+        # ---- Section: Data Source ----
+        source_box = ttk.Labelframe(canvas_frame, text="  Data Source  ", padding=14)
+        source_box.pack(fill="x", padx=12, pady=(12, 8))
+        source_box.columnconfigure(1, weight=1)
+
+        ttk.Label(source_box, text="Premium Register File (.xlsx/.xls)", style="Panel.TLabel").grid(row=0, column=0, sticky="w", **pad)
+        self.premregsplit_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.premregsplit_file_var).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_premregsplit_file).grid(row=0, column=2, **pad)
+
+        premregsplit_note = ttk.Label(
+            source_box, text="Only rows where Leader = \"No\" are included (a coinsurer's own share of a "
+                              "policy IGI leads) - IGI's own rows are never included, since there's no one "
+                              "to email those to. Same header/banner-row auto-detection and legacy .xls "
+                              "multi-sheet merging as Policy Check and Claims Intimation.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premregsplit_note.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
+        self._bind_dynamic_wraplength(premregsplit_note, source_box)
+
+        ttk.Label(source_box, text="Output folder (workbooks written here)", style="Panel.TLabel").grid(row=2, column=0, sticky="w", **pad)
+        self.premregsplit_output_dir_var = tk.StringVar(value=self.premregsplit_output_dir)
+        ttk.Entry(source_box, textvariable=self.premregsplit_output_dir_var).grid(row=2, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_premregsplit_output_dir).grid(row=2, column=2, **pad)
+
+        self.premregsplit_load_email_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(source_box, text="Look up recipient emails from a lookup file",
+                         variable=self.premregsplit_load_email_var).grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(6, 2))
+
+        ttk.Label(source_box, text="Email Lookup File (.xlsx/.csv, optional)", style="Panel.TLabel").grid(row=4, column=0, sticky="w", **pad)
+        self.premregsplit_email_lookup_file_var = tk.StringVar()
+        ttk.Entry(source_box, textvariable=self.premregsplit_email_lookup_file_var).grid(row=4, column=1, sticky="ew", **pad)
+        ttk.Button(source_box, text="Browse...", command=self.browse_premregsplit_email_lookup_file).grid(row=4, column=2, **pad)
+        premregsplit_email_lookup_note = ttk.Label(
+            source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
+                              "Rows are matched to each output file's company name (the pooled OFC file "
+                              "looks up the literal key 'OFC'). If left blank, drafted emails will be "
+                              "flagged \"missing email\" for manual entry.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premregsplit_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
+        self._bind_dynamic_wraplength(premregsplit_email_lookup_note, source_box)
+
+        # ---- Section: Date Filter ----
+        date_filter_box = ttk.Labelframe(canvas_frame, text="  Date Filter (optional)  ", padding=14)
+        date_filter_box.pack(fill="x", padx=12, pady=8)
+
+        ttk.Label(date_filter_box,
+                  text="Leave From/To blank to process the whole register. When set, only policy rows "
+                       "whose date falls within this range are included in the output workbooks.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
+                  wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
+
+        date_filter_row = ttk.Frame(date_filter_box)
+        date_filter_row.pack(fill="x")
+
+        ttk.Label(date_filter_row, text="Date field", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.premregsplit_date_field_var = tk.StringVar(value="Issue Date")
+        ttk.Combobox(date_filter_row, textvariable=self.premregsplit_date_field_var,
+                     values=["Issue Date", "Comm Date"], state="readonly", width=14).pack(side="left", padx=(0, 20))
+
+        ttk.Label(date_filter_row, text="From (YYYY-MM-DD)", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.premregsplit_date_from_var = tk.StringVar()
+        ttk.Entry(date_filter_row, textvariable=self.premregsplit_date_from_var, width=14).pack(side="left", padx=(0, 20))
+
+        ttk.Label(date_filter_row, text="To (YYYY-MM-DD)", style="Panel.TLabel").pack(side="left", padx=(0, 6))
+        self.premregsplit_date_to_var = tk.StringVar()
+        ttk.Entry(date_filter_row, textvariable=self.premregsplit_date_to_var, width=14).pack(side="left")
+
+        # ---- Section: Filters (Business Class / Insured) ----
+        premregsplit_filter_box = ttk.Labelframe(canvas_frame, text="  Filters (optional)  ", padding=14)
+        premregsplit_filter_box.pack(fill="x", padx=12, pady=8)
+        premregsplit_filter_box.columnconfigure(0, weight=1)
+        premregsplit_filter_box.columnconfigure(1, weight=1)
+
+        premregsplit_filter_note = ttk.Label(
+            premregsplit_filter_box, text="Click \"Load Filter Options\" after browsing to the Premium "
+                                           "Register above to populate these lists from that file's own values.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premregsplit_filter_note.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+        self._bind_dynamic_wraplength(premregsplit_filter_note, premregsplit_filter_box, side_padding=10)
+
+        load_filters_row = ttk.Frame(premregsplit_filter_box, style="Panel.TFrame")
+        load_filters_row.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 10))
+        self.premregsplit_load_filters_btn = ttk.Button(load_filters_row, text="Load Filter Options",
+                                                          command=self._load_premregsplit_filter_options)
+        self.premregsplit_load_filters_btn.pack(side="left")
+        self.premregsplit_filter_status_var = tk.StringVar(value="")
+        ttk.Label(load_filters_row, textvariable=self.premregsplit_filter_status_var, style="Muted.TLabel",
+                  background=self.COLOR_PANEL).pack(side="left", padx=(10, 0))
+
+        def _premregsplit_filter_listbox_col(parent, col_idx, title):
+            col = ttk.Frame(parent, style="Panel.TFrame")
+            col.grid(row=2, column=col_idx, sticky="nsew", padx=6, pady=4)
+            ttk.Label(col, text=title, style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            ttk.Label(col, text="Ctrl+click to select multiple \u00b7 none = all", style="Muted.TLabel",
+                      background=self.COLOR_PANEL).pack(anchor="w", pady=(0, 4))
+            frame = tk.Frame(col, highlightbackground="#D6DCE1", highlightthickness=1)
+            frame.pack(fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical")
+            listbox = tk.Listbox(frame, selectmode="extended", height=10, width=32,
+                                  exportselection=False, font=("Segoe UI", 10),
+                                  activestyle="none", relief="flat", borderwidth=0,
+                                  selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                  highlightthickness=0, yscrollcommand=scroll.set)
+            scroll.config(command=listbox.yview)
+            listbox.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            return listbox
+
+        self.premregsplit_class_listbox = _premregsplit_filter_listbox_col(premregsplit_filter_box, 0, "Business Class filter")
+        self.premregsplit_client_listbox = _premregsplit_filter_listbox_col(premregsplit_filter_box, 1, "Insured Name filter")
+
+        # ---- Section: Load & Build Groups ----
+        load_box = ttk.Labelframe(canvas_frame, text="  Load & Build Groups  ", padding=(14, 12))
+        load_box.pack(fill="x", padx=12, pady=8)
+
+        ttk.Label(load_box, text="Loads the register, applies any filters above, keeps only coinsurer "
+                                  "(Leader = \"No\") rows, and builds the per-company output groups shown "
+                                  "on tab 2 - all in one step.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+
+        premregsplit_load_btn_row = ttk.Frame(load_box)
+        premregsplit_load_btn_row.pack(anchor="w", fill="x")
+        self.premregsplit_build_btn = self._make_action_button(
+            premregsplit_load_btn_row, "Load & Build Groups", self.load_and_build_premregsplit_groups, kind="accent")
+        self.premregsplit_build_btn.pack(side="left")
+
+        self.premregsplit_build_progress = perf_utils.ProgressBarPanel(load_box)
+        self.premregsplit_build_progress.frame.pack(fill="x", pady=(8, 0))
+
+        self.premregsplit_build_summary_var = tk.StringVar(value="")
+        self.premregsplit_build_summary_label = ttk.Label(load_box, textvariable=self.premregsplit_build_summary_var,
+                                                            foreground=self.COLOR_SUCCESS, font=("Segoe UI", 10, "bold"))
+        self.premregsplit_build_summary_label.pack(anchor="w")
+        self.premregsplit_build_summary_label.pack_forget()
+
+        # ---- Section: Log ----
+        log_box = ttk.Labelframe(canvas_frame, text="  Activity Log  ", padding=10)
+        log_box.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+        self.premregsplit_setup_log = scrolledtext.ScrolledText(log_box, height=12, font=("Consolas", 9),
+                                                                  bg="#FBFCFD", relief="flat", borderwidth=0)
+        self.premregsplit_setup_log.pack(fill="both", expand=True)
+
+    def _build_premregsplit_groups_tab(self):
+        f = self.tab_premregsplit_groups
+
+        top = ttk.Frame(f)
+        top.pack(fill="x", padx=12, pady=(12, 8))
+        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
+                   command=self.generate_premregsplit_reports).pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Open Output Folder", command=self.open_premregsplit_output_folder, width=20).pack(side="left")
+        self.premregsplit_results_summary_var = tk.StringVar(value="Run 'Load & Build Groups' on tab 1 to see one row per company here.")
+        ttk.Label(top, textvariable=self.premregsplit_results_summary_var, style="Muted.TLabel").pack(side="right")
+
+        hint = ttk.Label(f, text="One workbook is generated per coinsurer (covering every policy row where that "
+                                  "company is a follower); every company with \"OFC\" in its name is pooled into a "
+                                  "single shared \"OFC\" file.",
+                          style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
+        hint.pack(anchor="w", padx=14, pady=(0, 6))
+
+        merge_row = ttk.Frame(f)
+        merge_row.pack(fill="x", padx=12, pady=(0, 8))
+        self.premregsplit_merge_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
+                         variable=self.premregsplit_merge_var).pack(side="left")
+        merge_note = ttk.Label(
+            f, text="Strongly recommended for this module: a real Premium Register very often records the "
+                    "same real company under several differently-worded branch names (e.g. \"EFU H.O., "
+                    "Karachi\", \"EFU J.P. Unit Branch, Karachi\", \"EFU Multan Branch\"). This checkbox "
+                    "combines every branch-name variant of the same company into one file before "
+                    "generating, the same rule every other GIMS module's own merge checkbox uses "
+                    "(shared leading name, or a known abbreviation). No data is lost - every row from "
+                    "every merged branch still appears in the combined file.",
+            style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
+        merge_note.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self.premregsplit_reports_progress = perf_utils.ProgressBarPanel(f)
+        self.premregsplit_reports_progress.frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        tree_frame = ttk.Frame(f)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        columns = ("company", "num_policies", "gross_total", "net_total")
+        self.premregsplit_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=20)
+        self.premregsplit_results_tree.heading("company", text="Coinsurer (output file)")
+        self.premregsplit_results_tree.heading("num_policies", text="Policies")
+        self.premregsplit_results_tree.heading("gross_total", text="Gross Premium")
+        self.premregsplit_results_tree.heading("net_total", text="Net Premium")
+        self.premregsplit_results_tree.column("company", width=380)
+        self.premregsplit_results_tree.column("num_policies", width=80, anchor="center")
+        self.premregsplit_results_tree.column("gross_total", width=170, anchor="e")
+        self.premregsplit_results_tree.column("net_total", width=170, anchor="e")
+        self.premregsplit_results_tree.tag_configure("oddrow", background="#F6F8FB")
+        self.premregsplit_results_tree.tag_configure("evenrow", background="white")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.premregsplit_results_tree.yview)
+        self.premregsplit_results_tree.configure(yscrollcommand=vsb.set)
+        self.premregsplit_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    def _build_premregsplit_emails_tab(self):
+        f = self.tab_premregsplit_emails
+
+        top = ttk.Frame(f)
+        top.pack(fill="x", padx=12, pady=(12, 8))
+        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_premregsplit_emails, width=18).pack(side="left", padx=(0, 12))
+        self.premregsplit_dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.premregsplit_dry_run_var).pack(side="left", padx=(0, 12))
+        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_premregsplit_emails, width=14).pack(side="left")
+
+        sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email - shared across every GIMS module)  ", padding=10)
+        sig_frame.pack(fill="x", padx=12, pady=(0, 8))
+        sig_frame.columnconfigure(0, weight=1)
+        self.premregsplit_signature_text = tk.Text(sig_frame, height=3, font=("Segoe UI", 10), relief="solid", borderwidth=1, wrap="word")
+        self.premregsplit_signature_text.grid(row=0, column=0, sticky="ew")
+        self.premregsplit_signature_text.insert("1.0", eg.load_signature())
+
+        sig_btn_holder = tk.Frame(sig_frame, bg=self.COLOR_PANEL)
+        sig_btn_holder.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        sig_btn = self._make_action_button(sig_btn_holder, "Save Signature", self.save_premregsplit_signature,
+                                            kind="quiet", compact=True)
+        sig_btn.pack(expand=True)
+
+        outer = ttk.Frame(f)
+        outer.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        body.columnconfigure(0, weight=0)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1, minsize=560)
+
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        ttk.Label(left, text="Coinsurer Files", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        list_frame = ttk.Frame(left)
+        list_frame.pack(fill="both", expand=True)
+        columns = ("company", "policies", "email", "status")
+        self.premregsplit_email_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=26)
+        self.premregsplit_email_tree.heading("company", text="Coinsurer")
+        self.premregsplit_email_tree.heading("policies", text="Policies")
+        self.premregsplit_email_tree.heading("email", text="Email")
+        self.premregsplit_email_tree.heading("status", text="Status")
+        self.premregsplit_email_tree.column("company", width=210)
+        self.premregsplit_email_tree.column("policies", width=60, anchor="center")
+        self.premregsplit_email_tree.column("email", width=170)
+        self.premregsplit_email_tree.column("status", width=150)
+        tree_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.premregsplit_email_tree.yview)
+        self.premregsplit_email_tree.configure(yscrollcommand=tree_scroll.set)
+        self.premregsplit_email_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        self.premregsplit_email_tree.bind("<<TreeviewSelect>>", self.on_select_premregsplit_email)
+
+        right = ttk.Labelframe(body, text="  Email Preview  ", padding=14)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(8, weight=1)
+
+        ttk.Label(right, text="To (recipient email - separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self.premregsplit_email_to_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.premregsplit_email_to_var, font=("Segoe UI", 10))\
+            .grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Cc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self.premregsplit_email_cc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.premregsplit_email_cc_var, font=("Segoe UI", 10))\
+            .grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(right, text="Bcc (separate multiple with a semicolon)", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=4, column=0, sticky="w", pady=(0, 2))
+        self.premregsplit_email_bcc_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.premregsplit_email_bcc_var, font=("Segoe UI", 10))\
+            .grid(row=5, column=0, sticky="ew", pady=(0, 12))
+
+        ttk.Label(right, text="Subject", style="Panel.TLabel", font=("Segoe UI", 10, "bold"))\
+            .grid(row=6, column=0, sticky="w", pady=(0, 2))
+        self.premregsplit_subject_var = tk.StringVar()
+        ttk.Entry(right, textvariable=self.premregsplit_subject_var, font=("Segoe UI", 10))\
+            .grid(row=7, column=0, sticky="ew")
+
+        body_wrap = ttk.Frame(right)
+        body_wrap.grid(row=8, column=0, sticky="nsew", pady=(14, 10))
+        body_wrap.columnconfigure(0, weight=1)
+        body_wrap.rowconfigure(1, weight=1)
+        ttk.Label(body_wrap, text="Body", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.premregsplit_body_text = scrolledtext.ScrolledText(body_wrap, font=("Segoe UI", 10), relief="solid", borderwidth=1, height=14)
+        self.premregsplit_body_text.grid(row=1, column=0, sticky="nsew", pady=(2, 0))
+
+        btn_row = ttk.Frame(right)
+        btn_row.grid(row=9, column=0, sticky="w", pady=(10, 0))
+
+        save_btn = self._make_action_button(btn_row, "Save Edits to Selected Email", self.save_premregsplit_email_edit, kind="accent")
+        save_btn.pack(side="left", padx=(0, 8))
+
+        send_one_btn = self._make_action_button(btn_row, "Send This Email", self.send_individual_premregsplit_email, kind="success")
+        send_one_btn.pack(side="left")
+
+    # ---------- Premium Register (company split) actions ----------
+    def browse_premregsplit_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        if path:
+            self.premregsplit_file_var.set(path)
+
+    def browse_premregsplit_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.premregsplit_output_dir_var.set(path)
+
+    def browse_premregsplit_email_lookup_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel/CSV files", "*.xlsx *.xls *.csv")])
+        if path:
+            self.premregsplit_email_lookup_file_var.set(path)
+
+    def log_premregsplit(self, msg):
+        self.premregsplit_setup_log.insert("end", str(msg) + "\n")
+        self.premregsplit_setup_log.see("end")
+
+    def _parse_premregsplit_filter_date(self, var, label):
+        text = var.get().strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"{label} must be in YYYY-MM-DD format (or left blank), got '{text}'.")
+
+    def _load_premregsplit_filter_options(self):
+        path = self.premregsplit_file_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Please select a valid Premium Register file first.")
+            return
+
+        self.premregsplit_filter_status_var.set("Loading...")
+
+        def worker(report):
+            df, colmap = prcp.load_premium_register(path, report=report)
+            return df, colmap
+
+        def on_done(result):
+            df, colmap = result
+            self.premregsplit_df = df
+            self.premregsplit_colmap = colmap
+            self.premregsplit_loaded_path = path
+
+            def _populate(listbox, canonical_col):
+                listbox.delete(0, "end")
+                orig_col = colmap.get(canonical_col)
+                if not orig_col or orig_col not in df.columns:
+                    return
+                values = sorted(df[orig_col].dropna().astype(str).str.strip().unique())
+                values = [v for v in values if v]
+                for i, v in enumerate(values):
+                    listbox.insert("end", v)
+                    listbox.itemconfig(i, bg="#F4F7FA" if i % 2 else "white")
+
+            _populate(self.premregsplit_class_listbox, "Business Class")
+            _populate(self.premregsplit_client_listbox, "Insured")
+
+            self.premregsplit_filter_status_var.set(f"Loaded {len(df):,} row(s).")
+            self.status_var.set("Premium Register: filter options loaded.")
+
+        def on_error(exc):
+            self.premregsplit_filter_status_var.set("Load failed - see error.")
+            messagebox.showerror("Could not load file", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_done=on_done, on_error=on_error,
+            busy_widgets=[self.premregsplit_load_filters_btn],
+        )
+
+    def load_and_build_premregsplit_groups(self):
+        path = self.premregsplit_file_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Please select a valid Premium Register file.")
+            return
+
+        try:
+            date_filter_from = self._parse_premregsplit_filter_date(self.premregsplit_date_from_var, "Date Filter 'From'")
+            date_filter_to = self._parse_premregsplit_filter_date(self.premregsplit_date_to_var, "Date Filter 'To'")
+        except ValueError as e:
+            messagebox.showerror("Invalid date filter", str(e))
+            return
+        if date_filter_from and date_filter_to and date_filter_from > date_filter_to:
+            messagebox.showerror("Invalid date filter", "Date Filter 'From' must not be after 'To'.")
+            return
+        date_filter_field = self.premregsplit_date_field_var.get()
+
+        selected_classes = [self.premregsplit_class_listbox.get(i) for i in self.premregsplit_class_listbox.curselection()]
+        selected_clients = [self.premregsplit_client_listbox.get(i) for i in self.premregsplit_client_listbox.curselection()]
+
+        self.premregsplit_setup_log.delete("1.0", "end")
+        self.premregsplit_build_summary_var.set("")
+        self.premregsplit_build_summary_label.pack_forget()
+        self.status_var.set("Loading and building company groups...")
+        self.premregsplit_build_progress.start(total=None, text="Loading file...")
+
+        def worker(report):
+            if self.premregsplit_df is not None and self.premregsplit_loaded_path == path:
+                df = self.premregsplit_df.copy()
+                colmap = self.premregsplit_colmap
+                report(f"Using already-loaded file: {os.path.basename(path)} ({len(df):,} row(s)).")
+            else:
+                report(f"Loading Premium Register: {os.path.basename(path)}...")
+                df, colmap = prcp.load_premium_register(path, report=report)
+                report(f"  {len(df):,} row(s) loaded.")
+
+            num_rows_loaded = len(df)
+
+            coins = prcp.filter_to_coinsurer_rows(df, colmap)
+            report(f"\n{len(coins):,} of {num_rows_loaded:,} row(s) are coinsurer (Leader = \"No\") rows "
+                   f"- IGI's own rows are excluded.")
+
+            if date_filter_from or date_filter_to:
+                before_count = len(coins)
+                coins, num_no_date = prcp.filter_by_date(
+                    coins, colmap, date_filter_field, start_date=date_filter_from, end_date=date_filter_to)
+                range_text = f"{date_filter_from or '(any)'} to {date_filter_to or '(any)'}"
+                report(f"Date Filter applied on '{date_filter_field}', range {range_text}: "
+                       f"{before_count:,} -> {len(coins):,} row(s) kept"
+                       + (f", {num_no_date:,} row(s) excluded for a missing/unparseable date." if num_no_date else "."))
+
+            field_filters = []
+            if selected_classes:
+                class_col = colmap.get("Business Class")
+                if class_col:
+                    field_filters.append((class_col, selected_classes))
+            if selected_clients:
+                insured_col = colmap.get("Insured")
+                if insured_col:
+                    field_filters.append((insured_col, selected_clients))
+            if field_filters:
+                before_count = len(coins)
+                coins = prcp.filter_by_fields(coins, field_filters)
+                report(f"Business Class/Insured filter(s) applied: {before_count:,} -> {len(coins):,} row(s) kept.")
+
+            groups, totals, breakdowns = prcp.build_company_buckets(coins, colmap)
+            return df, colmap, coins, groups, totals, breakdowns
+
+        def on_done(result):
+            df, colmap, coins, groups, totals, breakdowns = result
+            self.premregsplit_df = df
+            self.premregsplit_colmap = colmap
+            self.premregsplit_loaded_path = path
+            self.premregsplit_groups = groups
+            self.premregsplit_totals = totals
+            self.premregsplit_breakdowns = breakdowns
+
+            self._refresh_premregsplit_results_tree()
+
+            summary_text = f"{len(coins):,} coinsurer row(s) \u2192 {len(groups)} company file(s)."
+            self.premregsplit_build_summary_var.set(summary_text)
+            self.premregsplit_build_summary_label.pack(anchor="w", pady=(8, 0))
+            self.premregsplit_build_progress.finish(summary_text)
+            self.premregsplit_build_progress.hide()
+            self.status_var.set(f"{len(groups)} company files identified. See tab 2.")
+
+        def on_error(exc):
+            self.premregsplit_build_progress.finish("Failed - see the Activity Log for details.")
+            self.log_premregsplit(f"\nERROR: {exc}")
+            messagebox.showerror("Load failed", str(exc))
+            self.status_var.set("Premium Register load failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self.log_premregsplit(msg),
+            on_progress_value=self.premregsplit_build_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.premregsplit_build_btn],
+        )
+
+    def _refresh_premregsplit_results_tree(self):
+        self.premregsplit_results_tree.delete(*self.premregsplit_results_tree.get_children())
+        for i, (bucket_label, _g) in enumerate(self.premregsplit_groups.items()):
+            t = self.premregsplit_totals[bucket_label]
+            tag = "evenrow" if i % 2 == 0 else "oddrow"
+            self.premregsplit_results_tree.insert("", "end", values=(
+                bucket_label, t["num_policies"], f"{t['total_gross_premium']:,.0f}", f"{t['total_net_premium']:,.0f}"
+            ), tags=(tag,))
+        self.premregsplit_results_summary_var.set(f"{len(self.premregsplit_groups)} company file(s) identified")
+
+    def _run_premregsplit_self_merge(self):
+        import company_alias_resolver as car
+
+        if not self.premregsplit_groups:
+            return True
+
+        weights = {label: self.premregsplit_totals[label]["num_policies"] for label in self.premregsplit_groups}
+        merge_map = car.self_merge_bucket_labels(list(self.premregsplit_groups.keys()), weight_by=weights)
+
+        if all(v == k for k, v in merge_map.items()):
+            return True
+
+        ins_col = self.premregsplit_colmap["Ins"]
+
+        def combine_group(dfs, new_label):
+            import pandas as pd
+            combined = pd.concat(dfs, ignore_index=True)
+            if ins_col in combined.columns:
+                combined[ins_col] = new_label
+            return combined
+
+        merged_groups, merged_totals, merged_breakdowns = car.merge_buckets(
+            self.premregsplit_groups, self.premregsplit_totals, self.premregsplit_breakdowns, merge_map, combine_group)
+
+        n_before, n_after = len(self.premregsplit_groups), len(merged_groups)
+        self.premregsplit_groups, self.premregsplit_totals, self.premregsplit_breakdowns = merged_groups, merged_totals, merged_breakdowns
+        self._refresh_premregsplit_results_tree()
+        self.log_premregsplit(f"\nMerge checkbox: combined {n_before} company file(s) into {n_after} by shared company name.")
+        return True
+
+    def generate_premregsplit_reports(self):
+        if not self.premregsplit_groups:
+            messagebox.showwarning("Nothing to generate", "Run 'Load & Build Groups' first (tab 1).")
+            return
+
+        if self.premregsplit_merge_var.get():
+            if not self._run_premregsplit_self_merge():
+                return
+
+        base_output_dir = self.premregsplit_output_dir_var.get().strip()
+        if not base_output_dir:
+            messagebox.showerror("No output folder", "Set an output folder on tab 1 first.")
+            return
+        output_dir = self._new_run_folder(base_output_dir)
+        self.premregsplit_last_run_dir = output_dir
+
+        groups = self.premregsplit_groups
+        breakdowns = self.premregsplit_breakdowns
+        self.status_var.set(f"Generating {len(groups)} Premium Register workbook(s)...")
+        self.premregsplit_reports_progress.start(total=len(groups), text=f"0 / {len(groups)} workbook(s) generated")
+
+        def worker(report):
+            return prcg2.build_company_workbooks_parallel(groups, breakdowns, output_dir, report=report)
+
+        def on_done(result):
+            generated, filename_lookup, errors = result
+            self.premregsplit_filename_lookup = filename_lookup
+            self.premregsplit_reports_progress.finish(f"Done: {len(generated)} / {len(groups)} workbook(s) generated.")
+            msg = f"Generated {len(generated)} workbook(s) in:\n{output_dir}"
+            if errors:
+                msg += f"\n\n{len(errors)} file(s) failed:\n" + "\n".join(errors[:10])
+            messagebox.showinfo("Done", msg)
+            self.status_var.set(f"Generated {len(generated)} Premium Register workbook(s).")
+
+        def on_error(exc):
+            self.premregsplit_reports_progress.finish("Failed - see the Activity Log for details.")
+            messagebox.showerror("Report generation failed", str(exc))
+            self.status_var.set("Report generation failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.premregsplit_reports_progress.update,
+            on_progress=lambda msg: self.log_premregsplit(msg),
+            on_done=on_done, on_error=on_error,
+        )
+
+    def open_premregsplit_output_folder(self):
+        output_dir = self.premregsplit_last_run_dir or self.premregsplit_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate reports first.")
+
+    def draft_premregsplit_emails(self):
+        if not self.premregsplit_groups:
+            messagebox.showwarning("Nothing to draft", "Run 'Load & Build Groups' first (tab 1).")
+            return
+
+        self.premregsplit_email_lookup, self.premregsplit_poc_lookup = {}, {}
+        if self.premregsplit_load_email_var.get():
+            lookup_path = self.premregsplit_email_lookup_file_var.get().strip()
+            if lookup_path and os.path.exists(lookup_path):
+                try:
+                    self.premregsplit_email_lookup, self.premregsplit_poc_lookup = ra.load_email_lookup_from_file(lookup_path)
+                    self.log_premregsplit(f"\nLoaded {len(self.premregsplit_email_lookup)} company email mapping(s) "
+                                           f"from '{os.path.basename(lookup_path)}'.")
+                except Exception as e:
+                    self.log_premregsplit(f"\nWARNING: could not load email lookup: {e}")
+            else:
+                self.log_premregsplit("\nNo email lookup file selected - all drafts will show 'Missing email'.")
+
+        signature = self.premregsplit_signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)
+
+        self.premregsplit_drafts = prce2.build_premium_register_email_drafts(
+            self.premregsplit_groups, self.premregsplit_totals, self.premregsplit_email_lookup,
+            poc_lookup=self.premregsplit_poc_lookup, signature=signature,
+        )
+        self.premregsplit_email_tree.delete(*self.premregsplit_email_tree.get_children())
+        for d in self.premregsplit_drafts:
+            self.premregsplit_email_tree.insert("", "end", values=(
+                d["company_name"], d["num_policies"], d["email"] or "(missing)", d["status"]
+            ))
+        self.status_var.set(f"Drafted {len(self.premregsplit_drafts)} Premium Register emails.")
+
+    def save_premregsplit_signature(self):
+        signature = self.premregsplit_signature_text.get("1.0", "end").strip()
+        eg.save_signature(signature)
+        self.status_var.set("Signature saved (shared across every GIMS module). Click Draft Emails again to refresh existing drafts.")
+
+    def on_select_premregsplit_email(self, event):
+        sel = self.premregsplit_email_tree.selection()
+        if not sel:
+            return
+        idx = self.premregsplit_email_tree.index(sel[0])
+        d = self.premregsplit_drafts[idx]
+        self.premregsplit_email_to_var.set(d.get("email") or "")
+        self.premregsplit_email_cc_var.set(d.get("cc") or "")
+        self.premregsplit_email_bcc_var.set(d.get("bcc") or "")
+        self.premregsplit_subject_var.set(d["subject"])
+        self.premregsplit_body_text.delete("1.0", "end")
+        self.premregsplit_body_text.insert("1.0", d["body"])
+
+    def save_premregsplit_email_edit(self):
+        sel = self.premregsplit_email_tree.selection()
+        if not sel:
+            messagebox.showinfo("No coinsurer selected", "Select a coinsurer from the list on the left first.")
+            return
+        idx = self.premregsplit_email_tree.index(sel[0])
+        new_email = self.premregsplit_email_to_var.get().strip()
+        self.premregsplit_drafts[idx]["email"] = new_email or None
+        self.premregsplit_drafts[idx]["cc"] = self.premregsplit_email_cc_var.get().strip()
+        self.premregsplit_drafts[idx]["bcc"] = self.premregsplit_email_bcc_var.get().strip()
+        self.premregsplit_drafts[idx]["subject"] = self.premregsplit_subject_var.get()
+        self.premregsplit_drafts[idx]["body"] = self.premregsplit_body_text.get("1.0", "end").strip()
+
+        status = "Ready" if new_email else "Missing email - needs manual entry"
+        row_id = self.premregsplit_email_tree.get_children()[idx]
+        self.premregsplit_email_tree.set(row_id, "email", new_email or "(missing)")
+        self.premregsplit_email_tree.set(row_id, "status", status)
+
+        self.status_var.set(f"Updated draft for {self.premregsplit_drafts[idx]['company_name']}.")
+
+    def send_all_premregsplit_emails(self):
+        if not self.premregsplit_drafts:
+            messagebox.showwarning("Nothing to send", "Draft emails first.")
+            return
+
+        filename_lookup = self.premregsplit_filename_lookup
+        missing = [d["company_name"] for d in self.premregsplit_drafts
+                   if d["company_name"] not in filename_lookup]
+        if missing:
+            proceed = messagebox.askyesno(
+                "Reports not generated",
+                f"{len(missing)} of {len(self.premregsplit_drafts)} file(s) have no generated Excel workbook yet, "
+                f"so those emails would go out with no attachment:\n\n"
+                + "\n".join(missing[:10]) + (f"\n...and {len(missing) - 10} more" if len(missing) > 10 else "")
+                + "\n\nGo to tab 2 and click 'Generate Excel Reports' first, "
+                  "or continue anyway without attachments?\n\nContinue anyway?"
+            )
+            if not proceed:
+                return
+
+        dry_run = self.premregsplit_dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", f"Send {len(self.premregsplit_drafts)} emails via Outlook now? This cannot be undone."):
+                return
+
+        output_dir = self.premregsplit_last_run_dir or self.premregsplit_output_dir_var.get().strip()
+
+        def worker():
+            results = prce2.send_premium_register_emails(
+                self.premregsplit_drafts, output_dir, filename_lookup, dry_run=dry_run
+            )
+            sent = sum(1 for r in results if r["sent"])
+            failed = len(results) - sent
+            missing_email = sum(1 for d in self.premregsplit_drafts if not d.get("email"))
+            num_rows_loaded = len(self.premregsplit_df) if self.premregsplit_df is not None else 0
+            num_coinsurer_rows = sum(t["num_policies"] for t in self.premregsplit_totals.values()) if self.premregsplit_totals else 0
+            prclog2.log_run(
+                num_rows_loaded=num_rows_loaded,
+                num_coinsurer_rows=num_coinsurer_rows,
+                num_groups=len(self.premregsplit_groups),
+                num_files_generated=len(filename_lookup),
+                num_sent=sent, num_failed=failed, num_missing_email=missing_email, dry_run=dry_run,
+            )
+            for i, r in enumerate(results):
+                self.premregsplit_email_tree.set(self.premregsplit_email_tree.get_children()[i], "status",
+                                                  "Sent" if r["sent"] else f"Failed: {r['send_message']}")
+            messagebox.showinfo("Done", f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
+            self.status_var.set(f"{'[DRY RUN] ' if dry_run else ''}Sent: {sent}, Failed: {failed}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_individual_premregsplit_email(self):
+        sel = self.premregsplit_email_tree.selection()
+        if not sel:
+            messagebox.showinfo("No coinsurer selected", "Click a coinsurer in the list on the left first.")
+            return
+        idx = self.premregsplit_email_tree.index(sel[0])
+
+        self.save_premregsplit_email_edit()
+        d = self.premregsplit_drafts[idx]
+
+        if not d.get("email"):
+            messagebox.showerror("Missing email", "Enter a recipient email address in the 'To' field before sending.")
+            return
+
+        output_dir = self.premregsplit_last_run_dir or self.premregsplit_output_dir_var.get().strip()
+        fname = self.premregsplit_filename_lookup.get(d["company_name"])
+        attachment_path = os.path.join(output_dir, fname) if fname and os.path.exists(os.path.join(output_dir, fname)) else None
+        if attachment_path is None:
+            if not messagebox.askyesno(
+                "No report generated",
+                f"No Excel workbook has been generated yet for {d['company_name']}. "
+                f"Send this email without an attachment?\n\n"
+                f"(Go to tab 2 and click 'Generate Excel Reports' first if you'd rather attach one.)"
+            ):
+                return
+
+        dry_run = self.premregsplit_dry_run_var.get()
+        if not dry_run:
+            if not messagebox.askyesno("Confirm", f"Send this email to {d['email']} ({d['company_name']}) now?"):
+                return
+
+        row_id = self.premregsplit_email_tree.get_children()[idx]
+
+        def worker():
+            success, message = osend.send_email(d["email"], d["subject"], d["body"], attachment_path, dry_run,
+                                                 cc=d.get("cc"), bcc=d.get("bcc"))
+            self.premregsplit_email_tree.set(row_id, "status", "Sent" if success else f"Failed: {message}")
+            prefix = "[DRY RUN] " if dry_run else ""
+            messagebox.showinfo("Done", f"{prefix}{message}")
+            self.status_var.set(f"{prefix}{message}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
 if __name__ == "__main__":
     # REQUIRED for a PyInstaller-frozen build that uses
