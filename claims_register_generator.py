@@ -143,7 +143,7 @@ def build_output_filename(bucket_label, run_date=None):
     # original sanitized-label naming, unchanged.
     canonical = car.canonical_filename_for_label(bucket_label)
     stub = canonical if canonical else safe_filename_part(bucket_label)
-    return f"{stub}_ClaimsRecovery_{run_date.strftime('%d%m%Y')}.xlsx"
+    return f"{stub}_ClaimsIntimation_{run_date.strftime('%d%m%Y')}.xlsx"
 
 
 def _prepare_for_excel(df, date_cols):
@@ -374,7 +374,7 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
     #   rows 2-5   banner
     #   rows 8-12  KPI cards (+ pie chart floating beside them, columns K+)
     #   row 26     per-insured bar chart, full width
-    #   row 53     "Claims Recovery by Insured" title
+    #   row 53     "Claims Intimation by Insured" title
     #   row 55     table header
     #   ...        table data + Total row
     card_row = 8
@@ -386,7 +386,7 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
 
     LAST_BANNER_COL = 12
     ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=LAST_BANNER_COL)
-    ws.cell(row=2, column=2, value="CLAIMS RECOVERY STATEMENT").font = KPI_LABEL_FONT_WHITE
+    ws.cell(row=2, column=2, value="CLAIMS INTIMATION STATEMENT").font = KPI_LABEL_FONT_WHITE
     ws.merge_cells(start_row=3, start_column=2, end_row=3, end_column=LAST_BANNER_COL)
     ws.cell(row=3, column=2, value=bucket_label).font = Font(name="Arial", bold=True, size=18, color="FFFFFF")
     ws.merge_cells(start_row=4, start_column=2, end_row=4, end_column=LAST_BANNER_COL)
@@ -538,7 +538,7 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
         # top of this function).
         ws.add_chart(chart, f"B{bar_chart_row}")
 
-    ws.cell(row=table_header_row - 2, column=2, value="Claims Recovery by Insured").font = TABLE_TITLE_FONT
+    ws.cell(row=table_header_row - 2, column=2, value="Claims Intimation by Insured").font = TABLE_TITLE_FONT
 
     for j, h in enumerate(["Insured Name", "Claim Paid Share", "Claim O/S Share", "Claims"], start=2):
         c = ws.cell(row=table_header_row, column=j, value=h)
