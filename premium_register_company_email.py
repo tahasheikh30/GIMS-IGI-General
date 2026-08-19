@@ -19,9 +19,9 @@ import outlook_sender as osend
 # Default Cc/Bcc recipients for every Premium Register email, per
 # Finance's own standing instruction - identical to Claims Intimation's
 # own lists (see claims_register_email.py) with a few substitutions/
-# additions on the Cc list: Muhammad Majid Masood is replaced by Jahanzaib
-# Khan (Underwriting, Lahore), and Sabeen Ahmed Nomani
-# (this module's own three named contacts in the body below - Abdul
+# additions on the Cc list: Muhammad Majid Masood is replaced by Usama
+# Jahangir (Underwriting, Lahore), and Sabeen Ahmed Nomani and Jahanzaib
+# Khan (this module's own three named contacts in the body below - Abdul
 # Rauf and Sabeen for Karachi, Jahanzaib for Lahore) are added alongside
 # him. Always included unless a person clears/edits the Cc/Bcc field by
 # hand on the Review & Send Emails tab for a specific draft. Only the
@@ -38,6 +38,7 @@ DEFAULT_BCC = ";".join(DEFAULT_BCC_RECIPIENTS)
 DEFAULT_CC_RECIPIENTS = [
     "kashif.qayyum@IGI.COM.PK",
     "abdul.rauf@IGI.COM.PK",
+    "usama.jahangir@IGI.COM.PK",
     "sabeen.nomani@IGI.COM.PK",
     "jahanzaib.khan@IGI.COM.PK",
     "zahid.mehmood@IGI.COM.PK",
