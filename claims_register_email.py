@@ -47,19 +47,14 @@ DEFAULT_CC_RECIPIENTS = [
 ]
 DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
 
-SUBJECT_TEMPLATE = "Claims Recovery Statement \u2013 {company_name} \u2013 {date}"
+SUBJECT_TEMPLATE = "Claims Intimation Register \u2013 {company_name} \u2013 {date}"
 
 BODY_TEMPLATE = (
     "Dear {greeting_name},\n\n"
-    "Please find attached the claims recovery statement covering {num_claims} claim{plural} on which "
-    "{company_name} is a coinsurer, as of {report_date}. Your share of claims already paid by IGI totals "
-    "PKR {paid_total}, and your share of claims still outstanding totals PKR {os_total}.\n\n"
-    "A full claim-by-claim breakdown, including your own Share % on each policy, is included in the "
-    "attached workbook, along with a Summary sheet.\n\n"
-    "We would appreciate your review and settlement of the paid-claims portion at your earliest "
-    "convenience. If payment has already been made against any of these claims, please disregard that "
-    "line and share the payment confirmation with us.\n\n"
-    "Please do not hesitate to contact us if you have any questions.\n\n"
+    "Please find attached the Claims Intimation Register for {period_text}, for your review and "
+    "necessary action.\n\n"
+    "Should you have any questions or require further clarification, please do not hesitate to "
+    "contact us.\n\n"
     "For any queries, please feel free to contact Abdul Rauf ({abdul_rauf_email}) or "
     "Muhammad Majid Masood ({majid_masood_email}).\n\n"
     "Regards,\n"
@@ -79,11 +74,15 @@ def _normalize_key(text):
     return str(text).strip().upper()
 
 
-def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None, report_date=None):
+def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
+                                        report_date=None, period_text=None):
     """
     groups: {bucket_label: claims_df} from claims_register_processor.build_coinsurer_buckets
     totals: {bucket_label: {"num_claims", "total_share_paid", "total_share_os"}}
     email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) coinsurer name
+    period_text: text describing the period covered (e.g. "the period from
+        01 January 2026 to 31 July 2026"), dropped into the body as-is.
+        Falls back to a generic phrase built from report_date if not given.
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_claims, paid_total, os_total, status}
     cc and bcc both start pre-filled with Finance's own standing lists
@@ -95,6 +94,7 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
+    period_text = period_text or f"the period ending {report_date}"
 
     # Precomputed once per run (see company_alias_resolver.resolve_company_email's
     # own docstring for why exact-match alone misses almost every real
@@ -114,12 +114,7 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
         subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
             greeting_name=poc_name if poc_name else bucket_label,
-            company_name=bucket_label,
-            num_claims=num_claims,
-            plural="" if num_claims == 1 else "s",
-            report_date=report_date,
-            paid_total=f"{t['total_share_paid']:,.0f}",
-            os_total=f"{t['total_share_os']:,.0f}",
+            period_text=period_text,
             signature=signature,
             abdul_rauf_email=ABDUL_RAUF_EMAIL,
             majid_masood_email=MAJID_MASOOD_EMAIL,

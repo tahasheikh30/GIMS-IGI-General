@@ -16,31 +16,37 @@ import company_alias_resolver as car
 import email_generator as eg
 import outlook_sender as osend
 
-SUBJECT_TEMPLATE = "Premium Register Statement \u2013 {company_name} \u2013 {date}"
+SUBJECT_TEMPLATE = "Premium Register \u2013 {company_name} \u2013 {date}"
 
 BODY_TEMPLATE = (
     "Dear {greeting_name},\n\n"
-    "Please find attached the Premium Register statement covering {num_policies} "
-    "polic{plural} on which {company_name} is a coinsurer, as of {report_date}. Your share "
-    "of Gross Premium across these policies totals PKR {gross_total}, and your share of "
-    "Net Premium totals PKR {net_total}.\n\n"
-    "A full policy-by-policy breakdown, including your own Share % on each policy, is "
-    "included in the attached workbook, along with a Summary sheet.\n\n"
-    "Please do not hesitate to contact us if you have any questions.\n\n"
+    "Please find attached the Premium Register for {period_text}, for your review and "
+    "necessary action.\n\n"
+    "Should you have any questions or require further clarification, please do not hesitate to "
+    "contact us.\n\n"
+    "For any queries, please feel free to contact Abdul Rauf ({abdul_rauf_email}) or "
+    "Sabeen Ahmed Nomani ({sabeen_email}).\n\n"
     "Regards,\n"
     "{signature}"
 )
+
+ABDUL_RAUF_EMAIL = "abdul.rauf@IGI.COM.PK"
+SABEEN_EMAIL = "sabeen.nomani@IGI.COM.PK"
 
 
 def _normalize_key(text):
     return str(text).strip().upper()
 
 
-def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None, report_date=None):
+def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
+                                         report_date=None, period_text=None):
     """
     groups: {bucket_label: rows_df} from premium_register_company_processor.build_company_buckets
     totals: {bucket_label: {"num_policies", "total_gross_premium", "total_net_premium"}}
     email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) company name
+    period_text: text describing the period covered (e.g. "the period from
+        01 January 2026 to 31 July 2026"), dropped into the body as-is.
+        Falls back to a generic phrase built from report_date if not given.
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_policies, gross_total, net_total, status}
     cc/bcc start blank - filled in (and saved per-draft) by hand on the
@@ -50,6 +56,7 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
+    period_text = period_text or f"the period ending {report_date}"
 
     merge_index = car.build_email_merge_index(email_lookup, poc_lookup)
 
@@ -62,13 +69,10 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
         subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
             greeting_name=poc_name if poc_name else bucket_label,
-            company_name=bucket_label,
-            num_policies=num_policies,
-            plural="y" if num_policies == 1 else "ies",
-            report_date=report_date,
-            gross_total=f"{t['total_gross_premium']:,.0f}",
-            net_total=f"{t['total_net_premium']:,.0f}",
+            period_text=period_text,
             signature=signature,
+            abdul_rauf_email=ABDUL_RAUF_EMAIL,
+            sabeen_email=SABEEN_EMAIL,
         )
 
         drafts.append({

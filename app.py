@@ -405,6 +405,32 @@ class BalanceApp(tk.Tk):
         return run_dir
 
     @staticmethod
+    def _format_period_text(from_var, to_var):
+        """Turn a pair of YYYY-MM-DD date-filter StringVars into readable
+        text for an email body, e.g. "the period from 01 January 2026 to
+        31 July 2026". Falls back gracefully if either side is blank or
+        unparseable (the raw text is used as-is rather than silently
+        dropping it), and to a generic phrase if both are blank."""
+        def _fmt(raw):
+            raw = (raw or "").strip()
+            if not raw:
+                return None
+            try:
+                return datetime.strptime(raw, "%Y-%m-%d").strftime("%d %B %Y")
+            except ValueError:
+                return raw
+
+        start_text = _fmt(from_var.get())
+        end_text = _fmt(to_var.get())
+        if start_text and end_text:
+            return f"the period from {start_text} to {end_text}"
+        if start_text:
+            return f"the period from {start_text} onwards"
+        if end_text:
+            return f"the period through {end_text}"
+        return None
+
+    @staticmethod
     def _cleanup_if_empty_dir(path):
         """Remove `path` if it exists and is empty - used after a Save As
         dialog is cancelled for a module (Loss Ratio, Policy Check, Claims
@@ -4237,9 +4263,10 @@ class BalanceApp(tk.Tk):
         signature = self.claims_signature_text.get("1.0", "end").strip()
         eg.save_signature(signature)  # shared signature store across every GIMS module
 
+        period_text = self._format_period_text(self.claims_date_from_var, self.claims_date_to_var)
         self.claims_drafts = cre.build_claims_register_email_drafts(
             self.claims_groups, self.claims_totals, self.claims_email_lookup,
-            poc_lookup=self.claims_poc_lookup, signature=signature,
+            poc_lookup=self.claims_poc_lookup, signature=signature, period_text=period_text,
         )
         self.claims_email_tree.delete(*self.claims_email_tree.get_children())
         for d in self.claims_drafts:
@@ -5831,9 +5858,10 @@ class BalanceApp(tk.Tk):
         signature = self.premregsplit_signature_text.get("1.0", "end").strip()
         eg.save_signature(signature)
 
+        period_text = self._format_period_text(self.premregsplit_date_from_var, self.premregsplit_date_to_var)
         self.premregsplit_drafts = prce2.build_premium_register_email_drafts(
             self.premregsplit_groups, self.premregsplit_totals, self.premregsplit_email_lookup,
-            poc_lookup=self.premregsplit_poc_lookup, signature=signature,
+            poc_lookup=self.premregsplit_poc_lookup, signature=signature, period_text=period_text,
         )
         self.premregsplit_email_tree.delete(*self.premregsplit_email_tree.get_children())
         for d in self.premregsplit_drafts:
