@@ -16,6 +16,39 @@ import company_alias_resolver as car
 import email_generator as eg
 import outlook_sender as osend
 
+# Default Cc/Bcc recipients for every Premium Register email, per
+# Finance's own standing instruction - identical to Claims Intimation's
+# own lists (see claims_register_email.py) with one substitution and one
+# addition on the Cc list: Muhammad Majid Masood is replaced by Usama
+# Jahangir (Underwriting, Lahore), and Sabeen Ahmed Nomani (this module's
+# own point of contact, named in the body below) is added alongside her.
+# The body's own named contact (Sabeen Ahmed Nomani) is unchanged. Always
+# included unless a person clears/edits the Cc/Bcc field by hand on the
+# Review & Send Emails tab for a specific draft. Only the bare address is
+# kept, same convention as claims_register_email.py's own
+# DEFAULT_BCC_RECIPIENTS.
+DEFAULT_BCC_RECIPIENTS = [
+    "Faisal.Khan@IGI.COM.PK",
+    "muhammad.hisham@IGI.COM.PK",
+    "awais.amjad@IGI.COM.PK",
+    "murtaza.feroz@IGI.COM.PK",
+]
+DEFAULT_BCC = ";".join(DEFAULT_BCC_RECIPIENTS)
+
+DEFAULT_CC_RECIPIENTS = [
+    "kashif.qayyum@IGI.COM.PK",
+    "abdul.rauf@IGI.COM.PK",
+    "usama.jahangir@IGI.COM.PK",
+    "sabeen.nomani@IGI.COM.PK",
+    "zahid.mehmood@IGI.COM.PK",
+    "waqas.muhammad@IGI.COM.PK",
+    "fazal.abbas@IGI.COM.PK",
+    "Haider.Ali@IGI.COM.PK",
+    "nadeem.alvi@IGI.COM.PK",
+    "Muhammad.Nadeem@IGI.COM.PK",
+]
+DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
+
 SUBJECT_TEMPLATE = "Premium Register \u2013 {company_name} \u2013 {date}"
 
 BODY_TEMPLATE = (
@@ -49,8 +82,11 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
         Falls back to a generic phrase built from report_date if not given.
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_policies, gross_total, net_total, status}
-    cc/bcc start blank - filled in (and saved per-draft) by hand on the
-    Review & Send Emails tab, same convention as every other draft in GIMS.
+    cc and bcc both start pre-filled with Finance's own standing lists
+    (DEFAULT_CC_RECIPIENTS / DEFAULT_BCC_RECIPIENTS) on every draft - same
+    as claims_register_email.py's own drafts - still fully editable/
+    clearable per draft on the Review & Send Emails tab like any other
+    field, this is just the default each one starts at.
     """
     poc_lookup = poc_lookup or {}
     signature = signature.strip() if signature and signature.strip() else eg.DEFAULT_SIGNATURE
@@ -78,8 +114,8 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
         drafts.append({
             "company_name": bucket_label,
             "email": email,
-            "cc": "",
-            "bcc": "",
+            "cc": DEFAULT_CC,
+            "bcc": DEFAULT_BCC,
             "poc_name": poc_name,
             "subject": subject,
             "body": body,
