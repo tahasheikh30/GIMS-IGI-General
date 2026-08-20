@@ -27,7 +27,6 @@ import outlook_sender as osend
 # department/city portion was just how the addresses were originally
 # copied out of Outlook.
 DEFAULT_BCC_RECIPIENTS = [
-    "Faisal.Khan@IGI.COM.PK",
     "muhammad.hisham@IGI.COM.PK",
     "awais.amjad@IGI.COM.PK",
     "murtaza.feroz@IGI.COM.PK",

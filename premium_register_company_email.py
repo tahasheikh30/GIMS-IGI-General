@@ -28,7 +28,6 @@ import outlook_sender as osend
 # for a specific draft. Only the bare address is kept, same convention
 # as claims_register_email.py's own DEFAULT_BCC_RECIPIENTS.
 DEFAULT_BCC_RECIPIENTS = [
-    "Faisal.Khan@IGI.COM.PK",
     "muhammad.hisham@IGI.COM.PK",
     "awais.amjad@IGI.COM.PK",
     "murtaza.feroz@IGI.COM.PK",
