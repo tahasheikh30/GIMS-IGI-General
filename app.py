@@ -47,6 +47,8 @@ import perf_utils
 import upr_processor as uprp
 import upr_generator as uprg
 import upr_ledger_processor as uprlp
+import reinsurance_processor as rip
+import reinsurance_generator as rig
 
 try:
     import keyring
@@ -228,6 +230,15 @@ class BalanceApp(tk.Tk):
         self.upr_last_output_file = None
         self.upr_ledger_pdf_path = None          # last-browsed Ledger Balance PDF path
         self.upr_ledger_parse_result = None      # last upr_ledger_processor.parse_ledger_balance_pdf() result
+
+        # Reinsurance Automation module state
+        self.reins_register_paths = []           # list of uploaded RI premium ceded register filepaths
+        self.reins_loaded_df = None               # concatenated, cleaned register rows (Department/Comm Date/ceded components)
+        self.reins_period_options = []             # [{"year","month","label"}, ...] populated after loading
+        self.reins_last_result = None              # last run_reinsurance_calculation() result dict
+        self.reins_last_opening = 0.0              # Opening Prepaid Reinsurance Ceded entered on tab 2, used at generate time
+        self.reins_output_dir = os.path.join(os.getcwd(), "Reinsurance Automation")
+        self.reins_last_output_file = None
 
         self._load_logos()
         self._setup_style()
@@ -637,6 +648,7 @@ class BalanceApp(tk.Tk):
             sidebar, "Finance",
             [
                 ("upr_automation", "UPR Automation"),
+                ("reinsurance_automation", "Reinsurance Automation"),
             ],
             before=coinsurance_header,
         )
@@ -907,6 +919,11 @@ class BalanceApp(tk.Tk):
         upr_automation_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["upr_automation"] = upr_automation_page
         self._build_upr_automation_page(upr_automation_page)
+
+        reinsurance_page = ttk.Frame(container)
+        reinsurance_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["reinsurance_automation"] = reinsurance_page
+        self._build_reinsurance_automation_page(reinsurance_page)
 
         pc_email_page = ttk.Frame(container)
         pc_email_page.grid(row=0, column=0, sticky="nsew")
@@ -2006,6 +2023,372 @@ class BalanceApp(tk.Tk):
             os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
         else:
             messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
+
+    # ---------- Reinsurance Automation module ----------
+    def _build_reinsurance_automation_page(self, parent):
+        """Reinsurance Automation: upload one register file per
+        department (filename determines department), select a period,
+        enter the Opening Prepaid Reinsurance Ceded balance, and generate
+        the Prepaid RI Premium Ceded working workbook - same 3-tab shape
+        as UPR Automation, since the underlying calculation reuses UPR's
+        own period/bucketing/amortization logic directly."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Reinsurance Automation", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        reins_subtitle = ttk.Label(
+            header, text="Computes Total Reinsurance Ceded (Treaty + Local + Foreign Premium) per policy from "
+                          "each department's own RI Premium Ceded register (one file per department - the "
+                          "department is read from the file name), then amortizes it using the same 1/24 "
+                          "(most departments) / 1/6 (Marine, Travel) method as UPR Automation to produce the "
+                          "Closing Prepaid Reinsurance Premium Ceded figure for a selected 12-month period.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        reins_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        def _wrap_reins_subtitle(event):
+            reins_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_reins_subtitle)
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_register = ttk.Frame(notebook)
+        tab_opening = ttk.Frame(notebook)
+        tab_generate = ttk.Frame(notebook)
+        notebook.add(tab_register, text="1. Register Files & Period")
+        notebook.add(tab_opening, text="2. Opening Balance & Calculate")
+        notebook.add(tab_generate, text="3. Generate & Save")
+
+        self._build_reins_tab_register(tab_register)
+        self._build_reins_tab_opening(tab_opening)
+        self._build_reins_tab_generate(tab_generate)
+
+    # ---- Tab 1: register files + period ----
+    def _build_reins_tab_register(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s1 = self._loss_section_card(body, "1", "RI Premium Ceded Register File(s)", PAD_X)
+        reins_s1_note = ttk.Label(
+            s1, text="Upload one file per department (e.g. \"RI Fire 2026.xlsx\", \"Eng__2025_v2.xls\") - "
+                      "there is no Department column in these registers at all, so the department is "
+                      "determined from each file's own name. Upload as many years/files per department as "
+                      "needed; they're combined automatically. Required columns: Comm Date, Treaty "
+                      "Premiumium, Local Premium, Foreign Premium.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        reins_s1_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(reins_s1_note, s1, side_padding=10)
+
+        list_card = tk.Frame(s1, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_card.pack(fill="x")
+        list_outer = tk.Frame(list_card, bg=self.COLOR_PANEL_ALT)
+        list_outer.pack(fill="x", padx=12, pady=10)
+
+        list_frame = tk.Frame(list_outer, bg="white", highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_frame.pack(fill="x")
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        self.reins_register_listbox = tk.Listbox(list_frame, height=5, font=("Segoe UI", 10), selectmode="extended",
+                                                   activestyle="none", relief="flat", borderwidth=0,
+                                                   bg="white", selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                                   highlightthickness=0, yscrollcommand=list_scroll.set)
+        list_scroll.configure(command=self.reins_register_listbox.yview)
+        self.reins_register_listbox.pack(side="left", fill="both", expand=True)
+        list_scroll.pack(side="right", fill="y")
+
+        toolbar = tk.Frame(list_outer, bg=self.COLOR_PANEL_ALT)
+        toolbar.pack(fill="x", pady=(8, 0))
+        self._make_pill_button(toolbar, "Browse...", self._add_reins_register_files, bg=self.COLOR_ACCENT).pack(side="left")
+        self._make_pill_button(toolbar, "Remove Selected", self._remove_reins_register_file,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left", padx=(8, 0))
+        self._make_pill_button(toolbar, "Clear All", self._clear_reins_register_files,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(side="left", padx=(8, 0))
+
+        load_row = ttk.Frame(s1)
+        load_row.pack(fill="x", pady=(10, 0))
+        self.reins_load_btn = self._make_action_button(load_row, "Load Register(s)", self._load_reins_registers, kind="accent")
+        self.reins_load_btn.pack(side="left")
+
+        self.reins_load_progress = perf_utils.ProgressBarPanel(s1)
+        self.reins_load_progress.frame.pack(fill="x", pady=(8, 0))
+
+        s2 = self._loss_section_card(body, "2", "Period", PAD_X, expand_bottom=True)
+        reins_s2_note = ttk.Label(
+            s2, text="Select the period END month - the calculation covers exactly the 12 months ending "
+                      "there. If the uploaded register(s) don't reach back or forward far enough to cover "
+                      "the full 12 months, an error is raised rather than guessing.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        reins_s2_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(reins_s2_note, s2, side_padding=10)
+
+        period_row = ttk.Frame(s2)
+        period_row.pack(fill="x")
+        ttk.Label(period_row, text="Period (ending month)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.reins_period_var = tk.StringVar()
+        self.reins_period_combo = ttk.Combobox(period_row, textvariable=self.reins_period_var, state="readonly", width=22)
+        self.reins_period_combo.pack(side="left")
+
+        self.reins_register_log = scrolledtext.ScrolledText(s2, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.reins_register_log.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_reins(self, msg):
+        self.reins_register_log.insert("end", str(msg) + "\n")
+        self.reins_register_log.see("end")
+
+    def _add_reins_register_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        added = 0
+        for p in paths:
+            if p not in self.reins_register_paths:
+                self.reins_register_paths.append(p)
+                self.reins_register_listbox.insert("end", os.path.basename(p))
+                added += 1
+        if added:
+            self.status_var.set(f"Reinsurance Automation: added {added} file(s) ({len(self.reins_register_paths)} total).")
+
+    def _remove_reins_register_file(self):
+        selected = list(self.reins_register_listbox.curselection())
+        if not selected:
+            return
+        for idx in reversed(selected):
+            self.reins_register_listbox.delete(idx)
+            del self.reins_register_paths[idx]
+
+    def _clear_reins_register_files(self):
+        self.reins_register_listbox.delete(0, "end")
+        self.reins_register_paths.clear()
+
+    def _load_reins_registers(self):
+        if not self.reins_register_paths:
+            messagebox.showerror("No files selected", "Browse to at least one RI Premium Ceded register file first.")
+            return
+
+        self.reins_register_log.delete("1.0", "end")
+        self.status_var.set("Loading RI premium ceded register(s)...")
+        self.reins_load_progress.start(total=None, text="Loading...")
+        paths = list(self.reins_register_paths)
+
+        def worker(report):
+            df, meta = rip.load_reinsurance_registers(paths, report=report)
+            return df, meta
+
+        def on_done(result):
+            df, meta = result
+            self.reins_loaded_df = df
+            self.reins_load_progress.finish(f"Loaded {len(df):,} row(s).")
+            self._log_reins(f"Loaded {len(df):,} usable row(s) from {len(meta['sheets_used'])} sheet(s):")
+            for fn, dept in meta["departments_by_file"].items():
+                self._log_reins(f"   {fn}  ->  {dept}")
+            if meta["excluded_rows"]:
+                self._log_reins(f"{meta['excluded_rows']:,} row(s) excluded (missing or implausible Comm Date).")
+
+            options = rip.get_available_period_options(df)
+            self.reins_period_options = options
+            self.reins_period_combo.configure(values=[o["label"] for o in options])
+            if options:
+                self.reins_period_combo.current(0)
+            self.status_var.set(f"Reinsurance Automation: {len(df):,} row(s) loaded. Choose a period, then go to tab 2.")
+
+        def on_error(exc):
+            self.reins_load_progress.finish("Failed - see the log for details.")
+            self._log_reins(f"ERROR: {exc}")
+            messagebox.showerror("Could not load register(s)", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_reins(msg),
+            on_progress_value=self.reins_load_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.reins_load_btn],
+        )
+
+    # ---- Tab 2: Opening balance + Calculate ----
+    def _build_reins_tab_opening(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s3 = self._loss_section_card(body, "3", "Opening Balance", PAD_X)
+        ttk.Label(s3, text="Opening Prepaid Reinsurance Premium Ceded",
+                  style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(s3, text="This isn't in any register - it's the prior period's own Closing figure, entered "
+                            "by hand for now.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 6))
+        self.reins_opening_var = tk.StringVar()
+        ttk.Entry(s3, textvariable=self.reins_opening_var, width=22, font=("Segoe UI", 10)).pack(anchor="w")
+
+        s4 = self._loss_section_card(body, "4", "Run Calculation", PAD_X, expand_bottom=True)
+        ttk.Label(s4, text="Computes Total Reinsurance Ceded per row and builds both tables (Reinsurance "
+                            "Premium Ceded Distribution and Prepaid Reinsurance Premium Ceded) for the period "
+                            "selected on tab 1.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        calc_btn = self._make_action_button(s4, "Calculate", self._run_reins_calculation, kind="accent")
+        calc_btn.pack(anchor="w")
+
+        self.reins_calc_progress = perf_utils.ProgressBarPanel(s4)
+        self.reins_calc_progress.frame.pack(fill="x", pady=(10, 0))
+
+        self.reins_calc_summary_var = tk.StringVar(value="")
+        ttk.Label(s4, textvariable=self.reins_calc_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 8))
+
+        tree_frame = ttk.Frame(s4)
+        tree_frame.pack(fill="both", expand=True)
+        columns = ("department", "method", "ceded_total", "prepaid_total")
+        self.reins_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        self.reins_results_tree.heading("department", text="Department")
+        self.reins_results_tree.heading("method", text="Method")
+        self.reins_results_tree.heading("ceded_total", text="Total Reinsurance Ceded")
+        self.reins_results_tree.heading("prepaid_total", text="Prepaid (Unamortized) Total")
+        self.reins_results_tree.column("department", width=180)
+        self.reins_results_tree.column("method", width=80, anchor="center")
+        self.reins_results_tree.column("ceded_total", width=180, anchor="e")
+        self.reins_results_tree.column("prepaid_total", width=190, anchor="e")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reins_results_tree.yview)
+        self.reins_results_tree.configure(yscrollcommand=vsb.set)
+        self.reins_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self._finalize_scroll_passthrough(body)
+
+    def _run_reins_calculation(self):
+        if self.reins_loaded_df is None:
+            messagebox.showerror("Error", "Load the RI Premium Ceded register(s) on tab 1 first.")
+            return
+        if not self.reins_period_options:
+            messagebox.showerror("Error", "No period options available - load register(s) with usable Comm Date values first.")
+            return
+        selected_label = self.reins_period_var.get()
+        option = next((o for o in self.reins_period_options if o["label"] == selected_label), None)
+        if option is None:
+            messagebox.showerror("Error", "Select a period on tab 1 first.")
+            return
+
+        opening_text = self.reins_opening_var.get().strip().replace(",", "")
+        try:
+            opening_prepaid = float(opening_text) if opening_text else 0.0
+        except ValueError:
+            messagebox.showerror("Invalid entry", f"'{opening_text}' isn't a valid number for Opening Prepaid Reinsurance Ceded.")
+            return
+
+        paths = list(self.reins_register_paths)
+        period_year, period_month = option["year"], option["month"]
+        self.reins_calc_summary_var.set("")
+        self.reins_calc_progress.start(total=None, text="Calculating...")
+
+        def worker(report):
+            return rip.run_reinsurance_calculation(paths, period_year, period_month, report=report)
+
+        def on_done(result):
+            self.reins_last_result = result
+            self.reins_last_opening = opening_prepaid
+            self.reins_calc_progress.finish("Done.")
+            self.reins_calc_summary_var.set(
+                f"Closing Prepaid Reinsurance Premium Ceded: PKR {result['closing_prepaid']:,.0f}")
+
+            self.reins_results_tree.delete(*self.reins_results_tree.get_children())
+            for dept in result["departments"]:
+                ct = rip.row_total(result["ceded_table"][dept])
+                pt = rip.row_total(result["prepaid_table"][dept])
+                self.reins_results_tree.insert("", "end", values=(
+                    dept, result["methods"][dept], f"{ct:,.0f}", f"{pt:,.0f}"
+                ))
+            for w in result["warnings"]:
+                self._log_reins(f"WARNING: {w}")
+            self.status_var.set(f"Reinsurance Automation: Closing Prepaid = PKR {result['closing_prepaid']:,.0f}. See tab 3 to generate.")
+
+        def on_error(exc):
+            self.reins_calc_progress.finish("Failed - see the message for details.")
+            messagebox.showerror("Calculation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.reins_calc_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    # ---- Tab 3: Generate & Save ----
+    def _build_reins_tab_generate(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s5 = self._loss_section_card(body, "5", "Generate & Save", PAD_X, expand_bottom=True)
+        out_row = ttk.Frame(s5)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.reins_output_dir_var = tk.StringVar(value=self.reins_output_dir)
+        ttk.Entry(out_row, textvariable=self.reins_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_reins_output_dir).pack(side="left")
+
+        gen_row = ttk.Frame(s5)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate Reinsurance Workbook", self._generate_reins_workbook, kind="accent").pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_reins_output_folder).pack(side="left", padx=(8, 0))
+
+        self.reins_gen_progress = perf_utils.ProgressBarPanel(s5)
+        self.reins_gen_progress.frame.pack(fill="x", pady=(4, 8))
+
+        self.reins_gen_log = scrolledtext.ScrolledText(s5, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.reins_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_reins_gen(self, msg):
+        self.reins_gen_log.insert("end", str(msg) + "\n")
+        self.reins_gen_log.see("end")
+
+    def _browse_reins_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.reins_output_dir_var.set(path)
+
+    def _generate_reins_workbook(self):
+        if self.reins_last_result is None:
+            messagebox.showerror("Nothing to generate", "Run Calculate on tab 2 first.")
+            return
+        base_output_dir = self.reins_output_dir_var.get().strip()
+        if not base_output_dir:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+
+        output_dir = self._new_run_folder(base_output_dir)
+        result = self.reins_last_result
+        opening_prepaid = getattr(self, "reins_last_opening", 0.0)
+        filename = rig.build_output_filename(result["period_end"])
+        output_file = os.path.join(output_dir, filename)
+
+        self.reins_gen_log.delete("1.0", "end")
+        self.status_var.set("Generating Reinsurance workbook...")
+        self.reins_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return rig.build_reinsurance_workbook(result, opening_prepaid, output_file)
+
+        def on_done(fp):
+            self.reins_last_output_file = fp
+            self.reins_gen_progress.finish("Done.")
+            self._log_reins_gen(f"Generated: {fp}")
+            messagebox.showinfo("Done", f"Reinsurance workbook generated:\n{fp}")
+            self.status_var.set(f"Reinsurance Automation: generated {os.path.basename(fp)}.")
+
+        def on_error(exc):
+            self.reins_gen_progress.finish("Failed - see the log for details.")
+            self._log_reins_gen(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.reins_gen_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _open_reins_output_folder(self):
+        output_dir = os.path.dirname(self.reins_last_output_file) if self.reins_last_output_file else self.reins_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
+
 
     # ---------- Coinsurance > Premium Register module ----------
     def _build_premium_register_page(self, parent):
