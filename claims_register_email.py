@@ -47,12 +47,12 @@ DEFAULT_CC_RECIPIENTS = [
 ]
 DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
 
-SUBJECT_TEMPLATE = "Claims Intimation Register \u2013 {company_name} \u2013 {date}"
+SUBJECT_TEMPLATE = "{type_prefix}Claims Intimation Register \u2013 {company_name} \u2013 {date}"
 
 BODY_TEMPLATE = (
     "Dear {greeting_name},\n\n"
-    "Please find attached the Claims Intimation Register for {period_text}, for your review and "
-    "necessary action.\n\n"
+    "Please find attached the {type_prefix}Claims Intimation Register for {period_text}, for your "
+    "review and necessary action.\n\n"
     "Should you have any questions or require further clarification, please do not hesitate to "
     "contact us.\n\n"
     "For any queries, please feel free to contact Abdul Rauf ({abdul_rauf_email}) or "
@@ -75,7 +75,7 @@ def _normalize_key(text):
 
 
 def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
-                                        report_date=None, period_text=None):
+                                        report_date=None, period_text=None, business_type="conventional"):
     """
     groups: {bucket_label: claims_df} from claims_register_processor.build_coinsurer_buckets
     totals: {bucket_label: {"num_claims", "total_share_paid", "total_share_os"}}
@@ -83,6 +83,11 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     period_text: text describing the period covered (e.g. "the period from
         01 January 2026 to 31 July 2026"), dropped into the body as-is.
         Falls back to a generic phrase built from report_date if not given.
+    business_type: "conventional" (default) or "takaful" - a Takaful run
+        prefixes both the subject and the body's own reference to the
+        Claims Intimation Register with "Takaful ", so the recipient
+        never has to guess which book of business a statement belongs
+        to. Conventional runs are worded exactly as before (no prefix).
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_claims, paid_total, os_total, status}
     cc and bcc both start pre-filled with Finance's own standing lists
@@ -95,6 +100,7 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
     period_text = period_text or f"the period ending {report_date}"
+    type_prefix = "Takaful " if business_type == "takaful" else ""
 
     # Precomputed once per run (see company_alias_resolver.resolve_company_email's
     # own docstring for why exact-match alone misses almost every real
@@ -111,8 +117,9 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
         email, poc_name = car.resolve_company_email(bucket_label, email_lookup, poc_lookup, merge_index=merge_index)
         num_claims = t["num_claims"]
 
-        subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)
+        subject = SUBJECT_TEMPLATE.format(type_prefix=type_prefix, company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
+            type_prefix=type_prefix,
             greeting_name=poc_name if poc_name else bucket_label,
             period_text=period_text,
             signature=signature,

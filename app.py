@@ -178,6 +178,16 @@ class BalanceApp(tk.Tk):
         self.claims_drafts = []
         self.claims_output_dir = os.path.join(os.getcwd(), "Claims Register")
         self.claims_last_run_dir = None  # set to the current generation's own dated/timed subfolder once generated
+        # self.claims_business_type_var ("conventional"/"takaful") is a
+        # tk.StringVar created in _build_claims_setup_tab (see that method
+        # for why every tk.Variable in this app is created there rather
+        # than in __init__) - read at generate/draft time by
+        # generate_claims_register_reports() / draft_claims_register_emails()
+        # and threaded through to claims_register_generator.py /
+        # claims_register_email.py so a Takaful run gets "Takaful" worked
+        # into every generated filename, the email subject, and the email
+        # body - a Conventional run (the default) is worded exactly as
+        # before, with nothing added.
         # Cache for the Unit/Client Name/Department filter listboxes - set
         # by _load_claims_filter_options() (the "Load Filter Options"
         # button) so the file only has to be read once: load_and_match_claims()
@@ -202,6 +212,12 @@ class BalanceApp(tk.Tk):
         self.premregsplit_drafts = []
         self.premregsplit_output_dir = os.path.join(os.getcwd(), "Premium Register")
         self.premregsplit_last_run_dir = None
+        # self.premregsplit_business_type_var ("conventional"/"takaful") -
+        # same pattern as self.claims_business_type_var above (see that
+        # comment): a tk.StringVar created in _build_premregsplit_setup_tab,
+        # read at generate/draft time and threaded through to
+        # premium_register_company_generator.py /
+        # premium_register_company_email.py.
 
         # UPR Automation module state
         self.upr_register_paths = []           # list of uploaded premium register filepaths
@@ -3481,6 +3497,28 @@ class BalanceApp(tk.Tk):
         claims_email_lookup_note.grid(row=6, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(claims_email_lookup_note, source_box)
 
+        # ---- Section: Business Type ----
+        # Conventional (default) or Takaful - determines whether "Takaful"
+        # is worked into every generated coinsurer filename, the email
+        # subject, and the email body for this run (see
+        # claims_register_generator.build_output_filename and
+        # claims_register_email.build_claims_register_email_drafts for the
+        # exact wording). A Conventional run is worded exactly as before -
+        # nothing is added.
+        business_type_box = ttk.Labelframe(canvas_frame, text="  Business Type  ", padding=14)
+        business_type_box.pack(fill="x", padx=12, pady=8)
+        ttk.Label(business_type_box,
+                  text="Applies to the coinsurer file names, the email subject, and the email body "
+                       "generated for this run.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        self.claims_business_type_var = tk.StringVar(value="conventional")
+        business_type_row = ttk.Frame(business_type_box)
+        business_type_row.pack(fill="x")
+        ttk.Radiobutton(business_type_row, text="Conventional", variable=self.claims_business_type_var,
+                         value="conventional").pack(side="left", padx=(0, 24))
+        ttk.Radiobutton(business_type_row, text="Takaful", variable=self.claims_business_type_var,
+                         value="takaful").pack(side="left")
+
         # ---- Section: Date Filter ----
         # Scopes a run to a selected period even though the Claim Intimation
         # Register (and the Premium Register it's matched against) can span
@@ -4190,6 +4228,10 @@ class BalanceApp(tk.Tk):
         groups = self.claims_groups
         breakdowns = self.claims_breakdowns
         unmatched_df = self.claims_unmatched_df
+        # Read on the main thread, same rule as every other Tkinter widget
+        # value this worker closure captures below - Tkinter variables
+        # must never be queried from a background thread.
+        business_type = self.claims_business_type_var.get()
         self.status_var.set(f"Generating {len(groups)} Claims Register workbook(s)...")
         total_files = len(groups) + (1 if unmatched_df is not None and len(unmatched_df) else 0)
         self.claims_reports_progress.start(total=total_files, text=f"0 / {total_files} workbook(s) generated")
@@ -4211,7 +4253,8 @@ class BalanceApp(tk.Tk):
             # single-core machine, a tiny batch, or if the process pool
             # can't start for some environment-specific reason.
             return crg.build_coinsurer_workbooks_parallel(
-                groups, breakdowns, output_dir, report=report, unmatched_df=unmatched_df)
+                groups, breakdowns, output_dir, report=report, unmatched_df=unmatched_df,
+                business_type=business_type)
 
         def on_done(result):
             generated, filename_lookup, errors = result
@@ -4267,6 +4310,7 @@ class BalanceApp(tk.Tk):
         self.claims_drafts = cre.build_claims_register_email_drafts(
             self.claims_groups, self.claims_totals, self.claims_email_lookup,
             poc_lookup=self.claims_poc_lookup, signature=signature, period_text=period_text,
+            business_type=self.claims_business_type_var.get(),
         )
         self.claims_email_tree.delete(*self.claims_email_tree.get_children())
         for d in self.claims_drafts:
@@ -5295,6 +5339,28 @@ class BalanceApp(tk.Tk):
         premregsplit_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(premregsplit_email_lookup_note, source_box)
 
+        # ---- Section: Business Type ----
+        # Conventional (default) or Takaful - determines whether "Takaful"
+        # is worked into every generated company filename, the email
+        # subject, and the email body for this run (see
+        # premium_register_company_generator.build_output_filename and
+        # premium_register_company_email.build_premium_register_email_drafts
+        # for the exact wording). A Conventional run is worded exactly as
+        # before - nothing is added.
+        premregsplit_business_type_box = ttk.Labelframe(canvas_frame, text="  Business Type  ", padding=14)
+        premregsplit_business_type_box.pack(fill="x", padx=12, pady=8)
+        ttk.Label(premregsplit_business_type_box,
+                  text="Applies to the company file names, the email subject, and the email body "
+                       "generated for this run.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        self.premregsplit_business_type_var = tk.StringVar(value="conventional")
+        premregsplit_business_type_row = ttk.Frame(premregsplit_business_type_box)
+        premregsplit_business_type_row.pack(fill="x")
+        ttk.Radiobutton(premregsplit_business_type_row, text="Conventional", variable=self.premregsplit_business_type_var,
+                         value="conventional").pack(side="left", padx=(0, 24))
+        ttk.Radiobutton(premregsplit_business_type_row, text="Takaful", variable=self.premregsplit_business_type_var,
+                         value="takaful").pack(side="left")
+
         # ---- Section: Date Filter ----
         date_filter_box = ttk.Labelframe(canvas_frame, text="  Date Filter (optional)  ", padding=14)
         date_filter_box.pack(fill="x", padx=12, pady=8)
@@ -5802,11 +5868,15 @@ class BalanceApp(tk.Tk):
 
         groups = self.premregsplit_groups
         breakdowns = self.premregsplit_breakdowns
+        # Read on the main thread, same rule as every other Tkinter widget
+        # value this worker closure captures below.
+        business_type = self.premregsplit_business_type_var.get()
         self.status_var.set(f"Generating {len(groups)} Premium Register workbook(s)...")
         self.premregsplit_reports_progress.start(total=len(groups), text=f"0 / {len(groups)} workbook(s) generated")
 
         def worker(report):
-            return prcg2.build_company_workbooks_parallel(groups, breakdowns, output_dir, report=report)
+            return prcg2.build_company_workbooks_parallel(groups, breakdowns, output_dir, report=report,
+                                                            business_type=business_type)
 
         def on_done(result):
             generated, filename_lookup, errors = result
@@ -5862,6 +5932,7 @@ class BalanceApp(tk.Tk):
         self.premregsplit_drafts = prce2.build_premium_register_email_drafts(
             self.premregsplit_groups, self.premregsplit_totals, self.premregsplit_email_lookup,
             poc_lookup=self.premregsplit_poc_lookup, signature=signature, period_text=period_text,
+            business_type=self.premregsplit_business_type_var.get(),
         )
         self.premregsplit_email_tree.delete(*self.premregsplit_email_tree.get_children())
         for d in self.premregsplit_drafts:

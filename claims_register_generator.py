@@ -133,7 +133,11 @@ def safe_filename_part(name):
     return name[:100] if name else "UNKNOWN"
 
 
-def build_output_filename(bucket_label, run_date=None):
+def build_output_filename(bucket_label, run_date=None, business_type="conventional"):
+    """business_type: "conventional" (default) or "takaful" - a Takaful
+    run inserts "_Takaful" into the filename right after the company
+    stub, so the two business types never land in the same-named file
+    even when generated to the same output folder."""
     run_date = run_date or date.today()
     # A fixed, requested naming convention applies to a known set of
     # companies (see company_alias_resolver.CANONICAL_COMPANY_FILENAMES) -
@@ -143,7 +147,8 @@ def build_output_filename(bucket_label, run_date=None):
     # original sanitized-label naming, unchanged.
     canonical = car.canonical_filename_for_label(bucket_label)
     stub = canonical if canonical else safe_filename_part(bucket_label)
-    return f"{stub}_ClaimsIntimation_{run_date.strftime('%d%m%Y')}.xlsx"
+    type_part = "_Takaful" if business_type == "takaful" else ""
+    return f"{stub}{type_part}_ClaimsIntimation_{run_date.strftime('%d%m%Y')}.xlsx"
 
 
 def _prepare_for_excel(df, date_cols):
@@ -588,7 +593,8 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_paid, total_os, n
     ws.column_dimensions["K"].width = 15
 
 
-def build_coinsurer_workbook(bucket_label, claims_df, breakdown_df, output_dir, run_date=None, report=None):
+def build_coinsurer_workbook(bucket_label, claims_df, breakdown_df, output_dir, run_date=None, report=None,
+                              business_type="conventional"):
     """
     Write a single coinsurer's workbook:
       1. "Summary" - KPI cards, Paid-vs-O/S pie, per-insured bar chart
@@ -597,6 +603,8 @@ def build_coinsurer_workbook(bucket_label, claims_df, breakdown_df, output_dir, 
     breakdown_df: per-insured Insured Name / share_paid_total /
         share_os_total / num_claims (from
         claims_register_processor.build_coinsurer_buckets).
+    business_type: "conventional" (default) or "takaful" - passed
+        straight through to build_output_filename (see its own docstring).
     Returns the full filepath written.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -614,18 +622,23 @@ def build_coinsurer_workbook(bucket_label, claims_df, breakdown_df, output_dir, 
 
     wb.move_sheet(SUMMARY_SHEET, offset=-1)  # Summary first
 
-    filename = build_output_filename(bucket_label, run_date=run_date)
+    filename = build_output_filename(bucket_label, run_date=run_date, business_type=business_type)
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
 
 
 def build_coinsurer_workbooks_parallel(groups, breakdowns, output_dir, run_date=None, max_workers=None, report=None,
-                                        unmatched_df=None):
+                                        unmatched_df=None, business_type="conventional"):
     """
     Generate every coinsurer's workbook using a process pool instead of
     one at a time - see receivable_generator.build_company_workbooks_parallel
     for the full rationale (same technique, same fallback conditions).
+
+    business_type: "conventional" (default) or "takaful" - passed straight
+        through to every coinsurer workbook AND the shared Unmatched Claims
+        workbook, so a Takaful run gets "_Takaful" in every filename this
+        batch produces (see build_output_filename's own docstring).
 
     This module's own bucket sizes are typically far more skewed than the
     Receivable module's: confirmed against a real 27,976-claim run, one
@@ -678,11 +691,11 @@ def build_coinsurer_workbooks_parallel(groups, breakdowns, output_dir, run_date=
             if report:
                 report(f"Generating {total_tasks} workbook(s) across {workers} worker process(es)...")
             tasks = [
-                ("coinsurer", bucket_label, groups[bucket_label], breakdowns.get(bucket_label), output_dir, run_date)
+                ("coinsurer", bucket_label, groups[bucket_label], breakdowns.get(bucket_label), output_dir, run_date, business_type)
                 for bucket_label in bucket_labels
             ]
             if include_unmatched:
-                tasks.append(("unmatched", None, unmatched_df, None, output_dir, run_date))
+                tasks.append(("unmatched", None, unmatched_df, None, output_dir, run_date, business_type))
             done_count = 0
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
                 for label, fp, err in executor.map(_build_one_generic_workbook_worker, tasks):
@@ -710,7 +723,8 @@ def build_coinsurer_workbooks_parallel(groups, breakdowns, output_dir, run_date=
         if report:
             report(f"[{i}/{total_tasks}] {bucket_label}")
         try:
-            fp = build_coinsurer_workbook(bucket_label, claims_sub_df, breakdown, output_dir, run_date=run_date)
+            fp = build_coinsurer_workbook(bucket_label, claims_sub_df, breakdown, output_dir, run_date=run_date,
+                                           business_type=business_type)
             generated.append(fp)
             filename_lookup[bucket_label] = os.path.basename(fp)
         except Exception as e:
@@ -719,7 +733,7 @@ def build_coinsurer_workbooks_parallel(groups, breakdowns, output_dir, run_date=
         if report:
             report(f"[{total_tasks}/{total_tasks}] Unmatched Claims")
         try:
-            fp = build_unmatched_workbook(unmatched_df, output_dir, run_date=run_date)
+            fp = build_unmatched_workbook(unmatched_df, output_dir, run_date=run_date, business_type=business_type)
             if fp:
                 generated.append(fp)
         except Exception as e:
@@ -733,23 +747,26 @@ def _build_one_generic_workbook_worker(args):
     Unmatched Claims workbook) so both can be submitted to the same
     process pool and run concurrently rather than the unmatched workbook
     being a separate, strictly-sequential step afterward."""
-    kind, bucket_label, df, breakdown_df, output_dir, run_date = args
+    kind, bucket_label, df, breakdown_df, output_dir, run_date, business_type = args
     try:
         if kind == "coinsurer":
-            fp = build_coinsurer_workbook(bucket_label, df, breakdown_df, output_dir, run_date=run_date)
+            fp = build_coinsurer_workbook(bucket_label, df, breakdown_df, output_dir, run_date=run_date,
+                                           business_type=business_type)
             return bucket_label, fp, None
         else:
-            fp = build_unmatched_workbook(df, output_dir, run_date=run_date)
+            fp = build_unmatched_workbook(df, output_dir, run_date=run_date, business_type=business_type)
             return "Unmatched Claims", fp, None
     except Exception as e:
         return (bucket_label or "Unmatched Claims"), None, str(e)
 
 
-def build_unmatched_workbook(unmatched_df, output_dir, run_date=None, report=None):
+def build_unmatched_workbook(unmatched_df, output_dir, run_date=None, report=None, business_type="conventional"):
     """Single-sheet workbook of every claim needing manual review - not
     per-company, since there's no coinsurer identified to route it to
-    yet. Returns the filepath written, or None if unmatched_df is empty
-    (nothing to write)."""
+    yet. business_type: "conventional" (default) or "takaful" - inserts
+    "_Takaful" into this file's own name too, same convention as every
+    coinsurer workbook in the same batch. Returns the filepath written,
+    or None if unmatched_df is empty (nothing to write)."""
     if len(unmatched_df) == 0:
         return None
     os.makedirs(output_dir, exist_ok=True)
@@ -758,7 +775,8 @@ def build_unmatched_workbook(unmatched_df, output_dir, run_date=None, report=Non
     ws.title = UNMATCHED_SHEET
     _write_unmatched_sheet(ws, unmatched_df, report=report)
     run_date = run_date or date.today()
-    filename = f"Unmatched_Claims_{run_date.strftime('%d%m%Y')}.xlsx"
+    type_part = "_Takaful" if business_type == "takaful" else ""
+    filename = f"Unmatched_Claims{type_part}_{run_date.strftime('%d%m%Y')}.xlsx"
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath

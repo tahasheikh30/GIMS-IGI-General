@@ -50,14 +50,14 @@ DEFAULT_CC_RECIPIENTS = [
 ]
 DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
 
-SUBJECT_TEMPLATE = "Premium Ceded Register \u2013 {company_name} \u2013 {date}"
+SUBJECT_TEMPLATE = "{type_prefix}Premium Ceded Register \u2013 {company_name} \u2013 {date}"
 
 BODY_TEMPLATE = (
     "Dear {greeting_name},\n\n"
-    "Please find attached our premium ceded register relating to {company_name} for {period_text}, "
-    "for your review and reconciliation.\n\n"
-    "We would appreciate it if you could also share your premium register for the same period for "
-    "our verification and reconciliation purposes.\n\n"
+    "Please find attached our {type_prefix_lower}premium ceded register relating to {company_name} "
+    "for {period_text}, for your review and reconciliation.\n\n"
+    "We would appreciate it if you could also share your {type_prefix_lower}premium register for the "
+    "same period for our verification and reconciliation purposes.\n\n"
     "For any queries or if any additional/missing documents are required, please feel free to "
     "coordinate directly with the following representatives:\n\n"
     "1. Abdul Rauf \u2013 {abdul_rauf_email} (Karachi Region)\n"
@@ -89,7 +89,7 @@ def _normalize_key(text):
 
 
 def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
-                                         report_date=None, period_text=None):
+                                         report_date=None, period_text=None, business_type="conventional"):
     """
     groups: {bucket_label: rows_df} from premium_register_company_processor.build_company_buckets
     totals: {bucket_label: {"num_policies", "total_gross_premium", "total_net_premium"}}
@@ -97,6 +97,12 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
     period_text: text describing the period covered (e.g. "the period from
         01 January 2026 to 31 July 2026"), dropped into the body as-is.
         Falls back to a generic phrase built from report_date if not given.
+    business_type: "conventional" (default) or "takaful" - a Takaful run
+        prefixes the subject with "Takaful " and works "takaful" into the
+        body's own references to the premium ceded register / premium
+        register, so the recipient never has to guess which book of
+        business a statement belongs to. Conventional runs are worded
+        exactly as before (no prefix).
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_policies, gross_total, net_total, status}
     cc and bcc both start pre-filled with Finance's own standing lists
@@ -110,6 +116,8 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
     report_date = report_date or date.today().isoformat()
     date_str = date.today().strftime("%d-%b-%Y")
     period_text = period_text or f"the period ending {report_date}"
+    type_prefix = "Takaful " if business_type == "takaful" else ""
+    type_prefix_lower = "takaful " if business_type == "takaful" else ""
 
     merge_index = car.build_email_merge_index(email_lookup, poc_lookup)
 
@@ -119,8 +127,9 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
         email, poc_name = car.resolve_company_email(bucket_label, email_lookup, poc_lookup, merge_index=merge_index)
         num_policies = t["num_policies"]
 
-        subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)
+        subject = SUBJECT_TEMPLATE.format(type_prefix=type_prefix, company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
+            type_prefix_lower=type_prefix_lower,
             greeting_name=poc_name if poc_name else bucket_label,
             company_name=bucket_label,
             period_text=period_text,

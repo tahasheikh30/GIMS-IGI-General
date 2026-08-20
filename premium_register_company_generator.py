@@ -104,11 +104,15 @@ def safe_filename_part(name):
     return name[:100] if name else "UNKNOWN"
 
 
-def build_output_filename(bucket_label, run_date=None):
+def build_output_filename(bucket_label, run_date=None, business_type="conventional"):
+    """business_type: "conventional" (default) or "takaful" - a Takaful
+    run inserts "_Takaful" into the filename right after the company
+    stub, mirroring claims_register_generator.build_output_filename."""
     run_date = run_date or date.today()
     canonical = car.canonical_filename_for_label(bucket_label)
     stub = canonical if canonical else safe_filename_part(bucket_label)
-    return f"{stub}_PremiumRegister_{run_date.strftime('%d%m%Y')}.xlsx"
+    type_part = "_Takaful" if business_type == "takaful" else ""
+    return f"{stub}{type_part}_PremiumRegister_{run_date.strftime('%d%m%Y')}.xlsx"
 
 
 def _prepare_for_excel(df, date_cols):
@@ -433,13 +437,16 @@ def _write_summary_sheet(ws, bucket_label, breakdown_df, total_gross, total_net,
     ws.column_dimensions["K"].width = 15
 
 
-def build_company_workbook(bucket_label, rows_df, breakdown_df, output_dir, run_date=None, report=None):
+def build_company_workbook(bucket_label, rows_df, breakdown_df, output_dir, run_date=None, report=None,
+                            business_type="conventional"):
     """
     Write a single company's workbook:
       1. "Summary" - KPI cards, Gross-vs-Net pie, per-insured bar chart
       2. "Premium Data" - every original Premium Register row for that
          company
 
+    business_type: "conventional" (default) or "takaful" - passed
+        straight through to build_output_filename (see its own docstring).
     Returns the full filepath written.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -460,27 +467,33 @@ def build_company_workbook(bucket_label, rows_df, breakdown_df, output_dir, run_
 
     wb.move_sheet(SUMMARY_SHEET, offset=-1)
 
-    filename = build_output_filename(bucket_label, run_date=run_date)
+    filename = build_output_filename(bucket_label, run_date=run_date, business_type=business_type)
     filepath = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath
 
 
 def _build_one_workbook_worker(args):
-    bucket_label, rows_df, breakdown_df, output_dir, run_date = args
+    bucket_label, rows_df, breakdown_df, output_dir, run_date, business_type = args
     try:
-        fp = build_company_workbook(bucket_label, rows_df, breakdown_df, output_dir, run_date=run_date)
+        fp = build_company_workbook(bucket_label, rows_df, breakdown_df, output_dir, run_date=run_date,
+                                     business_type=business_type)
         return bucket_label, fp, None
     except Exception as e:
         return bucket_label, None, str(e)
 
 
-def build_company_workbooks_parallel(groups, breakdowns, output_dir, run_date=None, max_workers=None, report=None):
+def build_company_workbooks_parallel(groups, breakdowns, output_dir, run_date=None, max_workers=None, report=None,
+                                      business_type="conventional"):
     """
     Generate every company's workbook using a process pool instead of
     one at a time - identical pattern (and identical fallback
     conditions) to receivable_generator.build_company_workbooks_parallel /
     claims_register_generator.build_coinsurer_workbooks_parallel.
+
+    business_type: "conventional" (default) or "takaful" - passed straight
+        through to every company workbook in this batch, so a Takaful run
+        gets "_Takaful" in every filename produced.
 
     Returns (generated_filepaths, filename_lookup, errors).
     """
@@ -499,7 +512,7 @@ def build_company_workbooks_parallel(groups, breakdowns, output_dir, run_date=No
             if report:
                 report(f"Generating {len(bucket_labels)} workbook(s) across {workers} worker process(es)...")
             tasks = [
-                (bucket_label, groups[bucket_label], breakdowns.get(bucket_label), output_dir, run_date)
+                (bucket_label, groups[bucket_label], breakdowns.get(bucket_label), output_dir, run_date, business_type)
                 for bucket_label in bucket_labels
             ]
             done_count = 0
@@ -528,7 +541,8 @@ def build_company_workbooks_parallel(groups, breakdowns, output_dir, run_date=No
         if report:
             report(f"[{i}/{len(bucket_labels)}] {bucket_label}")
         try:
-            fp = build_company_workbook(bucket_label, rows_df, breakdown, output_dir, run_date=run_date)
+            fp = build_company_workbook(bucket_label, rows_df, breakdown, output_dir, run_date=run_date,
+                                         business_type=business_type)
             generated.append(fp)
             filename_lookup[bucket_label] = os.path.basename(fp)
         except Exception as e:
