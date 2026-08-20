@@ -60,7 +60,11 @@ def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None,
     email_lookup: dict, keyed by normalized (upper/stripped) Company name
         -> email address (semicolon-joined if the source listed several)
     poc_lookup: optional dict, same normalized Company-name keys -> contact
-        person name, used in the greeting
+        person name. Carried through onto each draft's own "poc_name"
+        field for reference, but never used for the greeting - every
+        email always addresses the company itself ("Dear ADAMJEE
+        INSURANCE COMPANY LTD,"), regardless of whether a POC name is
+        on file.
     Returns list of draft dicts: {company_name, email, cc, bcc, poc_name,
         subject, body, num_clients, premium_total, claims_total, status}
     cc/bcc start blank - there's no lookup-file source for them, they're
@@ -88,7 +92,7 @@ def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None,
 
         subject = SUBJECT_TEMPLATE.format(company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
-            greeting_name=poc_name if poc_name else bucket_label,
+            greeting_name=bucket_label,
             company_name=bucket_label,
             num_clients=num_clients,
             plural="" if num_clients == 1 else "s",

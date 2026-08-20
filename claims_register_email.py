@@ -79,7 +79,12 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
     """
     groups: {bucket_label: claims_df} from claims_register_processor.build_coinsurer_buckets
     totals: {bucket_label: {"num_claims", "total_share_paid", "total_share_os"}}
-    email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) coinsurer name
+    email_lookup / poc_lookup: dicts keyed by normalized (upper/stripped) coinsurer name.
+        poc_lookup is carried through onto each draft's own "poc_name"
+        field for reference, but never used for the greeting - every
+        email always addresses the coinsurer itself ("Dear ADAMJEE
+        INSURANCE COMPANY LTD,"), regardless of whether a POC name is
+        on file.
     period_text: text describing the period covered (e.g. "the period from
         01 January 2026 to 31 July 2026"), dropped into the body as-is.
         Falls back to a generic phrase built from report_date if not given.
@@ -120,7 +125,7 @@ def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=
         subject = SUBJECT_TEMPLATE.format(type_prefix=type_prefix, company_name=bucket_label, date=date_str)
         body = BODY_TEMPLATE.format(
             type_prefix=type_prefix,
-            greeting_name=poc_name if poc_name else bucket_label,
+            greeting_name=bucket_label,
             period_text=period_text,
             signature=signature,
             abdul_rauf_email=ABDUL_RAUF_EMAIL,

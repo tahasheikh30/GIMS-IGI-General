@@ -87,8 +87,10 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
     grand_totals: Series client -> total O/s
     email_lookup: dict client_name -> email address (or None if missing)
     poc_lookup: optional dict client_name -> point-of-contact person name.
-        When present for a client, the email greeting addresses that person
-        ("Dear John,") instead of the company name ("Dear ACME CORP,").
+        Carried through onto each draft's own "poc_name" field for
+        reference, but never used for the greeting - every email always
+        addresses the company itself ("Dear ACME CORP,"), regardless of
+        whether a POC name is on file.
     signature: text shown after "Regards," at the end of every email. Falls
         back to DEFAULT_SIGNATURE if not provided or blank.
     Returns list of draft dicts: {client_name, email, cc, bcc, subject, body, amount, status}
@@ -107,7 +109,7 @@ def build_email_drafts(qualifying_df, grand_totals, email_lookup, poc_lookup=Non
         poc_name = poc_lookup.get(client)
         fields = {
             "client_name": client,
-            "greeting_name": poc_name if poc_name else client,
+            "greeting_name": client,
             "amount": f"{amount:,.0f}",
             "report_date": report_date or "",
             "signature": signature,
