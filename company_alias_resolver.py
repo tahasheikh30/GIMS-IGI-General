@@ -51,6 +51,29 @@ ABBREVIATIONS = {
     "JGI": "Jubilee Insurance",  # common alternate spelling of the same abbreviation
     "RIC": "Reliance Insurance",
     "AGI": "Askari General Insurance",
+    # "SALAM" - confirmed real MISSPELLING (not an acronym, but handled
+    # the exact same way since this dict is really just "known leading
+    # token -> the real company name" and get_merge_key()/
+    # canonical_filename_for_label()/resolve_company_email() don't care
+    # why the two spellings differ) found in a real Premium Register
+    # export: 1,299 policy rows (more than the correctly-spelled
+    # "SALAAM TAKAFUL LTD"'s own 473 rows) are recorded under "SALAM
+    # TAKAFUL LIMITED" - missing the second "A" in "Salaam". Before this
+    # entry, get_merge_key("SALAM TAKAFUL LIMITED") reduced to "SALAM"
+    # while get_merge_key("SALAAM TAKAFUL LTD") (and the Co-insurance
+    # Companies List's own email-lookup entry, spelled correctly) both
+    # reduce to "SALAAM" - two different keys that never collide - so
+    # every one of those 1,299 rows' worth of real Salaam business (73%
+    # of Salaam's total rows in that file) landed in its own separate
+    # "SALAM TAKAFUL LIMITED" bucket that resolve_company_email() could
+    # never find an email for (neither the exact match nor the
+    # merge-key fallback ever line up against "SALAAM"), got no
+    # canonical output filename either, and was never folded together
+    # with the correctly-spelled bucket even when the "Merge files for
+    # the same company" checkbox was used. Mapping it here fixes all
+    # three at once, the same mechanism already used for AIC/JGE/JGI/
+    # RIC/AGI above.
+    "SALAM": "Salaam Takaful",
     # NOTE: "UBL" is deliberately NOT mapped to "United Bank" here (it used
     # to be). UBL Insurers and United Insurance Company are two different
     # real companies - but mapping "UBL" -> "United Bank" made
