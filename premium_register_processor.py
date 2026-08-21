@@ -101,6 +101,29 @@ LEADER_FILE_ALIASES = {
         # variant is included below, not just the tidier-looking ones.
         "policy/pmd #", "policy /pmd#", "policy/pmd#", "policy /pmd #",
         "policy pmd #", "policy/pmd number", "pmd #",
+        # "Documents" - confirmed real header on another leader's own
+        # Premium Payable sheet (Jubilee General Insurance's own
+        # "Coinsurance Settlement with IGI Insurance Ltd" workbook,
+        # Sheet1) - this is that leader's own per-transaction reference
+        # number for a specific premium item (e.g.
+        # "2023-07-104-E02001OP0000127"), sitting alongside a second,
+        # related "Base Documents #" column (the original/base policy an
+        # endorsement stems from - not aliased here, since "Documents"
+        # alone is the right column to match on: the specific
+        # transaction reference, not the base policy it originated
+        # from). WHY THIS MATTERS: without this alias, this leader's
+        # real Premium Payable sheet (Sheet1, 202 rows) scores 0 against
+        # every alias here, while a totally different sheet in the same
+        # workbook (Sheet2, "Coinsurance Claims Recoverable", whose own
+        # "Policy /PMD#" header already matches an alias above) scores 1
+        # and wins by default - so Policy Check was silently matching
+        # against 9 usable CLAIMS rows instead of the real 202-row
+        # premium file, with no error raised at all. Confirmed against
+        # this real file: with "documents" recognized, Sheet1 now
+        # correctly outscores Sheet2 for sheet selection (tie-broken in
+        # its favor anyway, since it appears first in the workbook), and
+        # Policy Check picks up the real premium data instead.
+        "documents",
     ],
 }
 
