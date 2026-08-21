@@ -269,7 +269,23 @@ def build_reinsurance_workbook(result, opening_prepaid, output_path, run_date=No
     ws_working.freeze_panes = ws_working.cell(row=ceded_data_row, column=3).coordinate
 
     prepaid_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(rp.TABLE_COLUMNS))}{prepaid_total_row}"
-    ceded_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(rp.TABLE_COLUMNS))}{ceded_total_row}"
+    # "Premium Ceded" is business INCEPTING during the selected period
+    # only - i.e. the SUM of just Table 1's own January..December
+    # columns on its Total row, deliberately excluding the Previous
+    # column (older business from before the period, still amortizing)
+    # and the Future Policies column (business already booked for after
+    # it) - summing the WHOLE row (Table 1's own "Total" column, which is
+    # every bucket combined) would double up the period figure with
+    # however much old/future business happens to sit in the register,
+    # a different, inconsistent amount per department. Built from
+    # TABLE_COLUMNS' own layout rather than hardcoded column letters, so
+    # this stays correct if that column order is ever changed.
+    first_month_col = 3 + rp.TABLE_COLUMNS.index(rp.MONTH_NAMES[0])
+    last_month_col = 3 + rp.TABLE_COLUMNS.index(rp.MONTH_NAMES[-1])
+    premium_ceded_in_period_cell = (
+        f"SUM('{WORKING_SHEET}'!{_col_letter(first_month_col)}{ceded_total_row}:"
+        f"{_col_letter(last_month_col)}{ceded_total_row})"
+    )
 
     # ---- "Summary" ----
     ws_summary = wb.create_sheet(SUMMARY_SHEET)
@@ -282,7 +298,7 @@ def build_reinsurance_workbook(result, opening_prepaid, output_path, run_date=No
 
     r = breakdown_total_row + 3
     ws_summary.cell(row=r, column=2, value="Premium Ceded (selected period)").font = BODY_FONT
-    premium_ceded_cell = ws_summary.cell(row=r, column=3, value=f"={ceded_grand_total_cell}")
+    premium_ceded_cell = ws_summary.cell(row=r, column=3, value=f"={premium_ceded_in_period_cell}")
     premium_ceded_cell.number_format = NUM_FORMAT
     premium_ceded_cell.font = BODY_FONT
     for col in (2, 3):

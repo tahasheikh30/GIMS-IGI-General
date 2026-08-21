@@ -375,20 +375,38 @@ def build_ceded_table(bucketed_df, departments):
     return table
 
 
-def build_component_totals(clean_df, departments):
+def build_component_totals(period_df, departments):
     """
     Per-department totals of the three underlying components (Treaty /
-    Local / Foreign Premium) PLUS their combined Total Reinsurance Ceded,
-    summed across every row actually loaded (not period-scoped) - feeds
-    the Summary sheet's own breakdown table, the same kind of at-a-glance
-    "how much of this is treaty vs facultative" figure the real
-    manually-built working file shows. Returns {department: {"Treaty
-    Premium": x, "Local Premium": y, "Foreign Premium": z,
-    "Total Reinsurance Ceded": x+y+z}}.
+    Local / Foreign Premium) PLUS their combined Total Reinsurance Ceded -
+    feeds the Summary sheet's own breakdown table, the same kind of
+    at-a-glance "how much of this is treaty vs facultative" figure the
+    real manually-built working file shows.
+
+    period_df: rows ALREADY restricted to the selected 12-month period
+    (Comm Date between period_start and period_end - see
+    run_reinsurance_calculation, which is the only caller). This is
+    deliberately NOT the full multi-year clean_df: "Premium Ceded" on
+    the real Summary sheet means premium on policies incepting DURING
+    the period being reported on, not the register's entire cumulative
+    history - a department can easily carry several years of old,
+    still-amortizing business in its own register (landing in the
+    Previous bucket) plus already-booked future-dated business (the
+    Future Policies bucket), and neither belongs in this period's own
+    "Premium Ceded" figure. Summing the full, unfiltered register here
+    (an earlier version of this function did exactly that) silently
+    inflated every department's figure by however much Previous/Future
+    business happened to be sitting in ITS OWN register - a different
+    amount per department, which is exactly why a real run showed each
+    department's total off by a different, inconsistent multiple rather
+    than one uniform factor.
+
+    Returns {department: {"Treaty Premium": x, "Local Premium": y,
+    "Foreign Premium": z, "Total Reinsurance Ceded": x+y+z}}.
     """
     totals = {}
     for dept in departments:
-        sub = clean_df[clean_df["Department"] == dept]
+        sub = period_df[period_df["Department"] == dept]
         totals[dept] = {
             "Treaty Premium": float(sub["Treaty Premium"].sum()),
             "Local Premium": float(sub["Local Premium"].sum()),
@@ -417,7 +435,7 @@ def run_reinsurance_calculation(filepaths, period_year, period_month, report=Non
         "component_totals": {department: {"Treaty Premium", "Local
             Premium", "Foreign Premium", "Total Reinsurance Ceded"}},
         "closing_prepaid": float,   # grand total of prepaid_table
-        "premium_ceded": float,     # grand total of ceded_table (period-scoped)
+        "premium_ceded": float,     # period-scoped: sum of Total Reinsurance Ceded for rows whose own Comm Date falls inside the selected period (excludes Previous/Future Policies business)
         "warnings": [str, ...],
         "excluded_rows": int,
         "sheets_used": [(filename, sheet_name), ...],
@@ -448,10 +466,25 @@ def run_reinsurance_calculation(filepaths, period_year, period_month, report=Non
     ceded_table = build_ceded_table(bucketed, departments)
     prepaid_table, methods = build_unearned_table(ceded_table, departments, period_start)
     closing_prepaid = grand_total(prepaid_table, departments)
-    premium_ceded = grand_total(ceded_table, departments)
-    component_totals = build_component_totals(df, departments)
+
+    # "Premium Ceded" is business INCEPTING during the selected period
+    # only - i.e. just the Jan..Dec bucket columns of Table 1, never the
+    # Previous bucket (older business still amortizing from before the
+    # period) or the Future Policies bucket (business already booked for
+    # after it). grand_total(ceded_table, ...) sums every column
+    # including Previous/Future, which is exactly right for Table 1's
+    # own "Total" column (a genuine, complete distribution of everything
+    # loaded) but wrong for this figure - restrict to the same period
+    # window used for bucketing, on the row data directly, rather than
+    # summing a subset of Table 1's own columns (equivalent, but avoids
+    # any coupling to TABLE_COLUMNS' exact ordering).
+    period_mask = (df["Comm Date"] >= pd.Timestamp(period_start)) & (df["Comm Date"] <= pd.Timestamp(period_end))
+    period_df = df.loc[period_mask]
+    premium_ceded = float(period_df[CEDED_LABEL].sum())
+    component_totals = build_component_totals(period_df, departments)
 
     if report:
+        report(f"Premium Ceded (selected period): {premium_ceded:,.2f}")
         report(f"Closing Prepaid Reinsurance Premium Ceded: {closing_prepaid:,.2f}")
 
     return {
