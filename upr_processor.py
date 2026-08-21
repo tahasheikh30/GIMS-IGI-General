@@ -100,7 +100,7 @@ DEPARTMENT_METHOD = {
 # source export), not a "recent years only" filter, so it's kept
 # deliberately generous rather than tied to "this year".
 MIN_PLAUSIBLE_COMM_YEAR = 1990
-MAX_PLAUSIBLE_COMM_YEAR_AHEAD = 15  # years beyond today - wide enough for legitimate multi-year installment/travel schedules
+MAX_PLAUSIBLE_COMM_YEAR_AHEAD = 20  # years beyond today - wide enough for legitimate multi-year installment/travel schedules; also controls how far out the period dropdown extends (raised from 15 so the dropdown reaches 2035 instead of cutting off at 2030)
 
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
