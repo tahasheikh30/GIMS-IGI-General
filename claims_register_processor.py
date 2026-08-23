@@ -291,30 +291,52 @@ def _read_full_sheet(xls, filepath, sheet_name, report=None):
     return pd.read_excel(xls, sheet_name=sheet_name, header=None)
 
 
-def _find_continuation_sheets(xls, primary_sheet, expected_ncols, alias_lookup, max_scan=25, min_score=1):
+def _find_continuation_sheets(xls, primary_sheet, expected_ncols, alias_lookup, primary_header=None,
+                               max_scan=25, min_score=1):
     """
     Legacy .xls workbooks are capped at 65,536 rows PER SHEET - a register
     or claims file bigger than that (confirmed against a real Premium
     Register export) gets split across Sheet1/Sheet2/Sheet3/... by
-    whatever produced the file, with the real header row living ONLY on
-    the first sheet and every later sheet being a bare continuation of
-    the same table (no header row of its own, same column count). Reading
-    only the one sheet _pick_best_sheet() picks (the only one that scores
-    anything against the alias list, since it's the only one with a
-    header) silently drops every row on every later sheet - confirmed:
-    Sheet1 (65,520 rows) was being read while Sheet2/Sheet3/Sheet4
-    (65,520 + 65,520 + 7,657 = 138,697 more rows) were dropped entirely,
-    which is exactly why a Base Doc No a person could see with their own
-    eyes in the file came back "Not matched" - the row it lived on was
-    never even read.
+    whatever produced the file. TWO different real shapes of this split
+    have been confirmed, and both need to be recognized as "more rows of
+    the same table," not just one:
+      1. The header row lives ONLY on the first sheet, and every later
+         sheet is a bare continuation with no header of its own (same
+         column count). Reading only the one sheet _pick_best_sheet()
+         picks (the only one that scores anything against the alias
+         list) silently drops every row on every later sheet - confirmed:
+         Sheet1 (65,520 rows) was being read while Sheet2/Sheet3/Sheet4
+         (65,520 + 65,520 + 7,657 = 138,697 more rows) were dropped
+         entirely, with no error or warning at all.
+      2. Whatever produced the split re-wrote the SAME header row onto
+         EVERY sheet, not just the first - confirmed against a real
+         210,833-row Motor reinsurance register split across two sheets,
+         where Sheet2's own row 0 was a verbatim, position-for-position
+         repeat of Sheet1's own 60-column header. The original version of
+         this function only recognized shape 1 (score == 0) - a sheet
+         with a real, scoring header was always treated as "a genuinely
+         different table with its own header" (e.g. an unrelated
+         "List"/"Ageing"/"PIVOT" tab) and excluded - which silently
+         dropped Sheet2's entire 20,833 rows here too, just for the
+         opposite-looking reason (too MUCH of a header match, not too
+         little).
 
-    Returns an ordered list of sheet names (in workbook order, excluding
-    primary_sheet) that look like pure-data continuations of
-    primary_sheet: same raw column count, and NO row in the first
-    `max_scan` rows scores as a header against alias_lookup (a sheet that
-    DOES score is presumably a genuinely different table with its own
-    header - e.g. an unrelated "List"/"Ageing"/"PIVOT" tab - and must
-    never be merged in as if it were more rows of the same table).
+    Distinguishing "this is the same table, its header repeated" (merge
+    it, skipping past that row) from "this is a genuinely different
+    table that happens to share a few column names" (e.g. a "Detail" and
+    a "Summary" tab both having a "Class" column) can't be done from the
+    alias-match SCORE alone once a header is present at all - a
+    coincidental partial match would score >0 either way. So a scoring
+    sheet is only ever treated as a continuation if its own header row's
+    actual text is a VERBATIM match, position for position, against the
+    primary sheet's own header (primary_header) - not just close, not
+    just enough aliases recognized, but a real repeat of the same header.
+
+    Returns an ordered list of (sheet_name, header_row_to_skip) tuples,
+    in workbook order, excluding primary_sheet - header_row_to_skip is
+    None for a genuinely headerless continuation sheet (shape 1 above -
+    every row is data), or an integer row index to skip past for a
+    continuation sheet carrying its own repeated header (shape 2).
     """
     continuations = []
     for sn in xls.sheet_names:
@@ -323,9 +345,14 @@ def _find_continuation_sheets(xls, primary_sheet, expected_ncols, alias_lookup, 
         preview = pd.read_excel(xls, sheet_name=sn, header=None, nrows=max_scan)
         if preview.shape[1] != expected_ncols:
             continue
-        _, score = find_header_row(preview, alias_lookup, max_scan=max_scan, min_score=min_score, return_score=True)
+        header_row, score = find_header_row(preview, alias_lookup, max_scan=max_scan, min_score=min_score, return_score=True)
         if score == 0:
-            continuations.append(sn)
+            continuations.append((sn, None))
+            continue
+        if primary_header is not None:
+            candidate_header = [None if pd.isna(v) else str(v).strip() for v in preview.iloc[header_row].tolist()]
+            if candidate_header == primary_header:
+                continuations.append((sn, header_row))
     return continuations
 
 
@@ -335,7 +362,8 @@ def _read_full_table_with_continuations(filepath, xls, sheet_name, header_row, a
     every loader used to have), then transparently append any further
     sheets in the same workbook that look like pure continuations of it
     (see _find_continuation_sheets's docstring for why this matters) -
-    same deduped column list, no header row of their own.
+    same deduped column list, whether or not that later sheet carries its
+    own repeated copy of the header row.
 
     Returns (data_df, source_sheet_note) where source_sheet_note is a
     short string describing which sheet(s) were actually read (for
@@ -348,27 +376,37 @@ def _read_full_table_with_continuations(filepath, xls, sheet_name, header_row, a
     primary_data = raw.iloc[header_row + 1:].reset_index(drop=True)
     primary_data.columns = columns
 
-    continuation_sheets = _find_continuation_sheets(xls, sheet_name, len(columns), alias_lookup)
+    primary_header = [None if pd.isna(v) else str(v).strip() for v in raw.iloc[header_row].tolist()]
+    continuation_sheets = _find_continuation_sheets(xls, sheet_name, len(columns), alias_lookup,
+                                                     primary_header=primary_header)
 
     if not continuation_sheets:
         return primary_data.dropna(how="all").reset_index(drop=True), sheet_name
 
+    continuation_names = [sn for sn, _skip_row in continuation_sheets]
     if report:
         report(f"  Detected {len(continuation_sheets)} additional data-only sheet(s) with the same "
-               f"columns as '{sheet_name}' ({', '.join(continuation_sheets)}) - this is typical of a "
+               f"columns as '{sheet_name}' ({', '.join(continuation_names)}) - this is typical of a "
                f"legacy .xls file split across sheets at Excel's old 65,536-row-per-sheet limit. "
                f"Merging them in as more rows of the same table rather than reading '{sheet_name}' alone.")
 
     frames = [primary_data]
-    for sn in continuation_sheets:
+    for sn, skip_header_row in continuation_sheets:
         cont_raw = _read_full_sheet(xls, filepath, sn, report=report)
-        cont_data = cont_raw.reset_index(drop=True)
+        # skip_header_row is None for a genuinely headerless continuation
+        # sheet (every row is data - the original behavior); an integer
+        # row index for one carrying its own repeated header (skip past
+        # it, same as the primary sheet's own header_row + 1 above).
+        if skip_header_row is not None:
+            cont_data = cont_raw.iloc[skip_header_row + 1:].reset_index(drop=True)
+        else:
+            cont_data = cont_raw.reset_index(drop=True)
         cont_data.columns = columns
         frames.append(cont_data)
 
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.dropna(how="all").reset_index(drop=True)
-    note = f"{sheet_name} (+ {len(continuation_sheets)} continuation sheet(s): {', '.join(continuation_sheets)})"
+    note = f"{sheet_name} (+ {len(continuation_sheets)} continuation sheet(s): {', '.join(continuation_names)})"
     return combined, note
 
 
