@@ -160,6 +160,40 @@ def _pick_best_sheet(xls, max_scan=25, min_score=3):
 # directly onto another word with no separator at all.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Register "as-of" year, from the filename - separate from the department
+# keyword match above. A real department can have MORE THAN ONE register
+# file uploaded at once - a full prior calendar year's file (e.g.
+# "Bond_2025.xls") plus the CURRENT, still-open year's file (e.g.
+# "Bond_June_2026.xls") - and "Premium Ceded" (see build_component_totals's
+# own docstring below) needs to know which uploaded file(s) belong to the
+# period's own ending year, as opposed to earlier, purely-historical
+# files kept around only to seed the "Previous" bucket. This is a property
+# of the FILE (which register snapshot it is), not of any one row's own
+# Comm Date - a current-year file can and does legitimately contain a row
+# whose own Comm Date falls in the prior year (an endorsement against an
+# older policy), and that row still belongs to the current file's own
+# total.
+# ---------------------------------------------------------------------------
+_YEAR_RE = re.compile(r"(20\d{2})")
+
+
+def detect_register_year_from_filename(filepath):
+    """
+    The calendar year this register file is "as of", parsed from its own
+    filename - e.g. "Bond_2025.xls" -> 2025, "Bond_June_2026.xls" -> 2026,
+    "Eng__June_2026_v2.xls" -> 2026. If more than one 20xx-shaped year
+    appears in the name (unusual), the LAST one is used, since a trailing
+    year is far more likely to be the file's own "as of" year than an
+    earlier one that's incidentally part of some other token. Returns
+    None if no such year is found anywhere in the name.
+    """
+    matches = _YEAR_RE.findall(os.path.basename(filepath))
+    if not matches:
+        return None
+    return int(matches[-1])
+
+
 DEPARTMENT_FILENAME_KEYWORDS = {
     "Fire": ["fire"],
     "Marine": ["marine"],
@@ -241,7 +275,8 @@ def load_reinsurance_registers(filepaths, report=None):
           is simply treated as 0 for that row rather than excluding the
           whole row, since a real register can legitimately have e.g. no
           Foreign Premium on a purely local-market policy.
-      meta - {"departments_by_file": {filename: department}, "sheets_used":
+      meta - {"departments_by_file": {filename: department},
+          "register_years_by_file": {filename: year_or_None}, "sheets_used":
           [(filename, sheet_name), ...], "excluded_rows": int,
           "implausible_date_rows": int}
 
@@ -255,6 +290,7 @@ def load_reinsurance_registers(filepaths, report=None):
     frames = []
     sheets_used = []
     departments_by_file = {}
+    register_years_by_file = {}
     implausible_date_rows_total = 0
 
     for filepath in filepaths:
@@ -270,6 +306,9 @@ def load_reinsurance_registers(filepaths, report=None):
                 "somewhere in the filename (e.g. 'RI Fire 2026.xlsx', 'Eng__2025_v2.xls')."
             )
         departments_by_file[fname] = department
+
+        register_year = detect_register_year_from_filename(filepath)
+        register_years_by_file[fname] = register_year
 
         xls, resolved_filepath = _read_workbook_any_engine(filepath)
         sheet_name, header_row = _pick_best_sheet(xls)
@@ -300,6 +339,7 @@ def load_reinsurance_registers(filepaths, report=None):
         sub = data[list(keep_cols.keys())].rename(columns=keep_cols).copy()
         sub["Department"] = department
         sub["Source File"] = fname
+        sub["Register Year"] = register_year
         frames.append(sub)
 
     df = pd.concat(frames, ignore_index=True, sort=False)
@@ -321,6 +361,7 @@ def load_reinsurance_registers(filepaths, report=None):
 
     meta = {
         "departments_by_file": departments_by_file,
+        "register_years_by_file": register_years_by_file,
         "sheets_used": sheets_used,
         "excluded_rows": excluded_rows,
         "implausible_date_rows": implausible_date_rows_total,
@@ -345,8 +386,8 @@ compute_period_bounds = up.compute_period_bounds
 validate_coverage = up.validate_coverage
 assign_buckets = up.assign_buckets
 resolve_department_list = up.resolve_department_list
-build_unearned_table = up.build_unearned_table  # produces the *Prepaid* (still-unamortized) table
 row_total = up.row_total
+build_unearned_table = up.build_unearned_table  # produces the *Prepaid* (still-unamortized) table - Travel uses UPR's own 1/6 method here too (same as Marine), only BIMA is 0
 column_totals = up.column_totals
 grand_total = up.grand_total
 TABLE_COLUMNS = up.TABLE_COLUMNS
@@ -375,38 +416,47 @@ def build_ceded_table(bucketed_df, departments):
     return table
 
 
-def build_component_totals(period_df, departments):
+def build_component_totals(current_year_df, departments):
     """
     Per-department totals of the three underlying components (Treaty /
     Local / Foreign Premium) PLUS their combined Total Reinsurance Ceded -
-    feeds the Summary sheet's own breakdown table, the same kind of
-    at-a-glance "how much of this is treaty vs facultative" figure the
-    real manually-built working file shows.
+    feeds the Summary sheet's own breakdown table AND is what "Premium
+    Ceded" itself is (see run_reinsurance_calculation - premium_ceded is
+    just the grand total of this same table).
 
-    period_df: rows ALREADY restricted to the selected 12-month period
-    (Comm Date between period_start and period_end - see
-    run_reinsurance_calculation, which is the only caller). This is
-    deliberately NOT the full multi-year clean_df: "Premium Ceded" on
-    the real Summary sheet means premium on policies incepting DURING
-    the period being reported on, not the register's entire cumulative
-    history - a department can easily carry several years of old,
-    still-amortizing business in its own register (landing in the
-    Previous bucket) plus already-booked future-dated business (the
-    Future Policies bucket), and neither belongs in this period's own
-    "Premium Ceded" figure. Summing the full, unfiltered register here
-    (an earlier version of this function did exactly that) silently
-    inflated every department's figure by however much Previous/Future
-    business happened to be sitting in ITS OWN register - a different
-    amount per department, which is exactly why a real run showed each
-    department's total off by a different, inconsistent multiple rather
-    than one uniform factor.
+    current_year_df: rows already restricted to whichever uploaded
+    register file(s) are "as of" the selected period's own ENDING year
+    (register_years_by_file / detect_register_year_from_filename - see
+    run_reinsurance_calculation, which is the only caller) - i.e. every
+    row from that file, taken WHOLE, with no further Comm Date filtering
+    of any kind.
+
+    THIS IS NOT A COMM-DATE FILTER, AND THAT'S DELIBERATE. "Premium Ceded"
+    means the reinsurance premium recorded on the department's own CURRENT
+    register (the file that's still open/being maintained as of the
+    report date) - confirmed directly against a real reconciliation: a
+    row can legitimately sit inside the current-year file with a Comm
+    Date from the PRIOR year (an endorsement against an older policy,
+    dated whenever that endorsement itself was raised) and it still
+    belongs in Premium Ceded, exactly as recorded in that file - while a
+    row with a 2026 Comm Date that happens to live in the OLDER,
+    already-closed prior-year file must NOT be pulled in, because that
+    file is only kept for the "Previous" bucket's own amortization
+    history, not as a second, overlapping source of current premium.
+    Filtering by Comm Date range instead of by source file (an earlier
+    version of this function did exactly that) silently mixed exactly
+    that: it pulled in stray in-period rows from the prior-year file
+    while missing out-of-period rows genuinely recorded in the current
+    file, and the two errors didn't cancel out - confirmed against a real
+    reconciliation where every department came out understated by a
+    different, inconsistent amount.
 
     Returns {department: {"Treaty Premium": x, "Local Premium": y,
     "Foreign Premium": z, "Total Reinsurance Ceded": x+y+z}}.
     """
     totals = {}
     for dept in departments:
-        sub = period_df[period_df["Department"] == dept]
+        sub = current_year_df[current_year_df["Department"] == dept]
         totals[dept] = {
             "Treaty Premium": float(sub["Treaty Premium"].sum()),
             "Local Premium": float(sub["Local Premium"].sum()),
@@ -435,11 +485,12 @@ def run_reinsurance_calculation(filepaths, period_year, period_month, report=Non
         "component_totals": {department: {"Treaty Premium", "Local
             Premium", "Foreign Premium", "Total Reinsurance Ceded"}},
         "closing_prepaid": float,   # grand total of prepaid_table
-        "premium_ceded": float,     # period-scoped: sum of Total Reinsurance Ceded for rows whose own Comm Date falls inside the selected period (excludes Previous/Future Policies business)
+        "premium_ceded": float,     # grand total of component_totals - see build_component_totals's own docstring for exactly what this does and doesn't include
         "warnings": [str, ...],
         "excluded_rows": int,
         "sheets_used": [(filename, sheet_name), ...],
         "departments_by_file": {filename: department},
+        "register_years_by_file": {filename: year_or_None},
       }
     Raises ReinsuranceError with a clear, user-facing message if the
     file(s) can't be read, are missing a required column, a department
@@ -467,24 +518,33 @@ def run_reinsurance_calculation(filepaths, period_year, period_month, report=Non
     prepaid_table, methods = build_unearned_table(ceded_table, departments, period_start)
     closing_prepaid = grand_total(prepaid_table, departments)
 
-    # "Premium Ceded" is business INCEPTING during the selected period
-    # only - i.e. just the Jan..Dec bucket columns of Table 1, never the
-    # Previous bucket (older business still amortizing from before the
-    # period) or the Future Policies bucket (business already booked for
-    # after it). grand_total(ceded_table, ...) sums every column
-    # including Previous/Future, which is exactly right for Table 1's
-    # own "Total" column (a genuine, complete distribution of everything
-    # loaded) but wrong for this figure - restrict to the same period
-    # window used for bucketing, on the row data directly, rather than
-    # summing a subset of Table 1's own columns (equivalent, but avoids
-    # any coupling to TABLE_COLUMNS' exact ordering).
-    period_mask = (df["Comm Date"] >= pd.Timestamp(period_start)) & (df["Comm Date"] <= pd.Timestamp(period_end))
-    period_df = df.loc[period_mask]
-    premium_ceded = float(period_df[CEDED_LABEL].sum())
-    component_totals = build_component_totals(period_df, departments)
+    # "Premium Ceded" = every row belonging to whichever uploaded
+    # register file(s) are "as of" the period's own ENDING year (e.g. for
+    # a Jul-2025..Jun-2026 period, the "*_June_2026" file) - taken WHOLE,
+    # not filtered by each row's own Comm Date. See
+    # build_component_totals's own docstring for the full rationale and
+    # the real reconciliation this was verified against; a Comm-Date
+    # range filter (this function's own earlier approach) looks
+    # superficially similar but is a different, wrong quantity - it
+    # double-dips into the prior-year file's own in-period rows while
+    # missing out-of-period rows the current file legitimately carries
+    # (e.g. an endorsement dated in the prior year against a policy the
+    # current file is otherwise tracking).
+    current_year = period_end.year
+    current_year_mask = df["Register Year"] == current_year
+    current_year_df = df.loc[current_year_mask]
+    if len(current_year_df) == 0:
+        dept_warnings = dept_warnings + [
+            f"No uploaded register file was detected as belonging to {current_year} (the selected "
+            f"period's own ending year) - Premium Ceded and the Treaty/FAC/Foreign FAC breakdown will "
+            f"show as 0. Make sure the current year's own register file(s) are uploaded alongside any "
+            f"prior-year file(s)."
+        ]
+    component_totals = build_component_totals(current_year_df, departments)
+    premium_ceded = sum(t[CEDED_LABEL] for t in component_totals.values())
 
     if report:
-        report(f"Premium Ceded (selected period): {premium_ceded:,.2f}")
+        report(f"Premium Ceded ({current_year} register file(s)): {premium_ceded:,.2f}")
         report(f"Closing Prepaid Reinsurance Premium Ceded: {closing_prepaid:,.2f}")
 
     return {
@@ -501,6 +561,7 @@ def run_reinsurance_calculation(filepaths, period_year, period_month, report=Non
         "excluded_rows": meta["excluded_rows"],
         "sheets_used": meta["sheets_used"],
         "departments_by_file": meta["departments_by_file"],
+        "register_years_by_file": meta["register_years_by_file"],
     }
 
 
