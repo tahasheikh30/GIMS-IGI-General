@@ -37,7 +37,7 @@ DEFAULT_BCC = ";".join(DEFAULT_BCC_RECIPIENTS)
 DEFAULT_CC_RECIPIENTS = [
     "kashif.qayyum@IGI.COM.PK",
     "abdul.rauf@IGI.COM.PK",
-    "shakir.ali@IGI.COM.PK",
+    "adeel.ahmad@IGI.COM.PK",
     "sabeen.nomani@IGI.COM.PK",
     "jahanzaib.khan@IGI.COM.PK",
     "zahid.mehmood@IGI.COM.PK",
@@ -76,7 +76,7 @@ SABEEN_EMAIL = "sabeen.nomani@IGI.COM.PK"
 # Nomani (both Karachi Region) - named in this module's own body template
 # right under Rauf so a coinsurer working with the Islamabad desk has a
 # direct contact rather than defaulting to a Karachi-based one.
-SHAKIR_EMAIL = "shakir.ali@IGI.COM.PK"
+ADEEL_EMAIL = "adeel.ahmad@IGI.COM.PK"
 # Lahore Region point of contact, named in this module's own body template
 # so recipients outside Karachi/Islamabad have a Lahore-based contact to
 # coordinate with directly.
@@ -139,7 +139,7 @@ def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup
             period_text=period_text,
             signature=signature,
             abdul_rauf_email=ABDUL_RAUF_EMAIL,
-            shakir_email=SHAKIR_EMAIL,
+            adeel_email=ADEEL_EMAIL,
             sabeen_email=SABEEN_EMAIL,
             jahanzaib_email=JAHANZAIB_EMAIL,
         )
