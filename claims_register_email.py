@@ -43,6 +43,7 @@ DEFAULT_CC_RECIPIENTS = [
     "Haider.Ali@IGI.COM.PK",
     "nadeem.alvi@IGI.COM.PK",
     "Muhammad.Nadeem@IGI.COM.PK",
+    "adeel.ahmad@IGI.COM.PK",
 ]
 DEFAULT_CC = ";".join(DEFAULT_CC_RECIPIENTS)
 
