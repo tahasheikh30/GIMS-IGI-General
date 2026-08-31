@@ -72,6 +72,18 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 NEW_COLUMNS = ["IGI Policy Number", "Matched Leader Ref (Register)", "Match Score", "Match Status"]
 
+# "Premium Payable" is an OPTIONAL fifth added column - only present in
+# result_df when the person used an Outstanding Premium file (rather
+# than a plain Premium Register) as the register input and it actually
+# had a Premium Payable column to pull through (see
+# premium_register_processor.match_leader_file's own premium_payable_col
+# parameter, and app.py's "Register file type" radio button). Kept as
+# its own separate constant rather than folded into NEW_COLUMNS above -
+# NEW_COLUMNS is also used elsewhere as "exactly these 4 columns always
+# exist"-style shorthand, which is no longer true once this one is
+# conditional.
+OPTIONAL_NEW_COLUMNS = NEW_COLUMNS + ["Premium Payable"]
+
 
 def _write_text_safe(cell):
     """
@@ -180,13 +192,15 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
                 number_format = "DD-MMM-YYYY"
             elif col == "Match Score":
                 number_format = "0.000"
+            elif col == "Premium Payable":
+                number_format = "#,##0;(#,##0);-"
             # The unmatched-row highlight is functional information (it's
             # what flags a row for manual entry), never skipped regardless
             # of file size.
             if is_unmatched:
                 style_cache.apply(cell, font=UNMATCHED_FONT, border=BORDER, fill=UNMATCHED_FILL, number_format=number_format)
             else:
-                fill = MATCHED_NEW_COL_FILL if col in NEW_COLUMNS else None
+                fill = MATCHED_NEW_COL_FILL if col in OPTIONAL_NEW_COLUMNS else None
                 style_cache.apply(cell, font=BODY_FONT, border=BORDER, fill=fill, number_format=number_format)
         if progress:
             progress.maybe(i - 1)
@@ -195,7 +209,7 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
         progress.final()
 
     for j, col in enumerate(columns, start=1):
-        width = 26 if col in NEW_COLUMNS else max(12, min(30, len(str(col)) + 4))
+        width = 26 if col in OPTIONAL_NEW_COLUMNS else max(12, min(30, len(str(col)) + 4))
         ws.column_dimensions[get_column_letter(j)].width = width
 
     # Small summary note below the table

@@ -2442,6 +2442,34 @@ class BalanceApp(tk.Tk):
 
         # --- Section 1: Input files ---
         s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
+
+        # Register file type - "Premium Register" (the original, plain
+        # export) or "Outstanding Premium File" (IGI's own "Co Insurance
+        # Outstanding Position" export, e.g. a "Co_Insurance_<date>.xlsx"
+        # workbook's "Detail" sheet). Both are accepted and matched
+        # identically either way (this only ever changes what's PULLED
+        # THROUGH into the output, never how matching itself works) -
+        # picking "Outstanding Premium File" additionally looks up that
+        # file's own "Premium Payable" column and carries it into the
+        # match output as an extra column, since that figure only exists
+        # on this file shape, never on a plain Premium Register.
+        filetype_row = ttk.Frame(s1)
+        filetype_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(filetype_row, text="Register file type:", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0, 14))
+        self.premreg_file_type_var = tk.StringVar(value="premium_register")
+        ttk.Radiobutton(filetype_row, text="Premium Register", variable=self.premreg_file_type_var,
+                         value="premium_register").pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(filetype_row, text="Outstanding Premium File", variable=self.premreg_file_type_var,
+                         value="outstanding_premium").pack(side="left")
+        premreg_filetype_note = ttk.Label(
+            s1, text="Choose \"Outstanding Premium File\" if the register you're matching against is the "
+                      "Co-Insurance Outstanding Position export (e.g. its own \"Detail\" sheet) rather than a "
+                      "plain Premium Register - the match output then also includes that file's own \"Premium "
+                      "Payable\" amount for each matched row.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        premreg_filetype_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(premreg_filetype_note, s1, side_padding=10)
+
         premreg_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
                             "the file has banner/title rows above it. If a file has several sheets (e.g. a "
                             "co-insurance leader's own settlement workbook, with separate tabs for Premium "
@@ -2464,8 +2492,9 @@ class BalanceApp(tk.Tk):
                                 bg=self.COLOR_ACCENT).pack(side="left")
 
         register_row = self._premreg_file_row(
-            s1, "IGI Premium Register",
-            "Our own register \u2014 carries the leader's reference (Leader#) alongside our IGI Policy Number (Doc Ref #).",
+            s1, "IGI Premium Register / Outstanding Premium File",
+            "Our own register or Outstanding Premium export \u2014 carries the leader's reference (Leader#) "
+            "alongside our IGI Policy Number (Doc Ref #), whichever file type is selected above.",
         )
         self.premreg_register_icon, self.premreg_register_name_var = register_row[0], register_row[1]
         self._make_pill_button(register_row[2], "Browse...", self._browse_premreg_register_file,
@@ -2568,20 +2597,36 @@ class BalanceApp(tk.Tk):
 
         leader_file = self.premreg_leader_file
         register_file = self.premreg_register_file
+        # Read on the main thread, same rule as every other Tkinter
+        # variable this worker closure captures - Tkinter widgets/vars
+        # must never be queried from a background thread.
+        register_file_type = self.premreg_file_type_var.get()
 
         def worker(report):
             report("Loading leader file...")
             leader_df, nums_col = prp.load_leader_file(leader_file)
             report(f"  {len(leader_df):,} row(s) loaded. Policy-number column detected as '{nums_col}'.")
 
-            report("Loading IGI Premium Register...")
+            report("Loading IGI Premium Register..." if register_file_type == "premium_register"
+                   else "Loading Outstanding Premium file...")
             register_df, leader_ref_col, igi_policy_col = prp.load_register_file(register_file)
             report(f"  {len(register_df):,} row(s) loaded. Leader Ref column='{leader_ref_col}', "
                    f"IGI Policy Number column='{igi_policy_col}'.")
 
+            premium_payable_col = None
+            if register_file_type == "outstanding_premium":
+                premium_payable_col = prp.find_premium_payable_column(register_df)
+                if premium_payable_col:
+                    report(f"  Outstanding Premium file selected - found a 'Premium Payable' column "
+                           f"('{premium_payable_col}'); it will be pulled into the output for every matched row.")
+                else:
+                    report("  WARNING: \"Outstanding Premium File\" was selected, but no 'Premium Payable' "
+                           "column was found in this file - continuing without it.")
+
             report(f"\nMatching {len(leader_df):,} leader row(s) against {len(register_df):,} register row(s)...")
             report.progress(0, len(leader_df), text=f"Matching 0 / {len(leader_df):,} leader row(s)")
-            result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col, report=report)
+            result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col,
+                                            report=report, premium_payable_col=premium_payable_col)
             return result
 
         def on_done(result):

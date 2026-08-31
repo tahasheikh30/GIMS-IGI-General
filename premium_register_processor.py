@@ -150,6 +150,50 @@ REGISTER_ALIASES = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# "Premium Payable" lookup - for the OUTSTANDING PREMIUM file variant of
+# the "register" input (e.g. IGI's own "Co Insurance Outstanding
+# Position" export, Detail sheet - confirmed real header "Premium
+# Payable"), as opposed to a plain Premium Register export, which has no
+# such column at all. The GUI's own "Register file type" radio button
+# (Premium Register / Outstanding Premium File) decides whether this is
+# looked up and pulled through into the match output as an extra column
+# - see app.py's _run_premium_register_match and
+# match_leader_file's own premium_payable_col parameter below.
+#
+# Deliberately kept as its own small, separate alias list rather than
+# folded into REGISTER_ALIASES: REGISTER_ALIASES feeds _pick_best_sheet's
+# own header-scoring (which sheet "looks like" the real register/
+# outstanding-premium data), and this column has no role in MATCHING at
+# all - it's purely an extra value pulled from whichever row a match
+# already landed on. Keeping it separate means turning "Outstanding
+# Premium File" mode on/off can never change which sheet gets picked or
+# how matching itself behaves, only whether this one extra column shows
+# up in the output.
+# ---------------------------------------------------------------------------
+PREMIUM_PAYABLE_ALIASES = ["premium payable", "premium payable amount"]
+
+
+def find_premium_payable_column(df):
+    """
+    Best-effort lookup of a 'Premium Payable' column in an Outstanding
+    Premium (Co-Insurance Outstanding Position) file - e.g. a real
+    "Co_Insurance_<date>.xlsx" export's own "Detail" sheet, confirmed
+    real header text "Premium Payable" - as opposed to a plain Premium
+    Register export, which doesn't carry this column at all.
+
+    Returns the ORIGINAL column name if found, else None - callers
+    should treat None as "this file doesn't have a Premium Payable
+    column" (e.g. someone picked "Outstanding Premium File" but actually
+    browsed to a plain register) and continue without it rather than
+    raising, since Premium Payable is an enhancement to the output, not
+    a column matching itself depends on.
+    """
+    for col in df.columns:
+        if _normalize_header(col) in PREMIUM_PAYABLE_ALIASES:
+            return col
+    return None
+
 
 def _normalize_header(header):
     h = str(header)
@@ -895,12 +939,15 @@ MIN_ALPHA_RATIO = 0.7
 
 
 def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, leader_ref_series=None, igi_policy_series=None,
-              register_digits_series=None, register_alpha_series=None):
+              register_digits_series=None, register_alpha_series=None, premium_payable_series=None):
     """
     Try to match a single leader policy number against the register.
     Returns a dict: {"igi_policy_number", "matched_leader_ref", "score",
     "status"} where status is "Matched" or "Not Matched" (igi_policy_number
-    is None when not matched).
+    is None when not matched). If premium_payable_series is given, the
+    dict also carries a "premium_payable" key (that matched row's own
+    Premium Payable value, or None if not matched) - see
+    match_leader_file's own premium_payable_col parameter.
 
     leader_ref_series / igi_policy_series: optional precomputed
     register_df[leader_ref_col] / register_df[igi_policy_col] Series (see
@@ -913,6 +960,12 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
     register_df[leader_ref_col].map(_alpha_only) Series (see
     match_leader_file) - built on the fly if not supplied. Used for the
     branch/class-code safeguard - see MIN_ALPHA_RATIO's own docstring.
+    premium_payable_series: optional precomputed register_df[premium_payable_col]
+    Series - only present at all when the person selected "Outstanding
+    Premium File" as the register file type AND that column was actually
+    found in it (see find_premium_payable_column). None (the default)
+    means this run isn't carrying Premium Payable through at all, in
+    which case the returned dict has no "premium_payable" key.
 
     PERFORMANCE (verified via cProfile against a real-shaped 200,000-row
     register / 15,000-row leader file):
@@ -1000,21 +1053,40 @@ def match_one(nums_value, register_df, leader_ref_col, igi_policy_col, index, le
         and best_alpha_ratio >= MIN_ALPHA_RATIO
     )
     if accepted:
-        return {
+        result = {
             "igi_policy_number": igi_policy_series.at[best_idx],
             "matched_leader_ref": leader_ref_series.at[best_idx],
             "score": round(best_ratio, 3),
             "status": "Matched",
         }
-    return {"igi_policy_number": None, "matched_leader_ref": None, "score": round(best_ratio, 3), "status": "Not Matched"}
+        if premium_payable_series is not None:
+            result["premium_payable"] = premium_payable_series.at[best_idx]
+        return result
+    result = {"igi_policy_number": None, "matched_leader_ref": None, "score": round(best_ratio, 3), "status": "Not Matched"}
+    if premium_payable_series is not None:
+        result["premium_payable"] = None
+    return result
 
 
-def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col, report=None):
+def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col, report=None,
+                       premium_payable_col=None):
     """
     Match every row of leader_df against register_df. Returns a NEW
     dataframe = leader_df (all original columns, untouched) plus four
     added columns: "IGI Policy Number", "Matched Leader Ref (Register)",
-    "Match Score", "Match Status".
+    "Match Score", "Match Status" - and, when premium_payable_col is
+    given, a fifth added column "Premium Payable" (that matched row's
+    own Premium Payable value from the register, blank for an unmatched
+    row).
+
+    premium_payable_col: the ORIGINAL column name in register_df holding
+        Premium Payable (see find_premium_payable_column) - only ever
+        passed when the person is using an Outstanding Premium file as
+        the register input (see app.py's "Register file type" radio
+        button) rather than a plain Premium Register, which has no such
+        column. Leave as None (the default) to get the original 4-column
+        output unchanged - this is purely additive and never affects
+        matching itself.
 
     report: optional callable(str) - if it's a perf_utils.Reporter (i.e.
         came from perf_utils.run_in_background), row-level matching
@@ -1033,6 +1105,7 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
     igi_policy_series = register_df[igi_policy_col]
     register_digits_series = leader_ref_series.astype(str).map(_digits_only)
     register_alpha_series = leader_ref_series.astype(str).map(_alpha_only)
+    premium_payable_series = register_df[premium_payable_col] if premium_payable_col else None
 
     try:
         from perf_utils import RowProgress
@@ -1041,14 +1114,18 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
         progress = None
 
     igi_numbers, matched_refs, scores, statuses = [], [], [], []
+    premium_payables = [] if premium_payable_col else None
     for i, val in enumerate(leader_df[nums_col], start=1):
         result = match_one(val, register_df, leader_ref_col, igi_policy_col, index,
                             leader_ref_series=leader_ref_series, igi_policy_series=igi_policy_series,
-                            register_digits_series=register_digits_series, register_alpha_series=register_alpha_series)
+                            register_digits_series=register_digits_series, register_alpha_series=register_alpha_series,
+                            premium_payable_series=premium_payable_series)
         igi_numbers.append(result["igi_policy_number"])
         matched_refs.append(result["matched_leader_ref"])
         scores.append(result["score"])
         statuses.append(result["status"])
+        if premium_payable_col:
+            premium_payables.append(result.get("premium_payable"))
         if progress:
             progress.maybe(i)
     if progress:
@@ -1062,6 +1139,8 @@ def match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_poli
     out["Matched Leader Ref (Register)"] = matched_refs
     out["Match Score"] = scores
     out["Match Status"] = statuses
+    if premium_payable_col:
+        out["Premium Payable"] = premium_payables
     return out
 
 
