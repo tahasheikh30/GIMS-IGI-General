@@ -2643,9 +2643,16 @@ class BalanceApp(tk.Tk):
             self.status_var.set(f"Premium Register: matched {matched}/{total} ({pct:.1%}).")
 
             default_name = prg.build_output_filename(leader_file)
-            default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Premium Register"))
+            # Own base folder ("Policy Check"), deliberately distinct from
+            # the Coinsurance > Premium > Premium Register (company split)
+            # module's own base folder ("Premium Register") - both used to
+            # default to the identical "Premium Register" folder name,
+            # which meant every run of either module wrote into the same
+            # shared folder, with no way to tell which module a given
+            # dated/timed subfolder underneath it had come from.
+            default_dir = self._new_run_folder(os.path.join(os.getcwd(), "Policy Check"))
             output_path = filedialog.asksaveasfilename(
-                title="Save Premium Register Match Results As",
+                title="Save Policy Check Match Results As",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
                 initialdir=default_dir,
