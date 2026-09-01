@@ -2462,13 +2462,12 @@ class BalanceApp(tk.Tk):
         ttk.Radiobutton(filetype_row, text="Outstanding Premium File", variable=self.premreg_file_type_var,
                          value="outstanding_premium").pack(side="left")
         premreg_filetype_note = ttk.Label(
-            s1, text="Choose \"Outstanding Premium File\" if the register you're matching against is the "
-                      "Co-Insurance Outstanding Position export (e.g. its own \"Detail\" sheet) rather than a "
-                      "plain Premium Register - the match output then also includes that file's own \"Premium "
-                      "Payable\" amount for each matched row.",
+            s1, text="",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premreg_filetype_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(premreg_filetype_note, s1, side_padding=10)
+        self.premreg_filetype_note_var = tk.StringVar()
+        premreg_filetype_note.configure(textvariable=self.premreg_filetype_note_var)
 
         premreg_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
                             "the file has banner/title rows above it. If a file has several sheets (e.g. a "
@@ -2483,22 +2482,23 @@ class BalanceApp(tk.Tk):
         premreg_s1_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(premreg_s1_note, s1, side_padding=10)
 
-        leader_row = self._premreg_file_row(
-            s1, "Leader's Policy File",
-            "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched against our Leader Ref Number. Auto-detects the \"Premium Payable\" sheet if the file has multiple tabs.",
-        )
-        self.premreg_leader_icon, self.premreg_leader_name_var = leader_row[0], leader_row[1]
-        self._make_pill_button(leader_row[2], "Browse...", self._browse_premreg_leader_file,
+        leader_row = self._premreg_file_row(s1, "Leader's Policy File", "")
+        (self.premreg_leader_icon, self.premreg_leader_name_var, leader_btn_col,
+         self.premreg_leader_title_var, self.premreg_leader_subtitle_var) = leader_row
+        self._make_pill_button(leader_btn_col, "Browse...", self._browse_premreg_leader_file,
                                 bg=self.COLOR_ACCENT).pack(side="left")
 
-        register_row = self._premreg_file_row(
-            s1, "IGI Premium Register / Outstanding Premium File",
-            "Our own register or Outstanding Premium export \u2014 carries the leader's reference (Leader#) "
-            "alongside our IGI Policy Number (Doc Ref #), whichever file type is selected above.",
-        )
-        self.premreg_register_icon, self.premreg_register_name_var = register_row[0], register_row[1]
-        self._make_pill_button(register_row[2], "Browse...", self._browse_premreg_register_file,
+        register_row = self._premreg_file_row(s1, "", "")
+        (self.premreg_register_icon, self.premreg_register_name_var, register_btn_col,
+         self.premreg_register_title_var, self.premreg_register_subtitle_var) = register_row
+        self._make_pill_button(register_btn_col, "Browse...", self._browse_premreg_register_file,
                                 bg=self.COLOR_ACCENT).pack(side="left")
+
+        # Fills in the filetype note + both card titles/subtitles for
+        # whichever mode is currently selected, and re-runs automatically
+        # whenever the radio button changes - see _update_premreg_file_hints.
+        self.premreg_file_type_var.trace_add("write", lambda *a: self._update_premreg_file_hints())
+        self._update_premreg_file_hints()
 
         # --- Section 2: Run matching ---
         s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
@@ -2525,7 +2525,14 @@ class BalanceApp(tk.Tk):
 
     def _premreg_file_row(self, parent, title, subtitle):
         """One file-picker card, matching the Loss Ratio Individual-mode
-        card style. Returns (icon_label, name_var, button_holder_frame)."""
+        card style. Returns (icon_label, name_var, button_holder_frame,
+        title_var, subtitle_var) - title_var/subtitle_var are tk.StringVars
+        so a caller can swap the card's own title/description text later
+        (e.g. Policy Check's own leader/register cards update their text
+        depending on the "Register file type" radio button - see
+        _update_premreg_file_hints), without needing to know the label
+        widgets themselves. Existing callers that only ever use
+        row[0]/row[1]/row[2] are unaffected by these extra elements."""
         card = tk.Frame(parent, bg=self.COLOR_PANEL_ALT,
                          highlightbackground=self.COLOR_BORDER, highlightthickness=1)
         card.pack(fill="x", pady=(0, 10))
@@ -2538,19 +2545,75 @@ class BalanceApp(tk.Tk):
 
         text_col = tk.Frame(inner, bg=self.COLOR_PANEL_ALT)
         text_col.pack(side="left", fill="x", expand=True)
-        tk.Label(text_col, text=title, font=("Segoe UI", 10, "bold"),
+        title_var = tk.StringVar(value=title)
+        tk.Label(text_col, textvariable=title_var, font=("Segoe UI", 10, "bold"),
                  bg=self.COLOR_PANEL_ALT, fg=self.COLOR_TEXT, anchor="w").pack(fill="x", anchor="w")
         name_var = tk.StringVar(value="No file selected")
         tk.Label(text_col, textvariable=name_var, font=("Segoe UI", 9),
                  bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED, anchor="w",
                  wraplength=420, justify="left").pack(fill="x", anchor="w")
-        tk.Label(text_col, text=subtitle, font=("Segoe UI", 8),
+        subtitle_var = tk.StringVar(value=subtitle)
+        tk.Label(text_col, textvariable=subtitle_var, font=("Segoe UI", 8),
                  bg=self.COLOR_PANEL_ALT, fg=self.COLOR_MUTED, anchor="w",
                  wraplength=420, justify="left").pack(fill="x", anchor="w", pady=(2, 0))
 
         btn_col = tk.Frame(inner, bg=self.COLOR_PANEL_ALT)
         btn_col.pack(side="right", padx=(14, 0))
-        return icon, name_var, btn_col
+        return icon, name_var, btn_col, title_var, subtitle_var
+
+    def _update_premreg_file_hints(self):
+        """
+        Keeps Policy Check's own filetype note and both file cards
+        (Leader's Policy File / register card) in sync with whichever
+        "Register file type" radio button is currently selected -
+        called once at build time and again every time that variable
+        changes (see the trace_add wired up right after both cards are
+        created). Nothing about matching itself depends on this; it's
+        purely so the two upload areas always describe what they
+        actually expect and what the run will actually do, instead of
+        one fixed, one-size-fits-all description that doesn't change
+        when the person switches modes.
+        """
+        mode = self.premreg_file_type_var.get()
+        if mode == "outstanding_premium":
+            self.premreg_filetype_note_var.set(
+                "Outstanding Premium File selected: the second file below should be IGI's own Co-Insurance "
+                "Outstanding Position export (e.g. a \"Co_Insurance_<date>.xlsx\" workbook's own \"Detail\" "
+                "sheet) rather than a plain Premium Register. The match output then also includes that file's "
+                "own \"Premium Payable\" and \"Total Payable\" amounts for each matched row - Total Payable is "
+                "included alongside Premium Payable since on some files the real outstanding balance sits "
+                "under Claims/Commission Payable rather than Premium Payable alone."
+            )
+            self.premreg_leader_title_var.set("Leader's Policy File")
+            self.premreg_leader_subtitle_var.set(
+                "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched "
+                "against the Outstanding Premium file's own \"Leader Ref. No\" column, below. Auto-detects the "
+                "\"Premium Payable\" sheet if the file has multiple tabs."
+            )
+            self.premreg_register_title_var.set("Outstanding Premium File")
+            self.premreg_register_subtitle_var.set(
+                "IGI's own Co-Insurance Outstanding Position export (e.g. its \"Detail\" sheet) \u2014 carries the "
+                "leader's own reference (\"Leader Ref. No\") alongside our IGI Policy Number (\"Document No.\"), "
+                "plus \"Premium Payable\" and \"Total Payable\", both pulled into the output for every matched row."
+            )
+        else:
+            self.premreg_filetype_note_var.set(
+                "Premium Register selected (default): the second file below should be a plain Premium Register "
+                "export - no Premium Payable/Total Payable figures exist on that file shape, so the output "
+                "stays the original 4 added columns. Switch to \"Outstanding Premium File\" above if you're "
+                "matching against the Co-Insurance Outstanding Position export instead."
+            )
+            self.premreg_leader_title_var.set("Leader's Policy File")
+            self.premreg_leader_subtitle_var.set(
+                "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched "
+                "against our Leader Ref Number. Auto-detects the \"Premium Payable\" sheet if the file has "
+                "multiple tabs."
+            )
+            self.premreg_register_title_var.set("IGI Premium Register")
+            self.premreg_register_subtitle_var.set(
+                "Our own register \u2014 carries the leader's reference (Leader#) alongside our IGI Policy Number "
+                "(Doc Ref #)."
+            )
 
     def _browse_premreg_leader_file(self):
         path = filedialog.askopenfilename(filetypes=[
@@ -2614,19 +2677,30 @@ class BalanceApp(tk.Tk):
                    f"IGI Policy Number column='{igi_policy_col}'.")
 
             premium_payable_col = None
+            total_payable_col = None
             if register_file_type == "outstanding_premium":
                 premium_payable_col = prp.find_premium_payable_column(register_df)
+                total_payable_col = prp.find_total_payable_column(register_df)
                 if premium_payable_col:
                     report(f"  Outstanding Premium file selected - found a 'Premium Payable' column "
                            f"('{premium_payable_col}'); it will be pulled into the output for every matched row.")
                 else:
                     report("  WARNING: \"Outstanding Premium File\" was selected, but no 'Premium Payable' "
                            "column was found in this file - continuing without it.")
+                if total_payable_col:
+                    report(f"  Also found a 'Total Payable' column ('{total_payable_col}') - pulled into the "
+                           f"output too, since on some files the real outstanding balance sits under Claims/"
+                           f"Commission Payable rather than Premium Payable alone, and only shows up in this "
+                           f"combined figure.")
+                else:
+                    report("  WARNING: no 'Total Payable' column was found in this file either - continuing "
+                           "without it.")
 
             report(f"\nMatching {len(leader_df):,} leader row(s) against {len(register_df):,} register row(s)...")
             report.progress(0, len(leader_df), text=f"Matching 0 / {len(leader_df):,} leader row(s)")
             result = prp.match_leader_file(leader_df, nums_col, register_df, leader_ref_col, igi_policy_col,
-                                            report=report, premium_payable_col=premium_payable_col)
+                                            report=report, premium_payable_col=premium_payable_col,
+                                            total_payable_col=total_payable_col)
             return result
 
         def on_done(result):

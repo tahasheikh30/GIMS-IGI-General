@@ -82,7 +82,7 @@ NEW_COLUMNS = ["IGI Policy Number", "Matched Leader Ref (Register)", "Match Scor
 # NEW_COLUMNS is also used elsewhere as "exactly these 4 columns always
 # exist"-style shorthand, which is no longer true once this one is
 # conditional.
-OPTIONAL_NEW_COLUMNS = NEW_COLUMNS + ["Premium Payable"]
+OPTIONAL_NEW_COLUMNS = NEW_COLUMNS + ["Premium Payable", "Total Payable"]
 
 
 def _write_text_safe(cell):
@@ -192,7 +192,7 @@ def build_match_output(result_df, output_path, leader_source_filename=None, repo
                 number_format = "DD-MMM-YYYY"
             elif col == "Match Score":
                 number_format = "0.000"
-            elif col == "Premium Payable":
+            elif col == "Premium Payable" or col == "Total Payable":
                 number_format = "#,##0;(#,##0);-"
             # The unmatched-row highlight is functional information (it's
             # what flags a row for manual entry), never skipped regardless
