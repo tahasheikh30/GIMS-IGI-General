@@ -647,8 +647,17 @@ class BalanceApp(tk.Tk):
         finance_header = self._build_collapsible_menu(
             sidebar, "Finance",
             [
-                ("upr_automation", "UPR Automation"),
-                ("reinsurance_automation", "Reinsurance Automation"),
+                # "Management Accounts" nested submenu - holds the two
+                # pages that used to sit directly under "Finance" as flat
+                # leaf items, nested one level deeper. Each page's own
+                # key/wiring (upr_automation / reinsurance_automation ->
+                # their nav_pages entries) is unchanged - only where they
+                # sit in the sidebar changed, same treatment already used
+                # for Coinsurance's own "Premium"/"Claims" submenus.
+                (None, "Management Accounts", [
+                    ("upr_automation", "UPR Automation"),
+                    ("reinsurance_automation", "Reinsurance Automation"),
+                ]),
             ],
             before=coinsurance_header,
         )
