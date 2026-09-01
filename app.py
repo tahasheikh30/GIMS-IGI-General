@@ -774,12 +774,13 @@ class BalanceApp(tk.Tk):
         the same indent as a normal leaf item, and its leaf items sit in a
         further-indented, further-nested block below it.
 
-        Unlike _build_collapsible_menu, this doesn't take a `before`
-        anchor - it's built once, in order, directly into
-        `parent_container` (the parent menu's own submenu_frame), so a
-        plain pack() (append at the end) is always correct as long as
-        nothing is added to parent_container after this call for the
-        current sub_items list.
+        Built once, in order, directly into `parent_container` (the
+        parent menu's own submenu_frame) - a plain pack() (append at the
+        end) is what places this submenu's header/anchor correctly
+        relative to whatever else has already been built into
+        parent_container. But a plain pack() is NOT safe for re-showing
+        inner_block after it's been collapsed (see toggle_menu below) -
+        see anchor's own docstring for why.
         """
         header = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG, cursor="hand2")
         header.pack(fill="x")
@@ -798,8 +799,34 @@ class BalanceApp(tk.Tk):
                           bg=self.COLOR_SIDEBAR_SUBBG, fg=self.COLOR_SIDEBAR_TEXT_DIM)
         caret.pack(side="right")
 
+        # Permanent, zero-height anchor - packed once, right after the
+        # header, and never touched again. inner_block is always
+        # (re-)packed with before=anchor, so toggle_menu's else-branch
+        # (re-showing inner_block after a collapse) restores it to
+        # EXACTLY this position - immediately after its own header -
+        # regardless of what other nested submenus get built into
+        # parent_container afterward (e.g. "Claims" built right after
+        # "Premium").
+        #
+        # CONFIRMED REAL BUG this fixes: without an anchor, toggle_menu's
+        # else-branch called inner_block.pack(fill="x") with no before= -
+        # a plain pack() call always APPENDS the widget to the end of its
+        # parent's current pack order, not back into its original slot.
+        # So collapsing then re-expanding "Premium" (built first) moved
+        # its own inner_block (Policy Check / Premium Register) to the
+        # END of the Coinsurance menu's own submenu_frame - after
+        # "Claims" own header AND its inner_block - which is exactly
+        # what made Premium's items visually appear below Claims instead
+        # of directly under Premium's own header. The very first render
+        # (before anyone ever toggled anything) looked correct purely by
+        # accident, since the initial pack() calls happen to already run
+        # in top-to-bottom order - the bug only ever showed up after an
+        # actual collapse/expand interaction.
+        anchor = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG, height=1)
+        anchor.pack(fill="x")
+
         inner_block = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG)
-        inner_block.pack(fill="x")
+        inner_block.pack(fill="x", before=anchor)
         guide = tk.Frame(inner_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
         guide.place(x=37, y=2, relheight=1.0, height=-8)
 
@@ -816,7 +843,7 @@ class BalanceApp(tk.Tk):
                 inner_block.pack_forget()
                 caret.configure(text="\u25B8")
             else:
-                inner_block.pack(fill="x")
+                inner_block.pack(fill="x", before=anchor)
                 caret.configure(text="\u25BE")
 
         for w in (header, header_accent, header_inner, caret, header_label):
