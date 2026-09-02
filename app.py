@@ -2505,15 +2505,9 @@ class BalanceApp(tk.Tk):
         self.premreg_filetype_note_var = tk.StringVar()
         premreg_filetype_note.configure(textvariable=self.premreg_filetype_note_var)
 
-        premreg_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
-                            "the file has banner/title rows above it. If a file has several sheets (e.g. a "
-                            "co-insurance leader's own settlement workbook, with separate tabs for Premium "
-                            "Payable, Claim Rec, Prem Rec, monthly snapshots, etc.), the right sheet is found "
-                            "automatically \u2014 by its name first (e.g. \"Premium Payable\", regardless of exact "
-                            "spacing/punctuation), falling back to whichever sheet's own columns look like a "
-                            "policy-number file if no sheet name is a clear match. Column naming (e.g. \"NUMS\" "
-                            "vs \"Policy No.\" vs \"Leader#\") varies by company and is matched via alias lists "
-                            "in premium_register_processor.py.",
+        premreg_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls with auto-detected headers. The right sheet "
+                            "is found automatically in a multi-tab workbook, and column naming (\"NUMS\", \"Policy No.\", "
+                            "\"Leader#\", etc.) is matched automatically too.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premreg_s1_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(premreg_s1_note, s1, side_padding=10)
@@ -2538,9 +2532,8 @@ class BalanceApp(tk.Tk):
 
         # --- Section 2: Run matching ---
         s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
-        premreg_s2_note = ttk.Label(s2, text="Every original column from the leader's file is preserved, plus the matched "
-                            "IGI Policy Number, the matched register reference, a match score, and a "
-                            "Matched/Not Matched status.",
+        premreg_s2_note = ttk.Label(s2, text="Adds the matched IGI Policy Number, matched reference, match score, "
+                            "and Matched/Not Matched status to every row.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premreg_s2_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(premreg_s2_note, s2, side_padding=10)
@@ -2613,42 +2606,29 @@ class BalanceApp(tk.Tk):
         mode = self.premreg_file_type_var.get()
         if mode == "outstanding_premium":
             self.premreg_filetype_note_var.set(
-                "Outstanding Premium File selected: the second file below should be IGI's own Co-Insurance "
-                "Outstanding Position export (e.g. a \"Co_Insurance_<date>.xlsx\" workbook's own \"Detail\" "
-                "sheet) rather than a plain Premium Register. The match output then also includes that file's "
-                "own \"Premium Payable\" and \"Total Payable\" amounts for each matched row - Total Payable is "
-                "included alongside Premium Payable since on some files the real outstanding balance sits "
-                "under Claims/Commission Payable rather than Premium Payable alone."
+                "Match against IGI's Co-Insurance Outstanding Position export (\"Detail\" sheet). Also pulls in "
+                "Premium Payable and Total Payable for each matched row."
             )
             self.premreg_leader_title_var.set("Leader's Policy File")
             self.premreg_leader_subtitle_var.set(
-                "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched "
-                "against the Outstanding Premium file's own \"Leader Ref. No\" column, below. Auto-detects the "
-                "\"Premium Payable\" sheet if the file has multiple tabs."
+                "The leader's own policy number column (e.g. \"NUMS\") is matched against \"Leader Ref. No\" below."
             )
             self.premreg_register_title_var.set("Outstanding Premium File")
             self.premreg_register_subtitle_var.set(
-                "IGI's own Co-Insurance Outstanding Position export (e.g. its \"Detail\" sheet) \u2014 carries the "
-                "leader's own reference (\"Leader Ref. No\") alongside our IGI Policy Number (\"Document No.\"), "
-                "plus \"Premium Payable\" and \"Total Payable\", both pulled into the output for every matched row."
+                "Carries the leader's reference alongside our IGI Policy Number, Premium Payable, and Total Payable."
             )
         else:
             self.premreg_filetype_note_var.set(
-                "Premium Register selected (default): the second file below should be a plain Premium Register "
-                "export - no Premium Payable/Total Payable figures exist on that file shape, so the output "
-                "stays the original 4 added columns. Switch to \"Outstanding Premium File\" above if you're "
-                "matching against the Co-Insurance Outstanding Position export instead."
+                "Match against a plain Premium Register export (default). Switch to \"Outstanding Premium File\" "
+                "above if matching against the Outstanding Position export instead."
             )
             self.premreg_leader_title_var.set("Leader's Policy File")
             self.premreg_leader_subtitle_var.set(
-                "The co-insurance leader's own file \u2014 their policy number column (e.g. \"NUMS\") is matched "
-                "against our Leader Ref Number. Auto-detects the \"Premium Payable\" sheet if the file has "
-                "multiple tabs."
+                "The leader's own policy number column (e.g. \"NUMS\") is matched against our Leader Ref Number."
             )
             self.premreg_register_title_var.set("IGI Premium Register")
             self.premreg_register_subtitle_var.set(
-                "Our own register \u2014 carries the leader's reference (Leader#) alongside our IGI Policy Number "
-                "(Doc Ref #)."
+                "Carries the leader's reference (Leader#) alongside our IGI Policy Number (Doc Ref #)."
             )
 
     def _browse_premreg_leader_file(self):
@@ -2871,19 +2851,15 @@ class BalanceApp(tk.Tk):
 
         # --- Section 1: Input files ---
         s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
-        claimscheck_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls, with the real header row auto-detected even if "
-                            "the file has banner/title rows above it. If the leader's file has several sheets "
-                            "(e.g. a settlement workbook with separate tabs for Premium Payable, IGI Claims / "
-                            "Claim Rec, monthly snapshots, etc.), the right sheet is found automatically \u2014 by "
-                            "its name first, falling back to whichever sheet's own columns look like a claims "
-                            "file if no sheet name is a clear match.",
+        claimscheck_s1_note = ttk.Label(s1, text="Both files accept .xlsx or .xls with auto-detected headers. The claims "
+                            "sheet is found automatically in a multi-tab workbook, by name first.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claimscheck_s1_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(claimscheck_s1_note, s1, side_padding=10)
 
         leader_row = self._premreg_file_row(
             s1, "Leader's Claims File",
-            "The co-insurance leader's own claims sheet (e.g. \"IGI Claims\") \u2014 their Policy/PMD # column is matched against our Base Doc No. Auto-detects the claims sheet if the file has multiple tabs.",
+            "The leader's own claims sheet (e.g. \"IGI Claims\") \u2014 Policy/PMD # is matched against our Base Doc No.",
         )
         self.claimscheck_leader_icon, self.claimscheck_leader_name_var = leader_row[0], leader_row[1]
         self._make_pill_button(leader_row[2], "Browse...", self._browse_claimscheck_leader_file,
@@ -2891,7 +2867,7 @@ class BalanceApp(tk.Tk):
 
         register_row = self._premreg_file_row(
             s1, "IGI Premium Register",
-            "Our own register \u2014 carries the leader's own reference back to us (Leader Ref Number) alongside our IGI Policy Number (Doc Ref #), the same two columns Policy Check matches on.",
+            "Carries the leader's own reference (Leader Ref Number) alongside our IGI Policy Number (Doc Ref #).",
         )
         self.claimscheck_register_icon, self.claimscheck_register_name_var = register_row[0], register_row[1]
         self._make_pill_button(register_row[2], "Browse...", self._browse_claimscheck_register_file,
@@ -2899,9 +2875,8 @@ class BalanceApp(tk.Tk):
 
         # --- Section 2: Run matching ---
         s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
-        claimscheck_s2_note = ttk.Label(s2, text="Every original column from the leader's claims file is preserved, plus the "
-                            "matched IGI Policy Number (Doc Ref #), the matched register reference, a match score, "
-                            "and a Matched/Not Matched status.",
+        claimscheck_s2_note = ttk.Label(s2, text="Adds the matched IGI Policy Number (Doc Ref #), matched reference, "
+                            "match score, and Matched/Not Matched status to every row.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claimscheck_s2_note.pack(anchor="w", pady=(0, 12))
         self._bind_dynamic_wraplength(claimscheck_s2_note, s2, side_padding=10)
@@ -3178,10 +3153,8 @@ class BalanceApp(tk.Tk):
         multiselect_filter_box.columnconfigure(2, weight=1)
 
         receivable_multiselect_note = ttk.Label(
-            multiselect_filter_box, text="Click \"Load Filter Options\" (after browsing to the Master Workbook "
-                                          "above) to populate these lists from that file's own values, then make "
-                                          "your selections here before clicking \"Load, Validate & Build Groups\" "
-                                          "below.",
+            multiselect_filter_box, text="Click \"Load Filter Options\" above to populate these lists, then select "
+                                          "before clicking \"Load, Validate & Build Groups\" below.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         receivable_multiselect_note.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
         self._bind_dynamic_wraplength(receivable_multiselect_note, multiselect_filter_box, side_padding=10)
@@ -3263,11 +3236,8 @@ class BalanceApp(tk.Tk):
         ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
                          variable=self.receivable_merge_var).pack(side="left")
         merge_note = ttk.Label(
-            f, text="Runs before generating: two company names are combined into one file whenever they share "
-                    "the same leading name before the first underscore/space (e.g. \"Atlas_Insurance_Faisalabad\" "
-                    "and \"Atlas_Insurance_ClaimRecovery\" both start with \"Atlas\"), or when one of them is a "
-                    "known abbreviation (AIC = Adamjee, JGE/JGI = Jubilee, UBL = United Bank). No data is lost - "
-                    "every row from every merged company still appears in the combined file.",
+            f, text="Combines companies sharing a leading name (e.g. \"Atlas_Insurance_Faisalabad\" / "
+                    "\"Atlas_Insurance_ClaimRecovery\") or a known abbreviation (AIC, JGE/JGI, UBL). No data is lost.",
             style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         merge_note.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -4011,11 +3981,8 @@ class BalanceApp(tk.Tk):
         ttk.Button(source_box, text="Browse...", command=self.browse_claims_premium_register_file).grid(row=1, column=2, **pad)
 
         claims_matching_note = ttk.Label(
-            source_box, text="The claim's own 'Policy/PMD #' is matched against the Premium Register's "
-                              "'Document No.' and 'Base Doc No.' using the same fuzzy digit-run matching as "
-                              "Premium Register, plus the branch/class code embedded in the reference. A "
-                              "policy shared by several coinsurers fans a claim out to every one of their "
-                              "files, each showing their own Share % and their portion of Claim Paid/O/S.",
+            source_box, text="Matches 'Policy/PMD #' against the register's 'Base Doc No.' (fallback: 'Document No.'). "
+                              "A policy shared by several coinsurers fans a claim out to each of their files.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claims_matching_note.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
         self._bind_dynamic_wraplength(claims_matching_note, source_box)
@@ -4034,10 +4001,8 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.claims_email_lookup_file_var).grid(row=5, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_claims_email_lookup_file).grid(row=5, column=2, **pad)
         claims_email_lookup_note = ttk.Label(
-            source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
-                              "Rows are matched to each output file's coinsurer name by exact match "
-                              "(the pooled OFC file looks up the literal key 'OFC'). If left blank, drafted "
-                              "emails will be flagged \"missing email\" for manual entry.",
+            source_box, text="Company Name, Email, and optional POC columns, matched by exact coinsurer name "
+                              "(pooled OFC file uses the key 'OFC'). Left blank, drafts are flagged \"missing email\".",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claims_email_lookup_note.grid(row=6, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(claims_email_lookup_note, source_box)
@@ -4080,9 +4045,7 @@ class BalanceApp(tk.Tk):
         date_filter_box.pack(fill="x", padx=12, pady=8)
 
         ttk.Label(date_filter_box,
-                  text="Leave From/To blank to process the whole register. When set, only claims whose date "
-                       "falls within this range are matched and written to the output workbooks - the source "
-                       "files themselves are untouched and can still cover a much wider period.",
+                  text="Leave blank to process the whole register. When set, only claims in this date range are matched.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
                   wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
 
@@ -4123,8 +4086,7 @@ class BalanceApp(tk.Tk):
         claims_filter_box.columnconfigure(2, weight=1)
 
         claims_filter_note = ttk.Label(
-            claims_filter_box, text="Click \"Load Filter Options\" after browsing to the Claim Intimation "
-                                     "Register above to populate these lists from that file's own values.",
+            claims_filter_box, text="Click \"Load Filter Options\" above to populate these lists from the file's own values.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         claims_filter_note.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
         self._bind_dynamic_wraplength(claims_filter_note, claims_filter_box, side_padding=10)
@@ -4173,8 +4135,7 @@ class BalanceApp(tk.Tk):
         load_box = ttk.Labelframe(canvas_frame, text="  Load & Match  ", padding=(14, 12))
         load_box.pack(fill="x", padx=12, pady=8)
 
-        ttk.Label(load_box, text="Loads both files above, applies the Date Filter (if set), and runs the "
-                                  "coinsurer matching in one step.",
+        ttk.Label(load_box, text="Loads both files, applies the Date Filter (if set), and runs coinsurer matching.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
 
         claims_load_match_btn_row = ttk.Frame(load_box)
@@ -4214,10 +4175,8 @@ class BalanceApp(tk.Tk):
         self.claims_results_summary_var = tk.StringVar(value="Run 'Load & Match Claims' on tab 1 to see one row per coinsurer here.")
         ttk.Label(top, textvariable=self.claims_results_summary_var, style="Muted.TLabel").pack(side="right")
 
-        hint = ttk.Label(f, text="One workbook is generated per coinsurer (covering every matched claim they share); every "
-                                  "coinsurer with \"OFC\" in its name is pooled into a single shared \"OFC\" file. Claims that "
-                                  "couldn't be matched to a policy - or whose matched policy had no coinsurer at all - are "
-                                  "written to a separate \"Unmatched Claims\" file for manual review.",
+        hint = ttk.Label(f, text="One workbook per coinsurer (\"OFC\"-named companies pooled together). Unmatched claims "
+                                  "go to a separate \"Unmatched Claims\" file.",
                           style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         hint.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -4227,12 +4186,8 @@ class BalanceApp(tk.Tk):
         ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
                          variable=self.claims_merge_var).pack(side="left")
         merge_note = ttk.Label(
-            f, text="Runs before generating: two coinsurer names are combined into one workbook whenever they "
-                    "share the same leading name before the first underscore/space (e.g. "
-                    "\"Atlas_Insurance_Faisalabad\" and \"Atlas_Insurance_ClaimRecovery\" both start with "
-                    "\"Atlas\"), or when one of them is a known abbreviation (AIC = Adamjee, JGE/JGI = Jubilee, "
-                    "UBL = United Bank). No data is lost - every claim from every merged coinsurer name still "
-                    "appears in the combined file.",
+            f, text="Combines coinsurers sharing a leading name (e.g. \"Atlas_Insurance_Faisalabad\" / "
+                    "\"Atlas_Insurance_ClaimRecovery\") or a known abbreviation (AIC, JGE/JGI, UBL). No data is lost.",
             style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         merge_note.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -5854,10 +5809,7 @@ class BalanceApp(tk.Tk):
         ttk.Button(source_box, text="Browse...", command=self.browse_premregsplit_file).grid(row=0, column=2, **pad)
 
         premregsplit_note = ttk.Label(
-            source_box, text="Only rows where Leader = \"No\" are included (a coinsurer's own share of a "
-                              "policy IGI leads) - IGI's own rows are never included, since there's no one "
-                              "to email those to. Same header/banner-row auto-detection and legacy .xls "
-                              "multi-sheet merging as Policy Check and Claims Intimation.",
+            source_box, text="Only Leader = \"No\" rows (a coinsurer's own share) are included; IGI's own rows are excluded.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premregsplit_note.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(2, 2))
         self._bind_dynamic_wraplength(premregsplit_note, source_box)
@@ -5876,10 +5828,8 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.premregsplit_email_lookup_file_var).grid(row=4, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_premregsplit_email_lookup_file).grid(row=4, column=2, **pad)
         premregsplit_email_lookup_note = ttk.Label(
-            source_box, text="A Company-name column, an Email column, and an optional POC/Contact column. "
-                              "Rows are matched to each output file's company name (the pooled OFC file "
-                              "looks up the literal key 'OFC'). If left blank, drafted emails will be "
-                              "flagged \"missing email\" for manual entry.",
+            source_box, text="Company Name, Email, and optional POC columns, matched by exact company name "
+                              "(pooled OFC file uses the key 'OFC'). Left blank, drafts are flagged \"missing email\".",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premregsplit_email_lookup_note.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 2))
         self._bind_dynamic_wraplength(premregsplit_email_lookup_note, source_box)
@@ -5911,8 +5861,7 @@ class BalanceApp(tk.Tk):
         date_filter_box.pack(fill="x", padx=12, pady=8)
 
         ttk.Label(date_filter_box,
-                  text="Leave From/To blank to process the whole register. When set, only policy rows "
-                       "whose date falls within this range are included in the output workbooks.",
+                  text="Leave blank to process the whole register. When set, only rows in this date range are included.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9),
                   wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
 
@@ -5939,8 +5888,7 @@ class BalanceApp(tk.Tk):
         premregsplit_filter_box.columnconfigure(1, weight=1)
 
         premregsplit_filter_note = ttk.Label(
-            premregsplit_filter_box, text="Click \"Load Filter Options\" after browsing to the Premium "
-                                           "Register above to populate these lists from that file's own values.",
+            premregsplit_filter_box, text="Click \"Load Filter Options\" above to populate these lists from the file's own values.",
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         premregsplit_filter_note.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
         self._bind_dynamic_wraplength(premregsplit_filter_note, premregsplit_filter_box, side_padding=10)
@@ -5980,9 +5928,7 @@ class BalanceApp(tk.Tk):
         load_box = ttk.Labelframe(canvas_frame, text="  Load & Build Groups  ", padding=(14, 12))
         load_box.pack(fill="x", padx=12, pady=8)
 
-        ttk.Label(load_box, text="Loads the register, applies any filters above, keeps only coinsurer "
-                                  "(Leader = \"No\") rows, and builds the per-company output groups shown "
-                                  "on tab 2 - all in one step.",
+        ttk.Label(load_box, text="Loads the register, applies filters, and builds the per-company groups on tab 2.",
                   style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
 
         premregsplit_load_btn_row = ttk.Frame(load_box)
@@ -6018,9 +5964,7 @@ class BalanceApp(tk.Tk):
         self.premregsplit_results_summary_var = tk.StringVar(value="Run 'Load & Build Groups' on tab 1 to see one row per company here.")
         ttk.Label(top, textvariable=self.premregsplit_results_summary_var, style="Muted.TLabel").pack(side="right")
 
-        hint = ttk.Label(f, text="One workbook is generated per coinsurer (covering every policy row where that "
-                                  "company is a follower); every company with \"OFC\" in its name is pooled into a "
-                                  "single shared \"OFC\" file.",
+        hint = ttk.Label(f, text="One workbook per coinsurer (\"OFC\"-named companies pooled together).",
                           style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         hint.pack(anchor="w", padx=14, pady=(0, 6))
 
@@ -6030,13 +5974,8 @@ class BalanceApp(tk.Tk):
         ttk.Checkbutton(merge_row, text="Merge files for the same company (combine before generating)",
                          variable=self.premregsplit_merge_var).pack(side="left")
         merge_note = ttk.Label(
-            f, text="Strongly recommended for this module: a real Premium Register very often records the "
-                    "same real company under several differently-worded branch names (e.g. \"EFU H.O., "
-                    "Karachi\", \"EFU J.P. Unit Branch, Karachi\", \"EFU Multan Branch\"). This checkbox "
-                    "combines every branch-name variant of the same company into one file before "
-                    "generating, the same rule every other GIMS module's own merge checkbox uses "
-                    "(shared leading name, or a known abbreviation). No data is lost - every row from "
-                    "every merged branch still appears in the combined file.",
+            f, text="Recommended: combines branch-name variants of the same company (e.g. \"EFU H.O., Karachi\" "
+                    "/ \"EFU Multan Branch\") using the same rule as other modules. No data is lost.",
             style="Muted.TLabel", font=("Segoe UI", 9), wraplength=900, justify="left")
         merge_note.pack(anchor="w", padx=14, pady=(0, 6))
 
