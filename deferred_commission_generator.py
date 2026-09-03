@@ -300,6 +300,7 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
         ledger_rows = [
             ("direct", "Commission Expense - Direct"),
             ("coinsurance", "Commission Expense - Coinsurance"),
+            ("reinsurance_accepted", "Commission Expense - Reinsurance Accepted"),
             ("service_charges", "Service Charges - Coinsurance"),
         ]
         ledger_total_sum = 0.0

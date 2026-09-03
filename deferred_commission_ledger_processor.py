@@ -49,40 +49,49 @@ class DeferredCommissionLedgerError(Exception):
     pass
 
 
-# Keyword markers checked in this order (most specific first) against
-# each row's own "Particular / Title" text, uppercased. "COINSURANCE
-# ACCEPTED" (not just "ACCEPTED") is deliberately the marker for the
-# coinsurance field, since a plain "ACCEPTED" would also match the
-# report's own separate "COMMISSION EXPENSE - REINSURANCE ACCEPTED"
-# line, a real line on the sample PDF, but not one of this module's own
-# three ledgers. The full phrase avoids that collision entirely.
+# GL-CODE based matching (primary) - this module used to classify each
+# row purely by matching keywords/phrases against the row's own
+# "Particular / Title" text (see _FIELD_MARKERS_FALLBACK below, kept only
+# as a safety net). Matching on the GL Account CODE instead is more
+# reliable, since a code is a single fixed value with nothing to
+# accidentally collide with (the description-based approach had already
+# needed two separate confirmed-bug fixes for exactly that - a bare
+# "ACCEPTED"/"SERVICE CHARGES" marker each coincidentally matching an
+# unrelated account's own description text - see the git history / the
+# comments that used to sit here for the specifics).
 #
-# CONFIRMED REAL BUG, fixed here: a bare "SERVICE CHARGES" marker for
-# the service_charges field also matched a completely unrelated staff-
-# cost line on a real report - "0503001039 CONSULTANCY SERVICE CHARGES -
-# HEALTH" (a Dr 4,079,280.00 line, nothing to do with coinsurance). Both
-# that line AND the real "0503013004 SERVICE CHARGES - CO INSURANCE"
-# line (Cr 1,383,303.00) matched the same bare marker, so they were
-# silently summed together into one figure (Dr 4,079,280 + Cr -1,383,303
-# = 2,695,977) instead of the real Service Charges - Coinsurance balance
-# of Cr 1,383,303 (-1,383,303 in this module's Dr-positive convention) -
-# a Health-department salary-adjacent cost inflating a coinsurance
-# service-charge figure with no error or warning at all. The full phrase
-# "SERVICE CHARGES - CO INSURANCE" (plus a comma/no-hyphen variant, in
-# case a future export punctuates it slightly differently) only matches
-# the genuine account, the same fix already applied to the coinsurance
-# marker above for the identical class of collision.
-_FIELD_MARKERS = [
-    ("service_charges", ["SERVICE CHARGES - CO INSURANCE", "SERVICE CHARGES, CO INSURANCE", "SERVICE CHARGES - COINSURANCE"]),
-    ("coinsurance", ["COINSURANCE ACCEPTED"]),
-    ("direct", ["COMMISSION EXPENSE - DIRECT"]),
-]
+# Codes are normalized by stripping any leading zeros before comparison
+# (int() round-trip), so "0502001004" (as printed in the PDF) and
+# "502001004" both key to the same entry - the PDF's own GL Account
+# column is always written with a leading zero, but this map is written
+# without one so it reads the same way the codes are normally spoken/
+# written elsewhere in Finance.
+GL_CODE_FIELD_MAP = {
+    "502001001": "direct",                  # Commission Expense - Direct
+    "502001004": "coinsurance",             # Commission Expense - Coinsurance Accepted
+    "502002001": "reinsurance_accepted",    # Commission Expense - Reinsurance Accepted
+    "503013004": "service_charges",         # Service Charges - Co Insurance
+}
 
 FIELD_LABELS = {
     "direct": "Commission Expense - Direct",
     "coinsurance": "Commission Expense - Coinsurance",
+    "reinsurance_accepted": "Commission Expense - Reinsurance Accepted",
     "service_charges": "Service Charges - Coinsurance",
 }
+
+# Description-keyword fallback, used ONLY for a row whose GL code isn't
+# in GL_CODE_FIELD_MAP above (e.g. a future export that renumbers the
+# chart of accounts) - kept as a safety net so the report doesn't go
+# from "matches by code" to "matches nothing" the moment a code changes,
+# but GL_CODE_FIELD_MAP is always checked first and wins whenever it has
+# an entry.
+_FIELD_MARKERS_FALLBACK = [
+    ("service_charges", ["SERVICE CHARGES - CO INSURANCE", "SERVICE CHARGES, CO INSURANCE", "SERVICE CHARGES - COINSURANCE"]),
+    ("reinsurance_accepted", ["REINSURANCE ACCEPTED"]),
+    ("coinsurance", ["COINSURANCE ACCEPTED"]),
+    ("direct", ["COMMISSION EXPENSE - DIRECT"]),
+]
 
 _DATA_LINE_RE = re.compile(
     r"^\s*(\d{6,15})\s+(.+?)\s+([\d,]+\.\d{2})\s+(Cr|Dr)\s*$", re.IGNORECASE
@@ -93,9 +102,26 @@ _GRAND_TOTAL_RE = re.compile(
 _AS_AT_DATE_RE = re.compile(r"As\s*At\s*Date\s*:\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
 
 
-def _classify_description(description):
+def _normalize_gl_code(gl_code):
+    """Strip leading zeros for comparison against GL_CODE_FIELD_MAP - e.g.
+    '0502001004' -> '502001004'. Falls back to the original string if it
+    isn't purely numeric (shouldn't happen given _DATA_LINE_RE's own
+    \\d{6,15} capture, but never worth raising over)."""
+    try:
+        return str(int(gl_code))
+    except ValueError:
+        return gl_code
+
+
+def _classify_row(gl_code, description):
+    """GL code first (see GL_CODE_FIELD_MAP's own docstring for why),
+    falling back to the old description-keyword match only if this row's
+    code isn't one of the four expected ones."""
+    field = GL_CODE_FIELD_MAP.get(_normalize_gl_code(gl_code))
+    if field:
+        return field
     text = description.upper()
-    for field, markers in _FIELD_MARKERS:
+    for field, markers in _FIELD_MARKERS_FALLBACK:
         if any(m in text for m in markers):
             return field
     return None
@@ -114,11 +140,15 @@ def _signed_amount(amount_text, dr_cr):
 
 def parse_deferred_commission_ledger_pdf(filepath):
     """
-    Parse one "All Ledgers Balance" PDF for the three GL accounts this
-    module cares about. Returns a dict:
+    Parse one "All Ledgers Balance" PDF for the four GL accounts this
+    module cares about, matched by GL Account CODE (see
+    GL_CODE_FIELD_MAP): 502001001 (Direct), 502001004 (Coinsurance
+    Accepted), 502002001 (Reinsurance Accepted), 503013004 (Service
+    Charges - Co Insurance). Returns a dict:
       {
-        "direct", "coinsurance", "service_charges": float or None (None
-            if that account was not found anywhere in the report),
+        "direct", "coinsurance", "reinsurance_accepted", "service_charges":
+            float or None (None if that account was not found anywhere
+            in the report),
         "as_at_date": date or None,
         "grand_total_reported": float or None, the report's own Grand
             Total line, shown for reference only, see the module
@@ -159,7 +189,7 @@ def parse_deferred_commission_ledger_pdf(filepath):
         if m:
             gl_code, description, amount_text, dr_cr = m.groups()
             amount = _signed_amount(amount_text, dr_cr)
-            field = _classify_description(description)
+            field = _classify_row(gl_code, description)
             if field:
                 result[field] = (result[field] or 0.0) + amount
                 matched_lines.append({"gl_code": gl_code, "description": description.strip(), "amount": amount, "field": field})
@@ -182,11 +212,11 @@ def parse_deferred_commission_ledger_pdf(filepath):
 
     if not matched_lines:
         raise DeferredCommissionLedgerError(
-            "Could not find any of the expected accounts (Commission Expense - Direct, Commission "
-            f"Expense - Coinsurance Accepted, Service Charges - Co Insurance) in "
-            f"'{os.path.basename(filepath)}'. This may not be the Ledger Balance report, or its account "
-            "descriptions use different wording than expected. Add the real wording to _FIELD_MARKERS "
-            "in deferred_commission_ledger_processor.py."
+            "Could not find any of the expected accounts (GL codes 502001001 Commission Expense - Direct, "
+            "502001004 Commission Expense - Coinsurance Accepted, 502002001 Commission Expense - Reinsurance "
+            f"Accepted, 503013004 Service Charges - Co Insurance) in '{os.path.basename(filepath)}'. This may "
+            "not be the Ledger Balance report, or its GL codes have changed. Update GL_CODE_FIELD_MAP in "
+            "deferred_commission_ledger_processor.py if the codes have genuinely changed."
         )
 
     return {
