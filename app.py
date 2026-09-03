@@ -51,6 +51,7 @@ import reinsurance_processor as rip
 import reinsurance_generator as rig
 import deferred_commission_processor as dcp
 import deferred_commission_generator as dcg
+import deferred_commission_ledger_processor as dclp
 
 try:
     import keyring
@@ -253,6 +254,8 @@ class BalanceApp(tk.Tk):
         self.dc_last_opening = 0.0                # Opening Deferred Commission Expense entered on tab 2, used at generate time
         self.dc_output_dir = os.path.join(os.getcwd(), "Deferred Commission")
         self.dc_last_output_file = None
+        self.dc_ledger_pdf_path = None            # last-browsed Ledger Balance PDF path (Deferred Commission's own three GL accounts)
+        self.dc_ledger_parse_result = None        # last deferred_commission_ledger_processor.parse_deferred_commission_ledger_pdf() result - carried into Generate as the Summary sheet's "Ledger Balances" block
 
         self._load_logos()
         self._setup_style()
@@ -2689,6 +2692,51 @@ class BalanceApp(tk.Tk):
         self.dc_opening_var = tk.StringVar()
         ttk.Entry(s6, textvariable=self.dc_opening_var, width=22, font=("Segoe UI", 10)).pack(anchor="w")
 
+        # ---- Ledger Balance PDF (optional) ----
+        # Same "All Ledgers Balance" report (GL_LB_LEDGERBALANCE) UPR
+        # Automation's own upr_ledger_processor.py reads, just pulling the
+        # three GL accounts this module cares about instead of UPR's own
+        # four (see deferred_commission_ledger_processor.py). Loading one
+        # here does NOT change the department-level working built from the
+        # three ledger Excel files on tab 1 - it adds a separate "Ledger
+        # Balances" block to the Summary sheet showing these same three
+        # accounts' company-wide balances exactly as reported on the PDF,
+        # so the working figures can be checked against the source ledger
+        # at a glance. Only Opening Deferred Commission Expense above stays
+        # a manual entry - it isn't on this report at all.
+        ttk.Separator(s6, orient="horizontal").pack(fill="x", pady=(16, 14))
+        ttk.Label(s6, text="Ledger Balance PDF (optional)", style="Panel.TLabel",
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        dc_ledger_note = ttk.Label(
+            s6, text="Upload the \"All Ledgers Balance\" PDF (Report ID GL_LB_LEDGERBALANCE) to fetch "
+                      "Commission Expense - Direct, Commission Expense - Coinsurance, and Service Charges - "
+                      "Coinsurance directly from it - these are shown on the Summary sheet as reported ledger "
+                      "balances, alongside (not instead of) the working built from the ledger Excel files on "
+                      "tab 1.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_ledger_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_ledger_note, s6, side_padding=10)
+
+        pdf_card = tk.Frame(s6, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        pdf_card.pack(fill="x", pady=(0, 4))
+        pdf_inner = tk.Frame(pdf_card, bg=self.COLOR_PANEL_ALT)
+        pdf_inner.pack(fill="x", padx=12, pady=10)
+
+        pdf_row = tk.Frame(pdf_inner, bg=self.COLOR_PANEL_ALT)
+        pdf_row.pack(fill="x")
+        tk.Label(pdf_row, text="Ledger Balance PDF", font=("Segoe UI", 10, "bold"),
+                 bg=self.COLOR_PANEL_ALT, fg=self.COLOR_TEXT, width=18, anchor="w").pack(side="left")
+        self.dc_ledger_pdf_name_var = tk.StringVar(value="No file selected")
+        tk.Label(pdf_row, textvariable=self.dc_ledger_pdf_name_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
+                 fg=self.COLOR_MUTED, anchor="w").pack(side="left", fill="x", expand=True, padx=(6, 10))
+        self._make_pill_button(pdf_row, "Browse...", self._browse_dc_ledger_pdf, bg=self.COLOR_ACCENT).pack(side="left", padx=(0, 8))
+        self._make_pill_button(pdf_row, "Load from PDF", self._load_dc_ledger_pdf,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left")
+
+        self.dc_ledger_status_var = tk.StringVar(value="")
+        tk.Label(pdf_inner, textvariable=self.dc_ledger_status_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
+                 fg=self.COLOR_MUTED, anchor="w", justify="left", wraplength=760).pack(anchor="w", pady=(8, 0))
+
         s7 = self._loss_section_card(body, "7", "Run Calculation", PAD_X, expand_bottom=True)
         ttk.Label(s7, text="Re-reads the Premium Register(s) and all three ledgers, matches each ledger's "
                             "balance onto its own policy by Doc Ref #, and builds both tables (Commission "
@@ -2789,6 +2837,47 @@ class BalanceApp(tk.Tk):
             on_done=on_done, on_error=on_error,
         )
 
+    def _browse_dc_ledger_pdf(self):
+        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if path:
+            self.dc_ledger_pdf_path = path
+            self.dc_ledger_pdf_name_var.set(os.path.basename(path))
+
+    def _load_dc_ledger_pdf(self):
+        if not self.dc_ledger_pdf_path:
+            messagebox.showerror("No file selected", "Browse to the Ledger Balance PDF first.")
+            return
+        try:
+            result = dclp.parse_deferred_commission_ledger_pdf(self.dc_ledger_pdf_path)
+        except dclp.DeferredCommissionLedgerError as e:
+            self.dc_ledger_status_var.set(f"Could not load: {e}")
+            messagebox.showerror("Could not read PDF", str(e))
+            return
+
+        self.dc_ledger_parse_result = result
+        matched_labels = []
+        for field, label in dclp.FIELD_LABELS.items():
+            if result[field] is not None:
+                matched_labels.append(f"{label}: {result[field]:,.2f}")
+            else:
+                matched_labels.append(f"{label} (not found on this PDF)")
+
+        status_lines = [f"Loaded: {', '.join(matched_labels)}."]
+
+        if result["unmatched_lines"]:
+            names = ", ".join(f"{u['description']} ({u['amount']:,.0f})" for u in result["unmatched_lines"][:5])
+            status_lines.append(f"Note: {len(result['unmatched_lines'])} other account line(s) on the report "
+                                 f"weren't one of the three expected accounts and were ignored: {names}.")
+
+        if result.get("as_at_date"):
+            status_lines.append(f"Report as at {result['as_at_date']:%d-%b-%Y}.")
+
+        status_lines.append("These figures will be added to the Summary sheet as a \"Ledger Balances\" block "
+                             "the next time a workbook is generated on tab 3.")
+
+        self.dc_ledger_status_var.set("\n".join(status_lines))
+        self.status_var.set("Deferred Commission: ledger balances loaded from PDF.")
+
     # ---- Tab 3: Generate & Save ----
     def _build_dc_tab_generate(self, tab):
         body = self._make_upr_scrollable_body(tab)
@@ -2843,8 +2932,11 @@ class BalanceApp(tk.Tk):
         self.status_var.set("Generating Deferred Commission workbook...")
         self.dc_gen_progress.start(total=None, text="Generating...")
 
+        ledger_totals = self.dc_ledger_parse_result  # None if no PDF was loaded for this run - build_deferred_commission_workbook handles that gracefully
+
         def worker(report):
-            return dcg.build_deferred_commission_workbook(result, opening_deferred, output_file)
+            return dcg.build_deferred_commission_workbook(result, opening_deferred, output_file,
+                                                            ledger_totals=ledger_totals)
 
         def on_done(fp):
             self.dc_last_output_file = fp

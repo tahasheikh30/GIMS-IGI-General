@@ -149,7 +149,8 @@ def _write_driver_rows(ws, start_row, period_start, label):
     return period_row, year_row
 
 
-def build_deferred_commission_workbook(result, opening_deferred_commission, output_path, run_date=None):
+def build_deferred_commission_workbook(result, opening_deferred_commission, output_path, run_date=None,
+                                        ledger_totals=None):
     """
     result: the dict returned by deferred_commission_processor.
         run_deferred_commission_calculation().
@@ -157,6 +158,20 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
         Commission Expense, entered by hand (this isn't in any register -
         it's the prior period's own Closing figure), same "manual for
         now" pattern as UPR/Reinsurance Automation's own Opening balance.
+    ledger_totals: optional dict, the return value of
+        deferred_commission_ledger_processor.parse_deferred_commission_ledger_pdf()
+        (or None if no Ledger Balance PDF was uploaded for this run) -
+        {"direct", "coinsurance", "service_charges": float or None,
+        "as_at_date": date or None, ...}. When given, a "Ledger Balances
+        (from Ledger Balance PDF)" block is added to the Summary sheet
+        showing these three GL account balances exactly as reported on
+        the PDF - i.e. the company-wide figures the three ledger Excel
+        files above are matched/distributed FROM, shown here as a
+        reference/reconciliation check alongside the department-level
+        working built from those Excel files. Omitted entirely (no
+        section, no gap) if ledger_totals is None, so a run without a
+        PDF produces the exact same Summary sheet as before this
+        parameter existed.
     Returns output_path.
     """
     run_date = run_date or date.today()
@@ -263,6 +278,78 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
     ws_summary.column_dimensions["C"].width = 22
 
     note_row = r + 3
+
+    if ledger_totals:
+        ws_summary.cell(row=note_row, column=2,
+                         value="Ledger Balances (from Ledger Balance PDF)").font = SECTION_TITLE_FONT
+        note_row += 1
+
+        lt_header_row = note_row
+        for j, h in enumerate(["Account", "Balance"], start=2):
+            c = ws_summary.cell(row=lt_header_row, column=j, value=h)
+            c.font = HEADER_FONT
+            c.fill = HEADER_FILL
+            c.border = BORDER
+            c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
+        note_row += 1
+
+        # Field order/labels match deferred_commission_ledger_processor.FIELD_LABELS
+        # (imported by name rather than the module itself, to avoid a
+        # generator-depends-on-a-PDF-parsing-module import for a value
+        # this function only ever reads, never produces).
+        ledger_rows = [
+            ("direct", "Commission Expense - Direct"),
+            ("coinsurance", "Commission Expense - Coinsurance"),
+            ("service_charges", "Service Charges - Coinsurance"),
+        ]
+        ledger_total_sum = 0.0
+        any_missing = False
+        for key, label in ledger_rows:
+            val = ledger_totals.get(key)
+            label_cell = ws_summary.cell(row=note_row, column=2, value=label)
+            label_cell.font = BODY_FONT
+            if val is None:
+                any_missing = True
+                val_cell = ws_summary.cell(row=note_row, column=3, value="Not found on PDF")
+                val_cell.font = Font(name="Arial", size=10, italic=True, color="6C7A89")
+            else:
+                ledger_total_sum += float(val)
+                val_cell = ws_summary.cell(row=note_row, column=3, value=float(val))
+                val_cell.number_format = NUM_FORMAT
+                val_cell.font = BODY_FONT
+            for col in (2, 3):
+                ws_summary.cell(row=note_row, column=col).border = BORDER
+            note_row += 1
+
+        ws_summary.cell(row=note_row, column=2, value="Ledger Total (Direct + Coinsurance + Service Charges)").font = BOLD_FONT
+        total_cell = ws_summary.cell(row=note_row, column=3, value=ledger_total_sum)
+        total_cell.number_format = NUM_FORMAT
+        total_cell.font = BOLD_FONT
+        total_cell.fill = TOTAL_FILL
+        ws_summary.cell(row=note_row, column=2).fill = TOTAL_FILL
+        for col in (2, 3):
+            ws_summary.cell(row=note_row, column=col).border = Border(top=Side(style="thin", color="1F4E78"),
+                                                                        left=THIN, right=THIN, bottom=THIN)
+        note_row += 1
+
+        as_at = ledger_totals.get("as_at_date")
+        if as_at:
+            ws_summary.cell(row=note_row, column=2,
+                             value=f"Ledger balances above are as at {as_at:%d-%b-%Y}, per the PDF's own "
+                                   f"\"As At Date\".").font = NOTE_FONT
+            note_row += 1
+        if any_missing:
+            ws_summary.cell(row=note_row, column=2,
+                             value="Note: one or more of the three expected accounts wasn't found on the "
+                                   "uploaded PDF - see the app's own load status for detail.").font = NOTE_FONT
+            note_row += 1
+        if ledger_totals.get("unmatched_lines"):
+            ws_summary.cell(row=note_row, column=2,
+                             value=f"Note: {len(ledger_totals['unmatched_lines'])} other GL account line(s) on "
+                                   f"the PDF weren't one of these three accounts and were ignored.").font = NOTE_FONT
+            note_row += 1
+        note_row += 1  # blank spacer before any warnings/source-sheet notes below
+
     if result.get("warnings"):
         for w in result["warnings"]:
             ws_summary.cell(row=note_row, column=2, value=f"Note: {w}").font = NOTE_FONT
