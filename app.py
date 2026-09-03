@@ -49,6 +49,8 @@ import upr_generator as uprg
 import upr_ledger_processor as uprlp
 import reinsurance_processor as rip
 import reinsurance_generator as rig
+import deferred_commission_processor as dcp
+import deferred_commission_generator as dcg
 
 try:
     import keyring
@@ -239,6 +241,18 @@ class BalanceApp(tk.Tk):
         self.reins_last_opening = 0.0              # Opening Prepaid Reinsurance Ceded entered on tab 2, used at generate time
         self.reins_output_dir = os.path.join(os.getcwd(), "Reinsurance Automation")
         self.reins_last_output_file = None
+
+        # Deferred Commission Expense module state
+        self.dc_register_paths = []              # list of uploaded Premium Register filepaths
+        self.dc_direct_paths = []                # list of uploaded Commission Exp - Direct ledger filepaths
+        self.dc_coinsurance_paths = []            # list of uploaded Commission Exp - Coinsurance Accepted ledger filepaths
+        self.dc_service_charges_paths = []        # list of uploaded Service Charges - Coinsurance ledger filepaths
+        self.dc_loaded_df = None                  # concatenated Premium Register rows (Department/Comm Date/Doc Ref/Gross Premium) - used only to populate the period dropdown
+        self.dc_period_options = []               # [{"year","month","label"}, ...] populated after loading the register
+        self.dc_last_result = None                # last run_deferred_commission_calculation() result dict
+        self.dc_last_opening = 0.0                # Opening Deferred Commission Expense entered on tab 2, used at generate time
+        self.dc_output_dir = os.path.join(os.getcwd(), "Deferred Commission")
+        self.dc_last_output_file = None
 
         self._load_logos()
         self._setup_style()
@@ -657,6 +671,7 @@ class BalanceApp(tk.Tk):
                 (None, "Management Accounts", [
                     ("upr_automation", "UPR Automation"),
                     ("reinsurance_automation", "Reinsurance Automation"),
+                    ("deferred_commission", "Deferred Commission"),
                 ]),
             ],
             before=coinsurance_header,
@@ -960,6 +975,11 @@ class BalanceApp(tk.Tk):
         reinsurance_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["reinsurance_automation"] = reinsurance_page
         self._build_reinsurance_automation_page(reinsurance_page)
+
+        deferred_commission_page = ttk.Frame(container)
+        deferred_commission_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["deferred_commission"] = deferred_commission_page
+        self._build_deferred_commission_page(deferred_commission_page)
 
         pc_email_page = ttk.Frame(container)
         pc_email_page.grid(row=0, column=0, sticky="nsew")
@@ -2420,6 +2440,432 @@ class BalanceApp(tk.Tk):
 
     def _open_reins_output_folder(self):
         output_dir = os.path.dirname(self.reins_last_output_file) if self.reins_last_output_file else self.reins_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
+
+    # ---------- Deferred Commission Expense module ----------
+    def _build_deferred_commission_page(self, parent):
+        """Deferred Commission Expense: upload the Premium Register(s)
+        plus the three commission/service-charge ledger exports
+        (Commission Exp - Direct, Commission Exp - Coinsurance Accepted,
+        Service Charges - Coinsurance), select a period, enter the
+        Opening Deferred Commission Expense balance, and generate the
+        Deferred Commission working workbook - same 3-tab shape as UPR
+        and Reinsurance Automation, since the underlying calculation
+        reuses UPR's own period/bucketing/amortization logic directly
+        once each ledger's balance has been matched onto its own policy
+        in the Premium Register."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Deferred Commission", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        dc_subtitle = ttk.Label(
+            header, text="Matches each of the three commission/service-charge ledgers to its own policy in the "
+                          "Premium Register (by Doc Ref #, after keeping only the reference before a '~' in the "
+                          "ledger's own Manual / Ref. No.), sums them into a Total Commission per policy, then "
+                          "amortizes that total using the same 1/24 (most departments) / 1/6 (Marine, Travel) "
+                          "method as UPR Automation to produce the Closing Deferred Commission Expense figure "
+                          "for a selected 12-month period.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        dc_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        def _wrap_dc_subtitle(event):
+            dc_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_dc_subtitle)
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_files = ttk.Frame(notebook)
+        tab_opening = ttk.Frame(notebook)
+        tab_generate = ttk.Frame(notebook)
+        notebook.add(tab_files, text="1. Register, Ledgers & Period")
+        notebook.add(tab_opening, text="2. Opening Balance & Calculate")
+        notebook.add(tab_generate, text="3. Generate & Save")
+
+        self._build_dc_tab_files(tab_files)
+        self._build_dc_tab_opening(tab_opening)
+        self._build_dc_tab_generate(tab_generate)
+
+    # ---- Small generic file-list helpers, shared by the Premium
+    # Register card and all three ledger cards below - each card gets
+    # its own listbox/paths pair (e.g. "dc_register_listbox" /
+    # "dc_register_paths"), looked up by attribute name so the same
+    # Browse/Remove/Clear handlers work for all four without repeating
+    # near-identical code four times over. ----
+    def _build_dc_file_list_card(self, parent, listbox_attr, paths_attr, height=4):
+        list_card = tk.Frame(parent, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_card.pack(fill="x")
+        list_outer = tk.Frame(list_card, bg=self.COLOR_PANEL_ALT)
+        list_outer.pack(fill="x", padx=12, pady=10)
+
+        list_frame = tk.Frame(list_outer, bg="white", highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_frame.pack(fill="x")
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        listbox = tk.Listbox(list_frame, height=height, font=("Segoe UI", 10), selectmode="extended",
+                              activestyle="none", relief="flat", borderwidth=0,
+                              bg="white", selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                              highlightthickness=0, yscrollcommand=list_scroll.set)
+        list_scroll.configure(command=listbox.yview)
+        listbox.pack(side="left", fill="both", expand=True)
+        list_scroll.pack(side="right", fill="y")
+        setattr(self, listbox_attr, listbox)
+
+        toolbar = tk.Frame(list_outer, bg=self.COLOR_PANEL_ALT)
+        toolbar.pack(fill="x", pady=(8, 0))
+        self._make_pill_button(toolbar, "Browse...", lambda: self._dc_add_files(listbox_attr, paths_attr),
+                                bg=self.COLOR_ACCENT).pack(side="left")
+        self._make_pill_button(toolbar, "Remove Selected", lambda: self._dc_remove_file(listbox_attr, paths_attr),
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left", padx=(8, 0))
+        self._make_pill_button(toolbar, "Clear All", lambda: self._dc_clear_files(listbox_attr, paths_attr),
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(side="left", padx=(8, 0))
+
+    def _dc_add_files(self, listbox_attr, paths_attr):
+        listbox = getattr(self, listbox_attr)
+        paths = getattr(self, paths_attr)
+        selected = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        added = 0
+        for p in selected:
+            if p not in paths:
+                paths.append(p)
+                listbox.insert("end", os.path.basename(p))
+                added += 1
+        if added:
+            self.status_var.set(f"Deferred Commission: added {added} file(s) ({len(paths)} total).")
+
+    def _dc_remove_file(self, listbox_attr, paths_attr):
+        listbox = getattr(self, listbox_attr)
+        paths = getattr(self, paths_attr)
+        selected = list(listbox.curselection())
+        if not selected:
+            return
+        for idx in reversed(selected):
+            listbox.delete(idx)
+            del paths[idx]
+
+    def _dc_clear_files(self, listbox_attr, paths_attr):
+        getattr(self, listbox_attr).delete(0, "end")
+        getattr(self, paths_attr).clear()
+
+    # ---- Tab 1: Premium Register + 3 ledgers + period ----
+    def _build_dc_tab_files(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s1 = self._loss_section_card(body, "1", "Premium Register File(s)", PAD_X)
+        dc_s1_note = ttk.Label(
+            s1, text="The same conventional Premium Register file(s) UPR Automation uses - one consolidated "
+                      "file or several per-year files, either works. Required columns: Department/Class, "
+                      "Comm Date, Gross Premium/Contribution, Doc Ref # (used to match ledger balances).",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_s1_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_s1_note, s1, side_padding=10)
+        self._build_dc_file_list_card(s1, "dc_register_listbox", "dc_register_paths", height=4)
+
+        s2 = self._loss_section_card(body, "2", "Commission Exp \u2013 Direct Ledger File(s)", PAD_X)
+        dc_s2_note = ttk.Label(
+            s2, text="Account ledger export(s) for Commission Expense - Direct. Upload as many periods as "
+                      "needed (e.g. a 2025 file and a Jan-Jun 2026 file); they're combined automatically.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_s2_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_s2_note, s2, side_padding=10)
+        self._build_dc_file_list_card(s2, "dc_direct_listbox", "dc_direct_paths", height=3)
+
+        s3 = self._loss_section_card(body, "3", "Commission Exp \u2013 Coinsurance Accepted Ledger File(s)", PAD_X)
+        dc_s3_note = ttk.Label(
+            s3, text="Account ledger export(s) for Commission Expense - Coinsurance Accepted.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_s3_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_s3_note, s3, side_padding=10)
+        self._build_dc_file_list_card(s3, "dc_coinsurance_listbox", "dc_coinsurance_paths", height=3)
+
+        s4 = self._loss_section_card(body, "4", "Service Charges \u2013 Coinsurance Ledger File(s)", PAD_X)
+        dc_s4_note = ttk.Label(
+            s4, text="Account ledger export(s) for Service Charges - Coinsurance.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_s4_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_s4_note, s4, side_padding=10)
+        self._build_dc_file_list_card(s4, "dc_service_charges_listbox", "dc_service_charges_paths", height=3)
+
+        s5 = self._loss_section_card(body, "5", "Load & Period", PAD_X, expand_bottom=True)
+        dc_s5_note = ttk.Label(
+            s5, text="Loads the Premium Register(s) to populate the period dropdown below (the three ledgers "
+                      "are read on Calculate, tab 2). Select the period END month - the calculation covers "
+                      "exactly the 12 months ending there. If the register(s) don't reach back or forward far "
+                      "enough to cover the full 12 months, an error is raised rather than guessing.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dc_s5_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dc_s5_note, s5, side_padding=10)
+
+        load_row = ttk.Frame(s5)
+        load_row.pack(fill="x", pady=(0, 10))
+        self.dc_load_btn = self._make_action_button(load_row, "Load Register(s)", self._load_dc_registers, kind="accent")
+        self.dc_load_btn.pack(side="left")
+
+        self.dc_load_progress = perf_utils.ProgressBarPanel(s5)
+        self.dc_load_progress.frame.pack(fill="x", pady=(0, 10))
+
+        period_row = ttk.Frame(s5)
+        period_row.pack(fill="x")
+        ttk.Label(period_row, text="Period (ending month)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.dc_period_var = tk.StringVar()
+        self.dc_period_combo = ttk.Combobox(period_row, textvariable=self.dc_period_var, state="readonly", width=22)
+        self.dc_period_combo.pack(side="left")
+
+        self.dc_register_log = scrolledtext.ScrolledText(s5, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.dc_register_log.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_dc(self, msg):
+        self.dc_register_log.insert("end", str(msg) + "\n")
+        self.dc_register_log.see("end")
+
+    def _load_dc_registers(self):
+        if not self.dc_register_paths:
+            messagebox.showerror("No files selected", "Browse to at least one Premium Register file first.")
+            return
+
+        self.dc_register_log.delete("1.0", "end")
+        self.status_var.set("Loading premium register(s)...")
+        self.dc_load_progress.start(total=None, text="Loading...")
+        paths = list(self.dc_register_paths)
+
+        def worker(report):
+            df, meta = dcp.up.load_premium_registers(paths, report=report)
+            return df, meta
+
+        def on_done(result):
+            df, meta = result
+            self.dc_loaded_df = df
+            self.dc_load_progress.finish(f"Loaded {len(df):,} row(s).")
+            self._log_dc(f"Loaded {len(df):,} usable row(s) from {len(meta['sheets_used'])} sheet(s): "
+                         + ", ".join(f"{fn} [{sn}]" for fn, sn in meta["sheets_used"]))
+            if meta["sheets_skipped"]:
+                self._log_dc(f"Skipped {len(meta['sheets_skipped'])} sheet(s) that didn't look like a premium register:")
+                for fn, sn, reason in meta["sheets_skipped"]:
+                    self._log_dc(f"   {fn} [{sn}]: {reason}")
+            if meta["excluded_rows"]:
+                self._log_dc(f"{meta['excluded_rows']:,} row(s) excluded (missing Department, Comm Date, "
+                             f"Gross Premium, or an implausible Comm Date).")
+            if "Doc Ref" not in df.columns:
+                self._log_dc("WARNING: no 'Doc Ref #' / 'Document No.' column was recognized in this register - "
+                             "ledger balances won't be able to match to any policy. Add the real header text to "
+                             "upr_processor.ALIASES's own 'Doc Ref' entry if this is just a naming mismatch.")
+
+            options = dcp.get_available_period_options(df)
+            self.dc_period_options = options
+            self.dc_period_combo.configure(values=[o["label"] for o in options])
+            if options:
+                self.dc_period_combo.current(0)
+            self.status_var.set(f"Deferred Commission: {len(df):,} register row(s) loaded. Choose a period, then go to tab 2.")
+
+        def on_error(exc):
+            self.dc_load_progress.finish("Failed - see the log for details.")
+            self._log_dc(f"ERROR: {exc}")
+            messagebox.showerror("Could not load register(s)", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_dc(msg),
+            on_progress_value=self.dc_load_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.dc_load_btn],
+        )
+
+    # ---- Tab 2: Opening balance + Calculate ----
+    def _build_dc_tab_opening(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s6 = self._loss_section_card(body, "6", "Opening Balance", PAD_X)
+        ttk.Label(s6, text="Opening Deferred Commission Expense",
+                  style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(s6, text="This isn't in any register or ledger - it's the prior period's own Closing figure, "
+                            "entered by hand for now.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 6))
+        self.dc_opening_var = tk.StringVar()
+        ttk.Entry(s6, textvariable=self.dc_opening_var, width=22, font=("Segoe UI", 10)).pack(anchor="w")
+
+        s7 = self._loss_section_card(body, "7", "Run Calculation", PAD_X, expand_bottom=True)
+        ttk.Label(s7, text="Re-reads the Premium Register(s) and all three ledgers, matches each ledger's "
+                            "balance onto its own policy by Doc Ref #, and builds both tables (Commission "
+                            "Paid/Payable Distribution and Deferred Commission Expense) for the period "
+                            "selected on tab 1.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        calc_btn = self._make_action_button(s7, "Calculate", self._run_dc_calculation, kind="accent")
+        calc_btn.pack(anchor="w")
+
+        self.dc_calc_progress = perf_utils.ProgressBarPanel(s7)
+        self.dc_calc_progress.frame.pack(fill="x", pady=(10, 0))
+
+        self.dc_calc_summary_var = tk.StringVar(value="")
+        ttk.Label(s7, textvariable=self.dc_calc_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 8))
+
+        tree_frame = ttk.Frame(s7)
+        tree_frame.pack(fill="both", expand=True)
+        columns = ("department", "method", "commission_total", "deferred_total")
+        self.dc_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        self.dc_results_tree.heading("department", text="Department")
+        self.dc_results_tree.heading("method", text="Method")
+        self.dc_results_tree.heading("commission_total", text="Commission Paid/Payable")
+        self.dc_results_tree.heading("deferred_total", text="Deferred Commission Expense")
+        self.dc_results_tree.column("department", width=180)
+        self.dc_results_tree.column("method", width=80, anchor="center")
+        self.dc_results_tree.column("commission_total", width=190, anchor="e")
+        self.dc_results_tree.column("deferred_total", width=200, anchor="e")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.dc_results_tree.yview)
+        self.dc_results_tree.configure(yscrollcommand=vsb.set)
+        self.dc_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self._finalize_scroll_passthrough(body)
+
+    def _run_dc_calculation(self):
+        if self.dc_loaded_df is None:
+            messagebox.showerror("Error", "Load the Premium Register(s) on tab 1 first.")
+            return
+        if not self.dc_period_options:
+            messagebox.showerror("Error", "No period options available - load register(s) with usable Comm Date values first.")
+            return
+        selected_label = self.dc_period_var.get()
+        option = next((o for o in self.dc_period_options if o["label"] == selected_label), None)
+        if option is None:
+            messagebox.showerror("Error", "Select a period on tab 1 first.")
+            return
+        if not self.dc_direct_paths and not self.dc_coinsurance_paths and not self.dc_service_charges_paths:
+            messagebox.showerror("No ledger files selected", "Browse to at least one commission/service-charge "
+                                  "ledger file on tab 1 first.")
+            return
+
+        opening_text = self.dc_opening_var.get().strip().replace(",", "")
+        try:
+            opening_deferred = float(opening_text) if opening_text else 0.0
+        except ValueError:
+            messagebox.showerror("Invalid entry", f"'{opening_text}' isn't a valid number for Opening Deferred Commission Expense.")
+            return
+
+        register_paths = list(self.dc_register_paths)
+        direct_paths = list(self.dc_direct_paths)
+        coinsurance_paths = list(self.dc_coinsurance_paths)
+        service_charge_paths = list(self.dc_service_charges_paths)
+        period_year, period_month = option["year"], option["month"]
+        self.dc_calc_summary_var.set("")
+        self.dc_calc_progress.start(total=None, text="Calculating...")
+
+        def worker(report):
+            return dcp.run_deferred_commission_calculation(
+                register_paths, direct_paths, coinsurance_paths, service_charge_paths,
+                period_year, period_month, report=report)
+
+        def on_done(result):
+            self.dc_last_result = result
+            self.dc_last_opening = opening_deferred
+            self.dc_calc_progress.finish("Done.")
+            self.dc_calc_summary_var.set(
+                f"Closing Deferred Commission Expense: PKR {result['closing_deferred_commission']:,.0f}")
+
+            self.dc_results_tree.delete(*self.dc_results_tree.get_children())
+            for dept in result["departments"]:
+                ct = dcp.row_total(result["commission_table"][dept])
+                dt = dcp.row_total(result["deferred_table"][dept])
+                self.dc_results_tree.insert("", "end", values=(
+                    dept, result["methods"][dept], f"{ct:,.0f}", f"{dt:,.0f}"
+                ))
+            for w in result["warnings"]:
+                self._log_dc(f"WARNING: {w}")
+            self.status_var.set(f"Deferred Commission: Closing = PKR {result['closing_deferred_commission']:,.0f}. See tab 3 to generate.")
+
+        def on_error(exc):
+            self.dc_calc_progress.finish("Failed - see the message for details.")
+            messagebox.showerror("Calculation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.dc_calc_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    # ---- Tab 3: Generate & Save ----
+    def _build_dc_tab_generate(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s8 = self._loss_section_card(body, "8", "Generate & Save", PAD_X, expand_bottom=True)
+        out_row = ttk.Frame(s8)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.dc_output_dir_var = tk.StringVar(value=self.dc_output_dir)
+        ttk.Entry(out_row, textvariable=self.dc_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_dc_output_dir).pack(side="left")
+
+        gen_row = ttk.Frame(s8)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate Deferred Commission Workbook", self._generate_dc_workbook, kind="accent").pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_dc_output_folder).pack(side="left", padx=(8, 0))
+
+        self.dc_gen_progress = perf_utils.ProgressBarPanel(s8)
+        self.dc_gen_progress.frame.pack(fill="x", pady=(4, 8))
+
+        self.dc_gen_log = scrolledtext.ScrolledText(s8, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.dc_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_dc_gen(self, msg):
+        self.dc_gen_log.insert("end", str(msg) + "\n")
+        self.dc_gen_log.see("end")
+
+    def _browse_dc_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.dc_output_dir_var.set(path)
+
+    def _generate_dc_workbook(self):
+        if self.dc_last_result is None:
+            messagebox.showerror("Nothing to generate", "Run Calculate on tab 2 first.")
+            return
+        base_output_dir = self.dc_output_dir_var.get().strip()
+        if not base_output_dir:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+
+        output_dir = self._new_run_folder(base_output_dir)
+        result = self.dc_last_result
+        opening_deferred = getattr(self, "dc_last_opening", 0.0)
+        filename = dcg.build_output_filename(result["period_end"])
+        output_file = os.path.join(output_dir, filename)
+
+        self.dc_gen_log.delete("1.0", "end")
+        self.status_var.set("Generating Deferred Commission workbook...")
+        self.dc_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return dcg.build_deferred_commission_workbook(result, opening_deferred, output_file)
+
+        def on_done(fp):
+            self.dc_last_output_file = fp
+            self.dc_gen_progress.finish("Done.")
+            self._log_dc_gen(f"Generated: {fp}")
+            messagebox.showinfo("Done", f"Deferred Commission workbook generated:\n{fp}")
+            self.status_var.set(f"Deferred Commission: generated {os.path.basename(fp)}.")
+
+        def on_error(exc):
+            self.dc_gen_progress.finish("Failed - see the log for details.")
+            self._log_dc_gen(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.dc_gen_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _open_dc_output_folder(self):
+        output_dir = os.path.dirname(self.dc_last_output_file) if self.dc_last_output_file else self.dc_output_dir_var.get().strip()
         if output_dir and os.path.exists(output_dir):
             os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
         else:
