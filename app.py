@@ -2730,8 +2730,6 @@ class BalanceApp(tk.Tk):
         tk.Label(pdf_row, textvariable=self.dc_ledger_pdf_name_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
                  fg=self.COLOR_MUTED, anchor="w").pack(side="left", fill="x", expand=True, padx=(6, 10))
         self._make_pill_button(pdf_row, "Browse...", self._browse_dc_ledger_pdf, bg=self.COLOR_ACCENT).pack(side="left", padx=(0, 8))
-        self._make_pill_button(pdf_row, "Load from PDF", self._load_dc_ledger_pdf,
-                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left")
 
         self.dc_ledger_status_var = tk.StringVar(value="")
         tk.Label(pdf_inner, textvariable=self.dc_ledger_status_var, font=("Segoe UI", 9), bg=self.COLOR_PANEL_ALT,
@@ -2842,6 +2840,11 @@ class BalanceApp(tk.Tk):
         if path:
             self.dc_ledger_pdf_path = path
             self.dc_ledger_pdf_name_var.set(os.path.basename(path))
+            # Load automatically the moment a file is picked, so there's no
+            # separate "Load from PDF" click needed - see _load_dc_ledger_pdf
+            # for what this actually does (parses the PDF and updates the
+            # status text below).
+            self._load_dc_ledger_pdf()
 
     def _load_dc_ledger_pdf(self):
         if not self.dc_ledger_pdf_path:
