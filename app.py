@@ -745,12 +745,15 @@ class BalanceApp(tk.Tk):
         # tinted guide line down the left edge instead of a barely-there
         # 1px border.
         submenu_block = tk.Frame(sidebar, bg=self.COLOR_SIDEBAR_SUBBG)
-        submenu_block.pack(fill="x", before=before)
+        # Not packed yet - every top-level menu starts COLLAPSED, so the
+        # person opens only whichever section(s) they actually need
+        # instead of the sidebar defaulting to fully expanded. toggle_menu
+        # (below) is what packs this the first time it's opened.
         guide = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
         guide.place(x=29, y=2, relheight=1.0, height=-8)
 
         submenu_frame = tk.Frame(submenu_block, bg=self.COLOR_SIDEBAR_SUBBG)
-        submenu_frame.pack(fill="x", pady=(2, 6))  # starts expanded
+        submenu_frame.pack(fill="x", pady=(2, 6))  # populated immediately; the wrapper block above it just isn't shown yet
 
         for entry in sub_items:
             if entry[0] is None:
@@ -761,6 +764,8 @@ class BalanceApp(tk.Tk):
                 self.nav_items[key] = self._make_nav_item(
                     submenu_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG
                 )
+
+        caret.configure(text="\u25B8")  # collapsed-state caret, matching the collapsed starting state above
 
         def toggle_menu(event=None):
             if submenu_block.winfo_ismapped():
@@ -844,17 +849,23 @@ class BalanceApp(tk.Tk):
         anchor.pack(fill="x")
 
         inner_block = tk.Frame(parent_container, bg=self.COLOR_SIDEBAR_SUBBG)
-        inner_block.pack(fill="x", before=anchor)
+        # Not packed yet - nested submenus start COLLAPSED too (see the
+        # matching change in _build_collapsible_menu), so opening a
+        # top-level menu doesn't also dump every nested submenu's own
+        # items open at once. toggle_menu (below) packs this the first
+        # time it's opened.
         guide = tk.Frame(inner_block, bg=self.COLOR_SIDEBAR_GUIDE, width=2)
         guide.place(x=37, y=2, relheight=1.0, height=-8)
 
         inner_frame = tk.Frame(inner_block, bg=self.COLOR_SIDEBAR_SUBBG)
-        inner_frame.pack(fill="x", pady=(2, 6))  # starts expanded
+        inner_frame.pack(fill="x", pady=(2, 6))  # populated immediately; the wrapper block above it just isn't shown yet
 
         for key, label in nested_items:
             self.nav_items[key] = self._make_nav_item(
                 inner_frame, key, label, indent=True, base_bg=self.COLOR_SIDEBAR_SUBBG, extra_indent=16
             )
+
+        caret.configure(text="\u25B8")  # collapsed-state caret, matching the collapsed starting state above
 
         def toggle_menu(event=None):
             if inner_block.winfo_ismapped():
