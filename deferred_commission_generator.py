@@ -220,7 +220,37 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
     ws_working.freeze_panes = ws_working.cell(row=comm_data_row, column=3).coordinate
 
     deferred_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(dcp.TABLE_COLUMNS))}{deferred_total_row}"
-    commission_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(dcp.TABLE_COLUMNS))}{comm_total_row}"
+
+    # Field order/labels match deferred_commission_ledger_processor.FIELD_LABELS
+    # (imported by name rather than the module itself, to avoid a
+    # generator-depends-on-a-PDF-parsing-module import for a value this
+    # function only ever reads, never produces).
+    ledger_rows = [
+        ("direct", "Commission Expense - Direct"),
+        ("coinsurance", "Commission Expense - Coinsurance"),
+        ("reinsurance_accepted", "Commission Expense - Reinsurance Accepted"),
+        ("service_charges", "Service Charges - Coinsurance"),
+        ("producer_allowance", "Business Producer Allowance"),
+    ]
+    # Commission Paid/Payable on the Summary sheet (below) is the sum of
+    # these five GL-code-matched balances from the uploaded Ledger
+    # Balance PDF - NOT Table 1's own grand total (which is built from
+    # matching the three per-policy Excel ledger exports against the
+    # Premium Register by Doc Ref #; that table, and everything built
+    # from it - Table 2, Closing Deferred Commission Expense - is
+    # otherwise unchanged). If no PDF was uploaded for this run at all
+    # (ledger_totals is None), or any individual account wasn't found on
+    # the PDF, this is 0 for the whole figure or for that account's own
+    # contribution respectively - never silently substituted with a
+    # different, unrelated total.
+    ledger_total_sum = 0.0
+    ledger_any_missing = False
+    for key, _label in ledger_rows:
+        val = ledger_totals.get(key) if ledger_totals else None
+        if val is None:
+            ledger_any_missing = True
+        else:
+            ledger_total_sum += float(val)
 
     # ---- "Summary" ----
     ws_summary = wb.create_sheet(SUMMARY_SHEET)
@@ -238,7 +268,10 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
 
     r = header_row + 1
     ws_summary.cell(row=r, column=2, value="Commission Paid/Payable").font = BODY_FONT
-    total_comm_cell = ws_summary.cell(row=r, column=3, value=f"={commission_grand_total_cell}")
+    # Plain number, not a formula - this figure comes straight from the
+    # PDF's own five GL balances (summed above), never from the Working
+    # sheet - 0 whenever no PDF was uploaded or nothing on it matched.
+    total_comm_cell = ws_summary.cell(row=r, column=3, value=ledger_total_sum)
     total_comm_cell.number_format = NUM_FORMAT
     total_comm_cell.font = BODY_FONT
     for col in (2, 3):
@@ -279,77 +312,82 @@ def build_deferred_commission_workbook(result, opening_deferred_commission, outp
 
     note_row = r + 3
 
-    if ledger_totals:
-        ws_summary.cell(row=note_row, column=2,
-                         value="Ledger Balances (from Ledger Balance PDF)").font = SECTION_TITLE_FONT
-        note_row += 1
+    ws_summary.cell(row=note_row, column=2,
+                     value="Ledger Balances (from Ledger Balance PDF)").font = SECTION_TITLE_FONT
+    note_row += 1
 
-        lt_header_row = note_row
-        for j, h in enumerate(["Account", "Balance"], start=2):
-            c = ws_summary.cell(row=lt_header_row, column=j, value=h)
-            c.font = HEADER_FONT
-            c.fill = HEADER_FILL
-            c.border = BORDER
-            c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
-        note_row += 1
+    lt_header_row = note_row
+    for j, h in enumerate(["Account", "Balance"], start=2):
+        c = ws_summary.cell(row=lt_header_row, column=j, value=h)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.border = BORDER
+        c.alignment = Alignment(horizontal="left" if j == 2 else "right", vertical="center", indent=1)
+    note_row += 1
 
-        # Field order/labels match deferred_commission_ledger_processor.FIELD_LABELS
-        # (imported by name rather than the module itself, to avoid a
-        # generator-depends-on-a-PDF-parsing-module import for a value
-        # this function only ever reads, never produces).
-        ledger_rows = [
-            ("direct", "Commission Expense - Direct"),
-            ("coinsurance", "Commission Expense - Coinsurance"),
-            ("reinsurance_accepted", "Commission Expense - Reinsurance Accepted"),
-            ("service_charges", "Service Charges - Coinsurance"),
-        ]
-        ledger_total_sum = 0.0
-        any_missing = False
-        for key, label in ledger_rows:
-            val = ledger_totals.get(key)
-            label_cell = ws_summary.cell(row=note_row, column=2, value=label)
-            label_cell.font = BODY_FONT
-            if val is None:
-                any_missing = True
-                val_cell = ws_summary.cell(row=note_row, column=3, value="Not found on PDF")
-                val_cell.font = Font(name="Arial", size=10, italic=True, color="6C7A89")
-            else:
-                ledger_total_sum += float(val)
-                val_cell = ws_summary.cell(row=note_row, column=3, value=float(val))
-                val_cell.number_format = NUM_FORMAT
-                val_cell.font = BODY_FONT
-            for col in (2, 3):
-                ws_summary.cell(row=note_row, column=col).border = BORDER
-            note_row += 1
-
-        ws_summary.cell(row=note_row, column=2, value="Ledger Total (Direct + Coinsurance + Service Charges)").font = BOLD_FONT
-        total_cell = ws_summary.cell(row=note_row, column=3, value=ledger_total_sum)
-        total_cell.number_format = NUM_FORMAT
-        total_cell.font = BOLD_FONT
-        total_cell.fill = TOTAL_FILL
-        ws_summary.cell(row=note_row, column=2).fill = TOTAL_FILL
+    # ledger_rows and ledger_total_sum were already computed earlier in
+    # this function, before the Commission Paid/Payable row was written -
+    # reused here rather than redefined, so the two figures can never
+    # drift out of sync with each other. This block (and the loop below)
+    # is now written UNCONDITIONALLY - even when no PDF was uploaded at
+    # all for this run (ledger_totals is None) - so the five expected
+    # accounts are always visible on the Summary sheet, each showing
+    # "No Ledger Balance PDF uploaded" rather than the section simply not
+    # existing, which made it easy to miss that Commission Paid/Payable
+    # was 0 for lack of a source rather than because that's the genuine
+    # figure.
+    for key, label in ledger_rows:
+        val = ledger_totals.get(key) if ledger_totals else None
+        label_cell = ws_summary.cell(row=note_row, column=2, value=label)
+        label_cell.font = BODY_FONT
+        if val is None:
+            placeholder = "No Ledger Balance PDF uploaded" if not ledger_totals else "Not found on PDF"
+            val_cell = ws_summary.cell(row=note_row, column=3, value=placeholder)
+            val_cell.font = Font(name="Arial", size=10, italic=True, color="6C7A89")
+        else:
+            val_cell = ws_summary.cell(row=note_row, column=3, value=float(val))
+            val_cell.number_format = NUM_FORMAT
+            val_cell.font = BODY_FONT
         for col in (2, 3):
-            ws_summary.cell(row=note_row, column=col).border = Border(top=Side(style="thin", color="1F4E78"),
-                                                                        left=THIN, right=THIN, bottom=THIN)
+            ws_summary.cell(row=note_row, column=col).border = BORDER
         note_row += 1
 
+    ws_summary.cell(row=note_row, column=2, value="Ledger Total (= Commission Paid/Payable above)").font = BOLD_FONT
+    total_cell = ws_summary.cell(row=note_row, column=3, value=ledger_total_sum)
+    total_cell.number_format = NUM_FORMAT
+    total_cell.font = BOLD_FONT
+    total_cell.fill = TOTAL_FILL
+    ws_summary.cell(row=note_row, column=2).fill = TOTAL_FILL
+    for col in (2, 3):
+        ws_summary.cell(row=note_row, column=col).border = Border(top=Side(style="thin", color="1F4E78"),
+                                                                    left=THIN, right=THIN, bottom=THIN)
+    note_row += 1
+
+    if ledger_totals:
         as_at = ledger_totals.get("as_at_date")
         if as_at:
             ws_summary.cell(row=note_row, column=2,
                              value=f"Ledger balances above are as at {as_at:%d-%b-%Y}, per the PDF's own "
                                    f"\"As At Date\".").font = NOTE_FONT
             note_row += 1
-        if any_missing:
+        if ledger_any_missing:
             ws_summary.cell(row=note_row, column=2,
-                             value="Note: one or more of the three expected accounts wasn't found on the "
-                                   "uploaded PDF - see the app's own load status for detail.").font = NOTE_FONT
+                             value="Note: one or more of the five expected accounts wasn't found on the "
+                                   "uploaded PDF - see the app's own load status for detail. Commission "
+                                   "Paid/Payable above is understated by whatever that missing account's own "
+                                   "balance would have been.").font = NOTE_FONT
             note_row += 1
         if ledger_totals.get("unmatched_lines"):
             ws_summary.cell(row=note_row, column=2,
                              value=f"Note: {len(ledger_totals['unmatched_lines'])} other GL account line(s) on "
-                                   f"the PDF weren't one of these three accounts and were ignored.").font = NOTE_FONT
+                                   f"the PDF weren't one of these five accounts and were ignored.").font = NOTE_FONT
             note_row += 1
-        note_row += 1  # blank spacer before any warnings/source-sheet notes below
+    else:
+        ws_summary.cell(row=note_row, column=2,
+                         value="Note: no Ledger Balance PDF was uploaded for this run - Commission "
+                               "Paid/Payable is 0 until one is provided.").font = NOTE_FONT
+        note_row += 1
+    note_row += 1  # blank spacer before any warnings/source-sheet notes below
 
     if result.get("warnings"):
         for w in result["warnings"]:

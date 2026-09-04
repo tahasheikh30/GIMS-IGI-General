@@ -71,6 +71,7 @@ GL_CODE_FIELD_MAP = {
     "502001004": "coinsurance",             # Commission Expense - Coinsurance Accepted
     "502002001": "reinsurance_accepted",    # Commission Expense - Reinsurance Accepted
     "503013004": "service_charges",         # Service Charges - Co Insurance
+    "503001033": "producer_allowance",      # Business Producer Allowance
 }
 
 FIELD_LABELS = {
@@ -78,7 +79,16 @@ FIELD_LABELS = {
     "coinsurance": "Commission Expense - Coinsurance",
     "reinsurance_accepted": "Commission Expense - Reinsurance Accepted",
     "service_charges": "Service Charges - Coinsurance",
+    "producer_allowance": "Business Producer Allowance",
 }
+
+# The five fields above, in the fixed order their SUM is taken in
+# wherever "the sum of all five ledger balances" is needed (currently:
+# deferred_commission_generator.py's own Commission Paid/Payable figure
+# on the Summary sheet, computed from this PDF instead of the three
+# per-policy-matched Excel ledgers whenever a PDF has been uploaded for
+# the run - see that module's own build_deferred_commission_workbook).
+LEDGER_TOTAL_FIELDS = ["direct", "coinsurance", "reinsurance_accepted", "service_charges", "producer_allowance"]
 
 # Description-keyword fallback, used ONLY for a row whose GL code isn't
 # in GL_CODE_FIELD_MAP above (e.g. a future export that renumbers the
@@ -140,15 +150,16 @@ def _signed_amount(amount_text, dr_cr):
 
 def parse_deferred_commission_ledger_pdf(filepath):
     """
-    Parse one "All Ledgers Balance" PDF for the four GL accounts this
+    Parse one "All Ledgers Balance" PDF for the five GL accounts this
     module cares about, matched by GL Account CODE (see
     GL_CODE_FIELD_MAP): 502001001 (Direct), 502001004 (Coinsurance
     Accepted), 502002001 (Reinsurance Accepted), 503013004 (Service
-    Charges - Co Insurance). Returns a dict:
+    Charges - Co Insurance), 503001033 (Business Producer Allowance).
+    Returns a dict:
       {
-        "direct", "coinsurance", "reinsurance_accepted", "service_charges":
-            float or None (None if that account was not found anywhere
-            in the report),
+        "direct", "coinsurance", "reinsurance_accepted", "service_charges",
+            "producer_allowance": float or None (None if that account
+            was not found anywhere in the report),
         "as_at_date": date or None,
         "grand_total_reported": float or None, the report's own Grand
             Total line, shown for reference only, see the module
@@ -214,9 +225,10 @@ def parse_deferred_commission_ledger_pdf(filepath):
         raise DeferredCommissionLedgerError(
             "Could not find any of the expected accounts (GL codes 502001001 Commission Expense - Direct, "
             "502001004 Commission Expense - Coinsurance Accepted, 502002001 Commission Expense - Reinsurance "
-            f"Accepted, 503013004 Service Charges - Co Insurance) in '{os.path.basename(filepath)}'. This may "
-            "not be the Ledger Balance report, or its GL codes have changed. Update GL_CODE_FIELD_MAP in "
-            "deferred_commission_ledger_processor.py if the codes have genuinely changed."
+            "Accepted, 503013004 Service Charges - Co Insurance, 503001033 Business Producer Allowance) in "
+            f"'{os.path.basename(filepath)}'. This may not be the Ledger Balance report, or its GL codes have "
+            "changed. Update GL_CODE_FIELD_MAP in deferred_commission_ledger_processor.py if the codes have "
+            "genuinely changed."
         )
 
     return {
