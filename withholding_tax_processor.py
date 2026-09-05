@@ -577,6 +577,55 @@ def match_atl(gl_df, atl_sets, sheet_order):
     return out
 
 
+OVERALL_FILER_COL = "Overall Filer Status"
+
+
+def compute_overall_filer_status(gl_df, atl_sheet_order):
+    """
+    Adds a single "Overall Filer Status" column to a COPY of gl_df, so a
+    person reviewing the workbook doesn't have to check every individual
+    ATL sheet column on every row just to see whether that payee is a
+    Filer anywhere at all.
+
+      - "Filer" if that payee is a Filer on AT LEAST ONE ATL sheet. Being
+        found on any one active list is what actually matters for the
+        withholding rate, so one "Filer" among the per-sheet columns is
+        enough to call the whole row a Filer, regardless of what the
+        other sheets say.
+      - "Non-Filer" if at least one sheet could genuinely be checked
+        (there was an NTN/CNIC to check against) and came back
+        Non-Filer, and no sheet came back Filer.
+      - "Not Determined" if every single per-sheet column reads "Not
+        Determined" (no NTN/CNIC was ever available to check against any
+        list). This is a data gap, not a confident Non-Filer finding,
+        and is kept as its own separate value rather than folded into
+        Non-Filer, for the same reason match_atl keeps the two apart at
+        the per-sheet level.
+
+    Placed as a column immediately before the first per-sheet ATL column
+    (rather than left at the end, after every sheet), so the summary sits
+    right next to the detail it's summarizing and reads first.
+    """
+    out = gl_df.copy()
+    if not atl_sheet_order:
+        out[OVERALL_FILER_COL] = "Not Determined"
+        return out
+
+    sub = out[atl_sheet_order]
+    is_filer = sub.eq("Filer").any(axis=1)
+    is_nonfiler = sub.eq("Non-Filer").any(axis=1)
+    overall = pd.Series("Not Determined", index=out.index)
+    overall = overall.mask(is_nonfiler, "Non-Filer")
+    overall = overall.mask(is_filer, "Filer")  # Filer wins even if another sheet says Non-Filer
+    out[OVERALL_FILER_COL] = overall
+
+    cols = list(out.columns)
+    cols.remove(OVERALL_FILER_COL)
+    insert_at = cols.index(atl_sheet_order[0])
+    cols.insert(insert_at, OVERALL_FILER_COL)
+    return out[cols]
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -641,6 +690,7 @@ def run_withholding_tax_processing(gl_filepath, gl_sheet_name, ntn_locator_filep
     merged = resolve_final_ntn_cnic(merged, gl_colmap)
     merged = match_status(merged, status_by_ntn, status_by_cnic)
     merged = match_atl(merged, atl_sets, atl_sheet_order)
+    merged = compute_overall_filer_status(merged, atl_sheet_order)
 
     num_rows = len(merged)
     stats = {
@@ -650,6 +700,9 @@ def run_withholding_tax_processing(gl_filepath, gl_sheet_name, ntn_locator_filep
         "num_ambiguous_locator": int((merged["Locator Match Status"] == "Ambiguous").sum()),
         "num_manual_review": int(merged["Manual Review Reason"].notna().sum()),
         "num_status_matched": int(merged["Status"].notna().sum()),
+        "num_overall_filer": int((merged[OVERALL_FILER_COL] == "Filer").sum()),
+        "num_overall_nonfiler": int((merged[OVERALL_FILER_COL] == "Non-Filer").sum()),
+        "num_overall_not_determined": int((merged[OVERALL_FILER_COL] == "Not Determined").sum()),
     }
 
     if report:
@@ -657,6 +710,9 @@ def run_withholding_tax_processing(gl_filepath, gl_sheet_name, ntn_locator_filep
                f"Locator ({stats['num_not_found_locator']:,} not found, {stats['num_ambiguous_locator']:,} "
                f"ambiguous). {stats['num_manual_review']:,} row(s) need manual review. "
                f"{stats['num_status_matched']:,}/{num_rows:,} matched to a Status/Address/Location.")
+        report(f"Overall Filer Status: {stats['num_overall_filer']:,} Filer, "
+               f"{stats['num_overall_nonfiler']:,} Non-Filer, "
+               f"{stats['num_overall_not_determined']:,} Not Determined (no NTN/CNIC to check at all).")
 
     return {
         "merged_df": merged,

@@ -28,6 +28,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+import withholding_tax_processor as wtp
+
 try:
     from perf_utils import RowProgress, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
@@ -67,6 +69,18 @@ FILER_FILL = PatternFill("solid", start_color="E2EFDA", end_color="E2EFDA")     
 NOT_DETERMINED_FILL = PatternFill("solid", start_color="FDF3EA", end_color="FDF3EA")  # light amber - "Not Determined" ATL cell
 NEW_COL_FILL = PatternFill("solid", start_color="EAF2FA", end_color="EAF2FA")     # light blue - other new (matched) columns
 
+# Styling for the single "Overall Filer Status" summary column (see
+# withholding_tax_processor.compute_overall_filer_status). Bolder/more
+# saturated than the plain per-sheet FILER_FILL/NOT_DETERMINED_FILL above,
+# since this one column is meant to be the first thing a reviewer's eye
+# lands on, rather than one of many equally-weighted sheet columns.
+OVERALL_FILER_FILL = PatternFill("solid", start_color="C6EFCE", end_color="C6EFCE")     # solid green
+OVERALL_FILER_FONT = Font(name="Arial", bold=True, color="1E6B3A")
+OVERALL_NONFILER_FILL = PatternFill("solid", start_color="F4C7CC", end_color="F4C7CC")  # solid red
+OVERALL_NONFILER_FONT = Font(name="Arial", bold=True, color="842029")
+OVERALL_NOT_DETERMINED_FILL = NOT_DETERMINED_FILL
+OVERALL_NOT_DETERMINED_FONT = Font(name="Arial", bold=True, italic=True, color="8A6100")
+
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
@@ -80,7 +94,7 @@ SHEET_NAME = "Withholding Tax Working"
 NEW_BASE_COLUMNS = [
     "NTN (Locator Match)", "CNIC (Locator Match)", "Locator Match Status",
     "NTN (Final)", "CNIC (Final)", "Manual Review Reason",
-    "Status", "Address", "Location",
+    "Status", "Address", "Location", wtp.OVERALL_FILER_COL,
 ]
 
 
@@ -178,6 +192,19 @@ def build_withholding_tax_workbook(result, output_path, gl_source_filename=None,
                 continue
             if needs_review:
                 style_cache.apply(cell, font=REVIEW_FONT, border=BORDER, fill=REVIEW_FILL)
+            elif col == wtp.OVERALL_FILER_COL:
+                # The one summary cell a reviewer should be able to read
+                # at a glance without opening every per-sheet column -
+                # solid green/red (not the paler per-sheet tints) plus a
+                # bold font, so it stands out from the rest of the row.
+                if val == "Filer":
+                    fill, font = OVERALL_FILER_FILL, OVERALL_FILER_FONT
+                elif val == "Non-Filer":
+                    fill, font = OVERALL_NONFILER_FILL, OVERALL_NONFILER_FONT
+                else:
+                    fill, font = OVERALL_NOT_DETERMINED_FILL, OVERALL_NOT_DETERMINED_FONT
+                style_cache.apply(cell, font=font, border=BORDER, fill=fill,
+                                   alignment=Alignment(horizontal="center", vertical="center"))
             else:
                 fill = None
                 if col in atl_sheet_order:
@@ -201,12 +228,22 @@ def build_withholding_tax_workbook(result, output_path, gl_source_filename=None,
 
     n_review = int(df["Manual Review Reason"].notna().sum())
     n_matched_locator = int((df["Locator Match Status"] == "Matched").sum())
+    n_overall_filer = int((df[wtp.OVERALL_FILER_COL] == "Filer").sum())
+    n_overall_nonfiler = int((df[wtp.OVERALL_FILER_COL] == "Non-Filer").sum())
+    n_overall_not_determined = int((df[wtp.OVERALL_FILER_COL] == "Not Determined").sum())
     pct = f"{n_matched_locator / n_total:.1%}" if n_total else "N/A"
     note_row = n_total + 3
     ws.cell(row=note_row, column=1,
             value=f"{n_matched_locator} of {n_total} ({pct}) payee(s) matched to an NTN/CNIC via the NTN "
                   f"Locator. {n_review} row(s) highlighted below need manual review - no confident "
                   f"NTN/CNIC could be determined for that payee.")\
+        .font = Font(name="Arial", size=9, italic=True, color="6C7A89")
+    ws.cell(row=note_row + 1, column=1,
+            value=f"Overall Filer Status column: {n_overall_filer} Filer (green), "
+                  f"{n_overall_nonfiler} Non-Filer (red), {n_overall_not_determined} Not Determined "
+                  f"(amber, no NTN/CNIC to check at all) - a payee is marked Filer here if found on "
+                  f"any single ATL sheet, so this column alone reflects the correct rate without "
+                  f"needing to check each sheet column individually.")\
         .font = Font(name="Arial", size=9, italic=True, color="6C7A89")
 
     wb.save(output_path)

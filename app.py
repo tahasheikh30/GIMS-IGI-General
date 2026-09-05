@@ -3212,6 +3212,9 @@ class BalanceApp(tk.Tk):
             self._log_wht(f"{stats['num_manual_review']:,} row(s) need manual review.")
             self._log_wht(f"{stats['num_status_matched']:,}/{stats['num_rows']:,} matched to a "
                           f"Status/Address/Location.")
+            self._log_wht(f"Overall Filer Status: {stats['num_overall_filer']:,} Filer, "
+                          f"{stats['num_overall_nonfiler']:,} Non-Filer, "
+                          f"{stats['num_overall_not_determined']:,} Not Determined.")
 
             summary_text = (f"Matched {stats['num_matched_locator']:,}/{stats['num_rows']:,} \u2014 "
                              f"{stats['num_manual_review']:,} need manual review.")
