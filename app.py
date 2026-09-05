@@ -695,7 +695,7 @@ class BalanceApp(tk.Tk):
                 # flat leaf item so a future Sales Tax withholding module can
                 # sit alongside it without restructuring the sidebar again.
                 (None, "Withholding Tax", [
-                    ("withholding_tax_income", "Income Tax"),
+                    ("withholding_tax_income", "Tax Payer Check"),
                 ]),
             ],
             before=coinsurance_header,

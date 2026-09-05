@@ -1,76 +1,164 @@
 # GIMS — General Insurance Management System
 
-A desktop tool for the Finance department, built around a persistent sidebar
-with two collapsible menus, each expanding to its own set of sections:
+A Windows desktop tool (Tkinter) for the Finance department at IGI General
+Insurance, built around a persistent sidebar with three top-level collapsible
+menus, each expanding into its own sections:
 
-- **General Operations** — a collapsible menu with two sub-items:
-  - **Outstanding Premium** — fully built: upload the client balance sheet,
-    set a threshold, generate per-client Excel PivotTable reports, and
-    draft/send reminder emails through your own Outlook account.
-  - **Loss Ratio** — fully built: calculate Loss Ratio (Claims Paid ÷ Gross
-    Premium) for one company or a group of companies from their own Excel
-    files, with a styled, color-flagged summary report.
-- **Coinsurance** — a collapsible menu with three sub-items:
-  - **Premium/Claims Email Automation** — fully built: reads a co-insurance
-    outstanding-position export, generates one two-sheet Excel statement
-    (Premium Receivable / Claims Receivable) per Client + Company group, and
-    drafts/sends the notification emails through your own Outlook account.
-    Structured as the same three-tab workflow as Outstanding Premium
-    (Upload & Validate → Client + Company Groups → Review & Send Emails).
-  - **Premium Register** — fully built: matches a co-insurance leader's own
-    policy numbers against IGI's Premium Register using fuzzy digit-run
-    matching, pulls in the matched IGI Policy Number, and flags any
-    unmatched rows (highlighted red) for manual entry.
-  - **Claims Register** — fully built: matches the Claim Intimation Register
-    against IGI's own Premium Register to recover each claim's coinsurer(s)
-    (a policy shared by several coinsurers fans a claim out to each of
-    their files), then writes one Excel workbook per coinsurer plus a
-    separate "Unmatched Claims" workbook for manual review, and drafts/
-    sends a recovery-statement email per coinsurer file. Same three-tab
-    structure as Premium/Claims Email Automation (Upload & Match →
-    Insurance Company Files → Review & Send Emails), with an optional
-    date filter to scope a run to a specific period.
+- **General Operations**
+  - **Outstanding Premium** — upload the client balance sheet, set a
+    threshold, generate per-client Excel PivotTable reports, and draft/send
+    reminder emails through your own Outlook account.
+  - **Loss Ratio** — calculate Loss Ratio (Incurred Loss + Commission
+    Accrual) ÷ Gross Premium Written for one company or a group of
+    companies, from Excel or PDF source files, with a styled, color-flagged
+    summary report.
+- **Finance**
+  - **Management Accounts**
+    - **UPR Automation** — computes Closing Unearned Premium Revenue from
+      the Premium Register using the 1/24 (most departments) and 1/6
+      (Marine/Travel) amortization methods for a selected 12-month period.
+    - **Reinsurance Automation** — the same period/bucketing/amortization
+      method as UPR, applied instead to Total Reinsurance Ceded (Treaty +
+      Local + Foreign Premium) from a separate register per department, to
+      produce Closing Prepaid Reinsurance Premium Ceded.
+    - **Deferred Commission** — matches three commission/service-charge
+      ledgers to the Premium Register by policy reference, sums them into a
+      Total Commission per policy, and amortizes it the same UPR way to
+      produce Closing Deferred Commission Expense.
+  - **Withholding Tax**
+    - **Tax Payer Check** — matches the General Ledger against an NTN Locator, a
+      Status file, and FBR's own multi-sheet Active Taxpayer List (ATL) to
+      resolve each payee's NTN/CNIC, tax status, and Filer/Non-Filer
+      standing per ATL sheet.
+- **Coinsurance**
+  - **Premium/Claims Email Automation** — reads a co-insurance
+    outstanding-position export, generates one Excel statement per Company
+    (Premium Receivable / Claims Receivable), and drafts/sends the
+    notification emails.
+  - **Premium**
+    - **Policy Check** — matches a co-insurance leader's own policy numbers
+      against IGI's Premium Register using fuzzy digit-run + branch/class
+      matching, pulls in the matched IGI Policy Number, and flags unmatched
+      rows for manual entry.
+    - **Premium Register** — splits IGI's own raw Premium Register export
+      by coinsurer (every row where Leader = "No") and produces one
+      statement workbook + draft email per company.
+  - **Claims**
+    - **Claims Intimation** (Claims Register) — matches the Claim
+      Intimation Register against IGI's own Premium Register to recover
+      each claim's coinsurer(s) — a policy shared by several coinsurers
+      fans a claim out to each of their files — then writes one workbook
+      per coinsurer plus a separate "Unmatched Claims" workbook, and
+      drafts/sends a recovery-statement email per coinsurer.
+    - **Claims Check** — reuses Policy Check's own matching engine to
+      confirm whether a co-insurance leader's claimed policy actually
+      exists in IGI's own Premium Register (with a second, strict Doc-No
+      matcher auto-selected for purely numeric reference formats).
+
+Every module that groups source rows by company (Claims Register, Premium
+Register split, Premium/Claims Email Automation) shares one deterministic
+merge/alias engine (`company_alias_resolver.py`) and a fixed canonical
+filename list for known companies, so a coinsurer never ends up split across
+two differently-spelled output files by accident.
+
+Every module that produces a Takaful vs. Conventional distinction (Claims
+Intimation, Premium Register split) has a **Business Type** radio button
+that works "Takaful" into the output filenames, email subject, and email
+body for that run — a Conventional run (the default) is worded exactly as
+if the toggle didn't exist.
 
 ## What's included
 
+### Core app / shared infrastructure
 | File | Purpose |
 |---|---|
 | `app.py` | Main desktop GUI (Tkinter) — run this |
-| `assets/gims_logo_cropped.png` | GIMS logo shown top-left in the header |
-| `assets/company_logo_cropped.png` | Company logo shown top-right in the header |
+| `assets/gims_logo_cropped.png`, `assets/company_logo_cropped.png` | Header logos |
+| `perf_utils.py` | Background-thread runner for Tkinter; a fast Excel reader (`python-calamine` when installed, ~7x faster than openpyxl's own reader, falling back to openpyxl's streaming reader otherwise); `StyleIndexCache`, which makes per-cell font/border/fill/number_format application cheap by reusing openpyxl's own internal style index instead of re-hashing the same style on every cell; a visual progress bar widget. See `PERFORMANCE_NOTES.md`. |
+| `app_paths.py` | Keeps GIMS' own small per-user state (signature, templates, run-history logs) in a local, per-machine folder (`%LOCALAPPDATA%\GIMS`), never inside the OneDrive-shared project folder — this is the fix for "the app corrupts when moved between laptops." See `README_ONEDRIVE_FIX.md`. |
+| `safe_io.py` | Atomic (write-to-temp-then-rename) JSON read/write helpers used by every state file, so a mid-write crash or a sync engine reading at the wrong moment can never leave a half-written file behind. |
+| `company_alias_resolver.py` | Shared, fully deterministic company-merge logic (leading-token + known-abbreviation rules, no manual-review workbook), canonical output filenames for a fixed list of known companies, and the Co-insurance Companies List / Email Lookup File parser used across Claims Register, Premium Register (split), and Receivable. |
+
+### Outstanding Premium
+| File | Purpose |
+|---|---|
 | `data_processor.py` | Loads, validates, and aggregates the raw balance sheet |
-| `perf_utils.py` | Background-thread runner for Tkinter; a fast Excel reader (`python-calamine` when installed, ~7x faster than openpyxl's own reader on a real 500,000-row file, falling back to openpyxl's streaming reader otherwise); `StyleIndexCache`, which makes per-cell font/border/fill/number_format application cheap by reusing openpyxl's own internal style index instead of re-hashing the same style on every cell; a visual progress bar widget. Keeps the app responsive on huge (500k+ row) source files and fast when generating Excel output. See `PERFORMANCE_NOTES.md`. |
-| `report_generator.py` | Writes each client's raw transaction data into its own Excel file; also generates every client's static (non-native-pivot) report in parallel across CPU cores when Excel isn't available and the batch is large enough |
-| `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static formatted table if Excel isn't available) |
-| `email_generator.py` | Fills the email template per client; template stored in `templates.json` |
-| `outlook_sender.py` | Sends via Outlook COM automation (your own signed-in account) |
-| `loss_ratio_processor.py` | Reads/validates Loss Ratio input files, normalizes column-name variations, aggregates per company |
-| `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output |
-| `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects the header row and either amount-column layout) |
-| `receivable_generator.py` | Writes each insurance company's three-sheet (Summary w/ charts, Premium Receivable, Claims Receivable) Excel statement, covering every client for that company; also generates every company's workbook in parallel across CPU cores when the batch is large enough |
-| `receivable_email.py` | Drafts the statement email per company file and sends via `outlook_sender` |
-| `receivable_automation.py` | `load_email_lookup_from_file()` (used by the GUI, reads a separate lookup file) plus a standalone `run_pipeline()` for command-line / scripted runs of the whole flow |
-| `receivable_run_log.py` | Writes the Receivable module's audit trail to `receivable_run_history.json` |
-| `run_log.py` | Writes an audit trail to `run_history.json` (Outstanding Premium module) |
-| `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls` including files split across multiple 65,536-row sheets), and fuzzy-matches policy numbers between them |
-| `premium_register_generator.py` | Writes the matched-output Excel file, with unmatched rows highlighted for manual entry |
-| `claims_register_processor.py` | Loads the Claim Intimation Register and IGI's Premium Register (merging legacy `.xls` files split across multiple 65,536-row sheets), fuzzy-matches each claim to its policy, and fans it out to every coinsurer sharing that policy |
-| `claims_register_generator.py` | Writes each coinsurer's two-sheet (Summary w/ charts, Claims Data) Excel workbook plus a shared "Unmatched Claims" workbook; generates every coinsurer's workbook in parallel across CPU cores when the batch is large enough |
-| `claims_register_email.py` | Drafts the recovery-statement email per coinsurer file and sends via `outlook_sender` |
-| `claims_register_run_log.py` | Writes the Claims Register module's audit trail to `claims_register_run_history.json` |
+| `report_generator.py` | Writes each client's raw transaction data + pivot into its own Excel file; parallelized across CPU cores on the non-native-pivot fallback path |
+| `pivot_native_generator.py` | Drives Excel via COM to build a genuine, interactive PivotTable in each report (falls back to a static table if Excel isn't available) |
+| `email_generator.py` | Fills the shared email template per client; signature/templates persisted via `app_paths`/`safe_io` |
+| `outlook_sender.py` | Sends via Outlook COM automation |
+| `run_log.py` | Audit trail (`run_history.json`) |
+
+### Loss Ratio
+| File | Purpose |
+|---|---|
+| `loss_ratio_processor.py` | Reads/validates Excel or PDF Loss Ratio inputs, normalizes header variations, aggregates per company |
+| `loss_ratio_generator.py` | Builds the styled Loss Ratio Summary Excel output with live formulas |
+
+### UPR Automation / Reinsurance Automation / Deferred Commission
+| File | Purpose |
+|---|---|
+| `upr_processor.py` | Loads Premium Register file(s), validates period coverage, buckets by Comm Date (Previous/Jan–Dec/Future Policies), and amortizes Gross Premium (1/24 / 1/6 / zero per department) — the shared engine all three "Management Accounts" modules build on |
+| `upr_generator.py` | Writes the UPR working workbook (Summary + a single two-table working sheet, live SUM/reference formulas) |
+| `upr_ledger_processor.py` | Parses the "All Ledgers Balance" PDF to auto-fill UPR's own Section 1 premium-income figures |
+| `reinsurance_processor.py` | Computes Total Reinsurance Ceded per row (department taken from the file name, since these registers carry no Department column) and reuses `upr_processor`'s period/bucketing/amortization logic unchanged |
+| `reinsurance_generator.py` | Writes the Reinsurance working workbook, including a Treaty/FAC/Foreign-FAC breakdown table |
+| `deferred_commission_processor.py` | Matches three commission/service-charge ledgers to the Premium Register by Doc Ref # (after splitting a "~"-joined reference), sums into Total Commission, and reuses `upr_processor`'s amortization logic |
+| `deferred_commission_generator.py` | Writes the Deferred Commission working workbook, including a Ledger-Balance-PDF reconciliation block |
+| `deferred_commission_ledger_processor.py` | Parses the same "All Ledgers Balance" PDF for the five GL accounts this module cares about |
+
+### Withholding Tax — Tax Payer Check
+| File | Purpose |
+|---|---|
+| `withholding_tax_processor.py` | Matches the General Ledger's Payee Name against an NTN Locator (exact match only — no fuzzy matching, since this feeds a real tax rate), resolves NTN/CNIC, matches a Status file, and checks FBR's own multi-sheet Active Taxpayer List (via `python-calamine` directly — a real ATL file can run into the millions of rows) |
+| `withholding_tax_generator.py` | Writes the single working sheet, red-highlighting every row that needs manual review (no confident NTN/CNIC could be established), plus a bold Overall Filer Status column |
+
+### Coinsurance — Policy Check / Claims Check
+| File | Purpose |
+|---|---|
+| `premium_register_processor.py` | Loads the leader's policy file and IGI's Premium Register (auto-detecting header rows/sheets, handling legacy `.xls` split across multiple 65,536-row sheets), and fuzzy-matches policy numbers (digit-run blocking + branch/class-code safeguard) |
+| `premium_register_generator.py` | Writes the matched-output Excel file, unmatched rows highlighted red |
+| `claims_check_processor.py` | Reuses Policy Check's own matching engine for a leader's claims file against the same register columns; auto-switches to a strict, Doc-No-only matcher for a purely numeric reference format (where the normal branch/class safeguard would be a silent no-op) |
+| `claims_check_generator.py` | Writes the Claims Check output, unmatched rows highlighted red |
+
+### Coinsurance — Claims Intimation (Claims Register)
+| File | Purpose |
+|---|---|
+| `claims_register_processor.py` | Loads the Claim Intimation Register and IGI's Premium Register, fuzzy-matches each claim to its policy (compound branch/class + serial blocking keys for speed on 200,000+ row registers), and fans a claim out to every coinsurer sharing that policy |
+| `claims_register_generator.py` | Writes each coinsurer's two-sheet (Summary dashboard + Claims Data) workbook plus a shared Unmatched Claims workbook; parallelized across CPU cores |
+| `claims_register_email.py` | Drafts the recovery-statement email per coinsurer file |
+| `claims_register_run_log.py` | Audit trail (`claims_register_run_history.json`) |
+
+### Coinsurance — Premium/Claims Email Automation & Premium Register (split)
+| File | Purpose |
+|---|---|
+| `receivable_processor.py` | Loads, validates, and groups the Premium & Claims Receivable master file (auto-detects header row, sheet, and either dual-amount-column or legacy single-amount-column layout) |
+| `receivable_generator.py` | Writes each company's three-sheet (Summary dashboard, Premium Receivable, Claims Receivable) statement; parallelized across CPU cores |
+| `receivable_email.py`, `receivable_automation.py`, `receivable_run_log.py` | Drafting/sending, a scripted CLI pipeline, and the audit trail |
+| `premium_register_company_processor.py` | Splits IGI's own raw Premium Register export by coinsurer (Leader = "No" rows only, IGI's own share excluded) — accepts either the original Leader-bearing register shape or a "Co Insurance Ceded Register" export shape that has no Leader column at all |
+| `premium_register_company_generator.py` | Writes each company's two-sheet (Summary + Premium Data) workbook; parallelized across CPU cores |
+| `premium_register_company_email.py`, `premium_register_company_run_log.py` | Drafting/sending and the audit trail |
 
 ## Requirements
 
 - Windows PC with **Microsoft Outlook desktop app** installed and signed in
-  (emails send through your own mailbox — no separate login needed)
-- **Microsoft Excel desktop app installed** — needed to build genuine, interactive
-  PivotTables (real field list, filters, drill-down) in each report. Without Excel,
-  the app still works but falls back to a static formatted table that looks similar
-  but can't be interacted with like a real pivot.
+  (emails send through your own mailbox)
+- **Microsoft Excel desktop app** — needed for genuine, interactive
+  PivotTables in Outstanding Premium reports; without it, that module falls
+  back to a static formatted table
 - Python 3.9+
-- **Pillow** (for the header logos — falls back to a plain drawn "G" badge on
-  the left if it isn't installed or the `assets/` files are missing; the
-  rest of the app is unaffected either way)
+- **Pillow** — header logos and the progress-bar state dot (falls back to a
+  plain drawn badge/oval if missing)
+- **python-calamine** (strongly recommended) — the fast Excel/legacy-`.xls`
+  reader every loader in the app prefers; falls back to openpyxl
+  automatically if not installed. **Required** (no fallback) for the
+  Withholding Tax module's ATL file, since that file can run into the
+  millions of rows
+- **xlrd** (optional) — reading legacy `.xls` files directly; without it,
+  the app falls back to converting via a local LibreOffice install if one
+  is present
+- **pdfplumber** — required for any PDF input (Loss Ratio's PDF mode, the
+  UPR/Deferred Commission Ledger Balance PDF auto-fill)
 
 Install dependencies:
 ```
@@ -83,565 +171,200 @@ pip install -r requirements.txt
 python app.py
 ```
 
-On launch you'll see a fixed header with the GIMS wordmark, and a left
-sidebar with two collapsible menus: **General Operations** (click it to
-expand/collapse its two sub-items: **Outstanding Premium**, **Loss
-Ratio**) and **Coinsurance** (click it to expand/collapse its
-own three sub-items: **Premium/Claims Email Automation**, **Premium
-Register**, **Claims Register**). Both menus start expanded, and each can
-be collapsed independently without affecting the other. The active section
-is highlighted with an accent bar and bold text. All the functionality
-below (Steps 1–3) lives inside **Outstanding Premium**, under General
-Operations — click it in the sidebar if it isn't already selected. Claims
-Register is fully built (see its own section below).
+Click a top-level menu in the sidebar (**General Operations**, **Finance**,
+**Coinsurance**) to expand/collapse it; every menu — and every nested
+submenu inside it (e.g. Finance's own "Management Accounts", Coinsurance's
+own "Premium"/"Claims") — starts collapsed, so only the section you're
+actually using takes up space. The active page is highlighted with a gold
+accent bar and bold white text.
 
-### Step 1 — Upload & Filter
-1. Browse to your balance data `.xlsx` file (the raw transaction sheet, e.g. "Sheet1").
-2. Confirm the sheet name.
-3. **Optional:** browse to an email lookup file (`.xlsx` or `.csv`) with a client-name
-   column and an `Email` column. Rows are matched to clients by exact name.
-   If you skip this, drafted emails will be flagged "missing email" and you can
-   fill them in manually in tab 3.
-   - **Optional POC/contact column:** if the lookup file also has a column named
-     something like `POC`, `Contact`, `Contact Person`, or `Attention`, that
-     person's name is used in the greeting ("Dear Ahmed Khan,") instead of the
-     company name. Rows with no name in that column just fall back to the
-     company name as before — no need for every row to have one.
-4. Click **Load & Validate Data** — this flags rows with a missing client name,
-   missing department, or a non-numeric balance (these are excluded from totals,
-   and listed in the log so you can fix the source sheet if needed).
-5. Choose which date drives the "Year" breakdown: **Issue Date** or
-   **Comm. Date** (commencement date). Issue Date is the default.
-6. Set your **threshold** (PKR). Optionally select one or more departments
-   and/or one or more agencies/agents (Ctrl+click for multiple), and/or type
-   exact company names to restrict to specific clients. Selecting an agency
-   first narrows to that agency's clients, and the threshold then applies to
-   each of those clients individually.
-7. Click **Analyze / Apply Filters**.
+## Module notes
 
-### Step 2 — Qualifying Clients
-Shows every client whose total outstanding balance (across all departments/years,
-within any filters applied) meets or exceeds the threshold, largest first, along
-with the agent(s)/agency associated with that client. Click **Generate Excel
-Reports** to write one file per client (named
-`ClientName_OutstandingBalance_Report.xlsx`) into an `output/` folder. Each file
-contains **two sheets**:
-- **"Outstanding Balance"** — a genuine, interactive **Excel PivotTable** (built
-  by driving Excel itself via COM automation), with Department in rows, Year in
-  columns, and Sum of O/s as the value — fully drillable, filterable, and
-  re-configurable using Excel's normal PivotTable Field List, exactly as if you'd
-  built it by hand via Insert → PivotTable. The header cells read "Department"
-  and "Year" (rather than Excel's generic "Row Labels"/"Column Labels" default).
-- **"Raw Data"** — every original transaction row for that client from the source
-  sheet (this is also the PivotTable's source range, so refreshing the pivot
-  in Excel re-pulls from this sheet)
+### Outstanding Premium
+Three tabs: **Upload & Filter** (balance file, sheet name, Year-basis
+choice, email lookup file), **Qualifying Clients** (threshold + Department/
+Agent/Branch filters, one row per client meeting the threshold, generate
+reports), **Review & Send Emails** (draft/preview/edit/send, shared
+signature box, dry-run toggle). Each client's report has a "Raw Data"
+sheet plus a genuine, interactive Excel PivotTable (native COM automation)
+or a static fallback table if Excel isn't installed.
 
-If Microsoft Excel isn't installed on the machine generating the reports, this
-step automatically falls back to a static formatted table that *looks* like a
-pivot but has no interactive functionality — you'll see a note in the completion
-popup if that happens.
-
-### Step 3 — Review & Send Emails
-1. At the top of this tab, there's a **"Your Signature"** box — whatever you
-   type there appears after "Regards," at the end of every email. It's saved
-   automatically the moment you click **Draft Emails** (or explicitly via
-   **Save Signature**), and reloads automatically the next time you open the
-   app, so you only need to set it once.
-2. Click **Draft Emails** to generate a personalized email per qualifying client
-   from the template in `email_generator.py` / `templates.json`.
-3. Click any row to preview/edit its subject and body. Click **Save Edits** to
-   keep your changes for that client only.
-4. **Dry run** is checked by default — this lets you preview exactly what would
-   be sent (and to whom) without actually sending anything.
-5. Uncheck dry run and click **Send All** to send for real. Each email attaches
-   that client's report from `output/` if one was generated. You'll get a
-   confirmation prompt first since this action can't be undone.
-6. Every run (qualifying count, sent/failed counts, filters used) is logged to
-   `run_history.json` for audit purposes.
-
-## Loss Ratio module
-
-Click **Loss Ratio** in the sidebar. The page is organized into four
-numbered cards: Mode & Report Name, Input Files, Threshold & Generate, and
-Processing Log.
-
-**Formula (verified against a real IGI sample file and its source report):**
+### Loss Ratio
 ```
 Loss Ratio % = (Incurred Loss + Commission Accrual) / Gross Premium Written × 100
 ```
-This matches your system's own "Loss Ratio (B+C/A)" definition, where A = Gross
-Premium Written, B = Incurred Loss, C = Commission Accrual.
+Individual or Group mode, Excel and/or PDF input mixed freely, a
+configurable red-highlight threshold (amber is always triggered at ≥70%),
+and a live-formula output matching the real "Group Summary" template
+exactly (merged green banner, `CLIENT | GP | CLAIM | COMMISSION | LR`).
 
-**Accepted input files: Excel (`.xlsx`) or PDF.**
-- **Excel**: expects `Gross Premium Written`, `Incurred Loss`, and optionally
-  `Commission Accrual` columns (see alias list below). Multi-year files with
-  a "Client Total"/"Grand Total" row use that row directly rather than
-  summing every row, to avoid double-counting.
-- **PDF**: reads IGI's own "Loss Ratio Gross Premium Written" Crystal
-  Reports export format directly — the same layout as your system's PDF
-  print-out. It finds each client's "Client Total" line and pulls the
-  Gross Premium Written / Incurred Loss / Commission Accrual totals from
-  it. **A single PDF covering a client range produces one row per client**,
-  so one multi-client PDF export can populate an entire Group report by
-  itself — you don't need to split it into per-company files first. The
-  report's own overall "Grand Total" line (the sum across every client in
-  the PDF) is correctly excluded from the row list, since it isn't a company.
+### UPR Automation / Reinsurance Automation / Deferred Commission
+All three share one three-tab shape (**Register/Files & Period** →
+**Opening Balance & Calculate** → **Generate & Save**) and the same
+underlying 12-month bucketing/amortization engine: a department's own
+premium (or reinsurance-ceded, or commission) figure is spread across
+Previous / Jan–Dec / Future Policies buckets by Comm Date, then amortized
+1/24 (most departments), 1/6 (Marine/Travel), or not at all (BIMA). Each
+module raises a clear error rather than silently understating a figure if
+the uploaded register(s) don't actually cover the full selected 12-month
+period. UPR and Deferred Commission can both auto-fill part of their
+Section 1 / Summary figures from an "All Ledgers Balance" PDF upload.
 
-1. **Choose a mode:**
-   - **Individual Company** — browse to a single file for one company.
-   - **Group of Companies** — click **Add File(s)...** to select one or
-     more files (Excel and PDF can be mixed freely in the same batch).
-     Select a file in the list and click **Remove Selected** to take it
-     out before processing.
-2. **Group / Report Name** — text shown in the green banner at the top of
-   the output (e.g. "POPULAR GROUP"). Leave blank for a generic default.
-3. **Set the red highlight threshold** (default 100%) — any company's Loss
-   Ratio above this is flagged red. Anything ≥70% is always flagged amber
-   (this coloring is an addition on top of your existing template, which
-   doesn't otherwise style individual rows).
-4. Click **Calculate Loss Ratio**. The Processing Log shows each file's
-   result or error, tagged with the source filename — a problem in one
-   file (missing column, non-numeric value, unreadable file, unrecognized
-   PDF layout) doesn't stop the others from processing. If any files
-   errored, you'll be asked whether to continue with just the successful
-   ones.
-5. A **Save As** dialog lets you choose where to save the output `.xlsx`.
+### Withholding Tax — Tax Payer Check
+Single-page workflow: General Ledger, NTN Locator, Status file, and ATL
+file (any of the first three can be separate files or separate sheets in
+the same workbook — each is auto-detected independently). Matching is
+**exact only** end to end (name normalization closes formatting gaps, but
+never approximates a match) — any payee that can't be confidently
+identified is highlighted red for manual review rather than guessed at,
+since this feeds an actual withholding tax rate.
 
-**Expected Excel column names** (case-insensitive, naming variations like
-"Gross Premium Written ( A )" or "GP" are automatically recognized):
-- Required: `Gross Premium Written`, `Incurred Loss`
-- Optional: `Commission Accrual` (treated as 0 if absent — flagged in the
-  Processing Log so it's never silently wrong), `Company Name` (falls back
-  to the filename if absent)
+### Coinsurance — Policy Check / Claims Check
+Policy Check matches a leader's own policy numbers against IGI's Premium
+Register via digit-run blocking + longest-complete-run scoring, with a
+branch/class-code safeguard (`MIN_ALPHA_RATIO`) that stops two unrelated
+transactions from different departments matching just because their
+serial numbers happen to collide (every department restarts numbering at
+1). Claims Check reuses this same engine for a leader's own claims file,
+automatically switching to a stricter Doc-No-only matcher when the
+reference format is purely numeric (a shape where the normal safeguard
+would otherwise be a silent no-op).
 
-A leading account-code prefix in a client name cell (e.g. "1120106182 SAYA
-WEAVING MILLS...") is stripped automatically, in both Excel and PDF inputs.
+### Coinsurance — Claims Intimation (Claims Register)
+Matches the Claim Intimation Register's own `Policy/PMD #` against the
+Premium Register's `Base Doc No.` (falling back to `Document No.`), then
+fans a matched claim out to every coinsurer sharing that same policy (a
+real policy can have 11+ coinsurers on it). Supports an optional Date
+Filter (Intimation Date or Loss Date) and Unit/Client Name/Department
+multi-select filters, both applied before matching so everything
+downstream only ever reflects the scoped run. One workbook per coinsurer
+(OFC-named companies pooled) plus a shared "Unmatched Claims" workbook.
 
-**Output format** replicates your real "Group Summary" template exactly:
-merged green group-name banner, `CLIENT | GP | CLAIM | COMMISSION | LR`
-header row, and — critically — **live Excel formulas** for the LR column
-(`=SUM(D:E)/C%`) and the Total row, not hardcoded numbers, so the sheet
-recalculates correctly if you ever edit a value by hand. The Total row's LR
-cell is highlighted yellow, matching your existing template.
+### Coinsurance — Premium/Claims Email Automation & Premium Register (split)
+Both group rows by company (pooling every "OFC"-named company into one
+shared file) and both support the optional "Merge files for the same
+company" checkbox, which folds branch-name variants of the same real
+company (or a known abbreviation like AIC/JGE/JGI/UBL) into one combined
+output — a fully deterministic, no-manual-review operation that never
+drops or double-counts a row. Premium Register (split) additionally
+accepts a "Co Insurance Ceded Register" export shape that has no Leader
+column at all (every row on that export is already ceded business by
+construction).
 
-I validated this two ways: reconstructing all 11 companies from your real
-`Popular_Group_Loss_Ratio.xlsx` sample as separate input files (every value
-matched to 6 decimal places, including the 105.408432% group total), and
-parsing your real `Loss_Ratio.pdf` sample directly (extracted GP, Loss, and
-Commission matched the report's own printed 10.73% total ratio exactly).
+## Company merge logic & multiple email recipients
 
-If any of your real files use column headers, or a PDF layout, not covered
-here, send me an example and I'll extend the matching.
+`company_alias_resolver.py` is the single shared engine behind every
+company-grouping module:
 
-**Output:** a "Loss Ratio Summary" sheet with one row per company, a bold
-Total/Group row in Group mode, and cells color-coded red/amber based on the
-Loss Ratio thresholds — styled consistently with the Outstanding Premium
-reports (same fonts, header colors, borders, number formats).
+- **Merging branch-name variants**: two bucket labels merge whenever they
+  share the same leading token before the first underscore/space (e.g.
+  "Atlas_Insurance_Faisalabad" and "Atlas_Insurance_ClaimRecovery" both
+  reduce to "ATLAS"), or when one is a known abbreviation (AIC → Adamjee,
+  JGE/JGI → Jubilee, RIC → Reliance, AGI → Askari General, plus a couple of
+  confirmed real misspellings like "SALAM" → Salaam Takaful). This is
+  fully deterministic — no confidence scores, no manual-review workbook —
+  so it's always safe to toggle the merge checkbox on/off and regenerate.
+- **Canonical output filenames**: a fixed, word-boundary-matched list
+  (`CANONICAL_COMPANY_FILENAMES`) gives a known set of companies (Adamjee,
+  Atlas, EFU, IGI, Jubilee, UBL, United, ...) a stable filename regardless
+  of exactly how their raw/merged bucket label happens to be worded.
+- **Email lookup**: resolves a bucket's raw company name against the Email
+  Lookup File first by exact match, then by the same merge-key logic —
+  this alone fixed a confirmed real bug where 0 of 11 real coinsurer
+  drafts matched under plain exact-match lookup.
+- **Multiple recipients per company**: the Email Lookup File can list more
+  than one address per company (one per row, cleaned of `Name <email>`
+  wrappers and stray trailing punctuation); all are joined into Outlook's
+  "To" field with semicolons. You can also just type multiple addresses
+  directly into the "To" field on any Review & Send Emails tab.
 
-## Coinsurance > Premium/Claims Email Automation module
+## Performance
 
-Click **Coinsurance** in the sidebar to expand it, then click
-**Premium/Claims Email Automation**. The page uses the same three-tab
-structure as Outstanding Premium:
+See `PERFORMANCE_NOTES.md` for the full detail (five documented rounds of
+profiling against real production-sized files — up to a 204,220-row
+Premium Register and a 27,976-claim Claims Register run). In short:
 
-- **1. Upload & Validate** — source file, sheet names, validation options,
-  and an optional Client/Company filter, plus an Activity Log.
-- **2. Insurance Company Files** — one row per output file (one per
-  insurance company, with every "OFC"-named company pooled into a single
-  shared file — see below), showing its client count and Premium/Claims
-  Receivable totals, plus the "Generate Excel Reports" / "Open Output
-  Folder" buttons.
-- **3. Review & Send Emails** — draft, preview/edit, and send the
-  statement emails (one per company file), with a shared "Your Signature"
-  box, dry run toggle, and per-row Send/Save Edits buttons — identical
-  interaction pattern to Outstanding Premium's tab 3.
+- Every heavy action (Load, Analyze, Generate, Match) runs on a background
+  thread via `perf_utils.run_in_background`, so the GUI never freezes.
+- Excel reads go through `python-calamine` when installed (~7x faster than
+  openpyxl's own reader on a real 500,000-row file).
+- `perf_utils.StyleIndexCache` makes per-cell styling cheap by reusing
+  openpyxl's own internal style index instead of re-hashing the same
+  Font/Border combination on every cell (measured ~5x faster on a real
+  output workbook).
+- Bucketing/breakdown computations are O(rows), not O(items × rows) —
+  fixed after a real 113-bucket Receivable run was found to be re-scanning
+  the whole dataset once per output file.
+- Output workbook generation is parallelized across CPU cores wherever
+  each file is fully independent (Receivable, Claims Register, Premium
+  Register split), falling back to sequential generation on a small batch
+  or a single-core machine.
+- One disclosed, un-fixable floor: a single coinsurer bucket with tens of
+  thousands of matched rows still takes roughly a minute to write, since
+  at that scale openpyxl's own per-cell object construction (not styling,
+  not iteration) becomes the bottleneck — parallel generation is what
+  keeps the *whole batch's* wall-clock time down in that case, not this
+  one file's own write time.
 
-**What it does:** reads a co-insurance outstanding-position export and
-groups every transaction row by **Company** (the co-insurance partner,
-e.g. "ADAMJEE INSURANCE COMPANY LTD" — the company that owes IGI its
-share of a client's premium/claims), writing **one Excel workbook per
-insurance company**, covering every client that company is associated
-with. Every company whose name contains "OFC" (case-insensitive) is
-pulled out of the normal per-company grouping and pooled together into a
-single shared file named `OFC_Receivable_{date}.xlsx` instead — so if you
-have several differently-named OFC branches/entities in your data, they
-all land in one combined file rather than each getting their own.
+## Multi-laptop / OneDrive safety
 
-Each output workbook has exactly three sheets:
-- **"Summary"** (opens first) — a redesigned dashboard-style sheet: a
-  navy title banner naming the company and generation date, three KPI
-  cards (Premium Receivable / Claims Receivable / Total Receivable), a
-  Premium-vs-Claims pie chart, and the full per-client breakdown table
-  with zebra-striped rows, a bold Total row, and a bar chart comparing
-  Premium and Claims Receivable across every client in that file. Every
-  number — the KPI cards, the pie chart's source table, and the Total
-  row — is a live Excel formula referencing the client table on the same
-  sheet, not a hardcoded value, so it all recalculates correctly if you
-  ever edit a number by hand. Both charts are genuine embedded Excel
-  chart objects (built via openpyxl), not static pictures — you can
-  click into them and adjust like any chart you built by hand.
-- **"Premium Receivable"** — every row (across every client in the file)
-  with a non-zero Premium Receivable amount
-- **"Claims Receivable"** — every row with a non-zero Claim Receivable
-  amount (still written with headers only if the file has none)
+See `README_ONEDRIVE_FIX.md` for the full story. In short: GIMS' own small
+state files (signature, templates, run-history logs) live in a local,
+per-machine folder (`app_paths.py`) rather than inside the shared project
+folder, and every write to them is atomic (`safe_io.py` — write to a temp
+file, then rename into place) — so two laptops sharing the app folder via
+OneDrive can never corrupt each other's signature or run history, and a
+mid-write crash can never leave a half-written file behind. The
+application code itself (every `.py` file) is read-only at runtime and
+safe to keep in OneDrive as before.
 
-Every other original column (Class, Leader Ref. No, Code, Client Name,
-Company, Date, Type, etc.) is preserved exactly as it appears in the
-source file on the two data sheets — nothing is renamed or reformatted
-beyond splitting rows by category and number-formatting the relevant
-amount column. Client Name stays visible on every row, since a file now
-covers many clients at once (and, for the pooled OFC file, several
-different real companies too).
+## Customizing the email template (Outstanding Premium)
 
-### Tab 1 — Upload & Validate
-- **Master workbook** — the co-insurance export, a single-sheet `.xlsx`
-  file — there's no sheet name to specify, it's read directly. The real
-  header row is located automatically even though the source file has a
-  few title/banner rows above it (report title, "As at ..." date, a
-  blank row) — you don't need to trim those first.
-- **Look up recipient emails from a lookup file** — uncheck to skip email
-  lookup entirely (every draft will show "Missing email" and can still be
-  reviewed/sent manually on tab 3).
-- **Email Lookup File** — a *separate* `.xlsx` or `.csv` file you browse
-  to (not part of the master workbook), with a Company-name column
-  (matched by "company", "client", or "participant" in the header — falls
-  back to the first column if none match), an **Email** column, and an
-  optional POC/contact-person column. Rows are matched by exact **Company
-  Name**, the same "Company" field used on the transaction data, so
-  recipient emails are looked up by co-insurance company rather than by
-  client. For the pooled OFC file, the lookup key is literally `OFC` —
-  add a row with that exact name if you want that file's email to
-  resolve automatically; otherwise it's flagged "Missing email" for
-  manual entry on tab 3, same as any other unmatched company. A company
-  can list several emails in one cell (comma or semicolon separated) —
-  all of them are used as Outlook "To" recipients. If a company's
-  contact-person column is present, that name is used in the email
-  greeting instead of the company name. Leave this blank to skip email
-  lookup — this mirrors how the Outstanding Premium module's own Email
-  Lookup File works.
-- **Output folder** — configurable; created automatically if it doesn't
-  exist.
-- **Leader Ref Number** is the *other* co-insurance company's own policy
-  reference, so it's only required (and only checked) on **Premium
-  Receivable** rows — where IGI is the follower being billed against a
-  policy the other company leads. On **Claims Receivable** rows IGI is
-  the primary payer being reimbursed, so there's no such reference to
-  expect from the other side; a blank Leader Ref Number there is normal
-  and is never flagged or excluded. (Confirmed against a real sample
-  file: all 460 claims-only rows had a blank Leader Ref Number, and
-  every single premium-only row had one — this is structural, not messy
-  data.) This is handled automatically now — there's no checkbox for it.
-- Click **Load & Validate Data** to load the file — the Activity Log shows
-  the detected column layout and a per-issue-type validation count.
-- **Filters** — optional Client filter and/or Company filter (comma-
-  separated exact names). Click **Analyze / Build Groups** to apply them
-  and populate tab 2.
+Edit `DEFAULT_TEMPLATE` in `email_generator.py`, or save additional
+templates at runtime via `save_template()`. Supported placeholders:
+`{client_name}`, `{greeting_name}` (resolves to a matched POC name if one
+exists, else the company name), `{amount}`, `{report_date}`, `{signature}`.
+Every other module's email templates (Claims Register, Premium/Claims
+Email Automation, Premium Register split) are plain Python string
+templates near the top of their own `*_email.py` file — edit those
+directly (`SUBJECT_TEMPLATE` / `BODY_TEMPLATE`) if the wording needs to
+change.
 
-### Tab 2 — Insurance Company Files
-Shows one row per output file — each insurance company (plus the pooled
-"OFC" row, if any OFC-named companies are present) — with its client
-count and Premium/Claims Receivable totals. Click **Generate Excel
-Reports** to write one workbook per row (named per the pattern below)
-into the output folder set on tab 1, or **Open Output Folder** to browse
-what's been generated.
-
-### Tab 3 — Review & Send Emails
-1. **Your Signature** — shared with the Outstanding Premium module (same
-   `signature.json`), so it only needs to be set once across both modules.
-2. Click **Draft Emails** to generate one statement email per company file.
-3. Click any row to preview/edit its recipient, subject, and body. Click
-   **Save Edits to Selected Email** to keep changes for that file only.
-4. **Dry run** is checked by default — preview exactly what would be sent
-   without actually sending.
-5. Uncheck dry run and click **Send All** (or **Send This Email** for a
-   single row) to send for real via Outlook. Each email attaches that
-   file's generated workbook if one exists. Every run is logged to
-   `receivable_run_history.json`, the same way the Outstanding Premium
-   module logs to `run_history.json`.
-
-**Email subject/body:**
-```
-Subject: Premium & Claims Receivable Statement – {Company Name} – {Date}
-```
-The body is a short cover note referencing the attached statement, how
-many clients it covers, and its total Premium/Claims Receivable.
-
-**Filename format:** `{CompanyName}_Receivable_{DDMMYYYY}.xlsx` (or
-`OFC_Receivable_{DDMMYYYY}.xlsx` for the pooled file), with spaces and
-special characters stripped from the name for filesystem/attachment
-safety.
-
-**Column layout flexibility:** the module recognizes two possible source
-layouts automatically — (a) separate "Premium Receivable" and "Claim
-Receivable" amount columns on every row (the confirmed real format), or
-(b) a single "Amount" column plus a "Type"/"Category" column naming which
-category each row belongs to (a fallback in case a different export
-format is used later). Column headers are matched case-insensitively
-against a small alias list in `receivable_processor.py` — if a future
-export uses different header text than what's listed there, add it to
-`ALIASES` rather than renaming columns in the source file.
-
-**Known limitation:** like the Outstanding Premium module, sending only
-works on Windows with Outlook installed and signed in — this could only be
-verified here in dry-run mode. Please test a dry run first, then send to
-yourself before using it on real recipients.
-
-## Coinsurance > Premium Register module
-
-Click **Coinsurance** in the sidebar to expand it, then click
-**Premium Register**. This is a single-page workflow (no multi-tab
-notebook, since there's no grouping/email step) with three numbered
-cards: Input Files, Run Matching, and Processing Log.
-
-**What it does:** matches every policy in a co-insurance **leader's** own
-file (their own policy number, e.g. in a column called `NUMS`) against
-IGI's own **Premium Register** (which records the leader's policy number
-back to us in a column such as `Leader#`, alongside our own `Doc Ref #` /
-IGI Policy Number), and pulls in the matched IGI Policy Number wherever a
-confident match is found. Rows that can't be matched confidently are
-flagged so they can be entered into the Premium Register manually,
-instead of guessing — a wrong policy number would be worse than none,
-since someone would act on it.
-
-**Matching is fuzzy, not exact string equality**, since the leader's own
-policy-number format essentially never matches our `Leader#` column
-character-for-character (e.g. `1/114591/25585/11006` vs. our own
-`2691025585/12/2023`). In practice the two numbers reliably share at
-least one distinctive digit run — the policy/endorsement's own numeric
-core — even when everything else around it (separators, prefixes,
-date-like suffixes) differs. Matching works in two stages:
-1. **Blocking** — every register row is indexed by its own digit-run
-   substrings, so a leader value only needs to be compared against a
-   small set of real candidates rather than the entire register (fast
-   even against a ~24k-row register).
-2. **Scoring** — among those candidates, whichever register row shares
-   the longest *complete* digit run (the query's own policy number as a
-   whole token, not a fragment) with the query wins; a generic
-   digits-only similarity ratio is used only as a tiebreaker. A row with
-   no candidates, or whose best candidate doesn't clear the acceptance
-   threshold, is left **Not Matched** rather than forced onto a poor guess.
-
-1. **Input Files**
-   - **Leader's Policy File** — the co-insurance leader's own file
-     (`.xlsx` or `.xls`). Only the policy-number column is identified
-     (matched via an alias list, e.g. `NUMS`, `Policy No`, `Leader Ref
-     No`) — every other column is left exactly as-is and carried through
-     to the output untouched.
-   - A leader's file is very often a **multi-sheet settlement workbook**
-     (e.g. a `Summary` tab, a `Premium Payable` tab, `Claim Rec`/`Prem
-     Rec` tabs, and one or more dated snapshot tabs) rather than one
-     plain sheet — and more than one of those tabs can independently
-     contain a `POLICY NO.`-style column, so column content alone isn't
-     always enough to reliably pick the right one. The right sheet is
-     found **by its own name first** (matched loosely — ignoring spacing
-     and punctuation, so `"Premium Payable"`, `"PremPayable"`, and
-     `"Prem. Payable - AIC"` are all recognized the same way), and only
-     falls back to scanning every sheet's column content if no sheet
-     name is a clear match.
-   - **IGI Premium Register** — our own register (`.xlsx` or `.xls`).
-     The `Leader Ref Number` column (e.g. `Leader#`) and `IGI Policy
-     Number` column (e.g. `Doc Ref #`) are identified the same way. A
-     Crystal Reports export quirk — some register cells carry the
-     column's own caption baked into the value (e.g. `"Leader Ref. No.
-     PL-0720-200501-F01-000053"`) — is automatically stripped.
-   - Both files' real header row is auto-detected even if there are
-     banner/title rows above it, and column-header punctuation (e.g.
-     `"POLICY NO."` vs `"Policy No"`) doesn't need to match exactly —
-     trailing periods are ignored automatically, since real exports from
-     different companies punctuate the same header inconsistently.
-   - Legacy `.xls` files are read via the `xlrd` package if installed;
-     otherwise the app falls back to converting the file with a local
-     LibreOffice install, if one is present on the machine.
-2. **Run Matching** — click **Run Matching**. The Processing Log shows
-   how many rows were loaded from each file and which columns were
-   detected, then the match count and percentage. A **Save As** dialog
-   then lets you choose where to write the output `.xlsx`
-   (default filename: `{LeaderFileName}_PolicyMatched_{DDMMYYYY}.xlsx`).
-3. **Output** — every original column from the leader's file, plus four
-   new columns: `IGI Policy Number`, `Matched Leader Ref (Register)`,
-   `Match Score`, and `Match Status`. Any row with `Match Status` =
-   "Not Matched" has its **entire row highlighted light red**, so it's
-   immediately visible which rows still need to be entered into the
-   Premium Register by hand. A small note below the table summarizes the
-   overall match rate.
-
-## Coinsurance > Claims Register module
-
-Click **Coinsurance** in the sidebar, then expand **Claims** and click
-**Claims Intimation**. Same three-tab structure as Premium/Claims Email
-Automation (Upload & Match → Insurance Company Files → Review & Send
-Emails).
-
-**What it does:** matches the Claim Intimation Register (Finance's own
-log of claims as they come in — sparsely filled in on the coinsurer side,
-since that column is manually entered) against IGI's Premium Register to
-recover which coinsurer(s) share each claim's underlying policy. A policy
-can be shared by several coinsurers at once (confirmed against real data:
-one policy had 11 separate coinsurer rows) — matching a claim's own
-`Policy/PMD #` against the register's `Base Doc No.` finds the right
-policy, then every coinsurer sharing that same Base Doc No. is pulled in
-at once, so a single claim can fan out into several coinsurers' own
-recovery files, each showing only that coinsurer's own Share % and their
-proportional cut of Claim Paid / Claim O/S.
-
-Matching uses the same fuzzy digit-run approach as Premium Register
-(blocking + longest-complete-run scoring), tuned for this module's own
-reference format — see `claims_register_processor.py`'s own docstrings
-for the details, including a documented, deliberate blocking-key design
-that keeps matching fast even against a 200,000+ row register.
-
-1. **Upload & Match**
-   - **Claim Intimation Register** and **IGI Premium Register** — both
-     `.xlsx`/`.xls`, real header row auto-detected the same way as every
-     other GIMS module. Legacy `.xls` files that are split across several
-     sheets at Excel's old 65,536-row-per-sheet limit are automatically
-     detected and merged back into one table (confirmed against a real
-     204,220-row register split across 4 sheets) — the header only needs
-     to exist on the first sheet.
-   - **Date Filter (optional)** — scope a run to claims whose Intimation
-     Date or Loss Date falls within a chosen range, without needing to
-     trim the source files first. The Premium Register itself is never
-     date-filtered (it's only used as a lookup table), so it can still
-     cover a much wider period than the claims being matched.
-   - Click **Load & Match Claims**. The Activity Log reports how many
-     claims matched to a coinsurer, how many claim-coinsurer pairs that
-     produced across how many coinsurer files, and — for anything that
-     couldn't be matched — a breakdown of why (no matching policy found,
-     or the matched policy has no coinsurer on it at all, i.e. 100% IGI).
-   - **Company Aliases File (optional)** — merges branch-name variants of
-     the same coinsurer (real data example: "AIC Adamjee House Branch",
-     "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH", and "ADAMJEE INSURANCE
-     COMPANY LTD" are the same company recorded three different ways)
-     into one output file and one email instead of one per branch. See
-     **Company Aliases**, below, for how to generate and use this file —
-     it's shared with the Premium/Claims Email Automation module.
-2. **Insurance Company Files** — one row per coinsurer (plus a shared
-   pooled "OFC" row for every coinsurer whose name contains "OFC"), with
-   its claim count and total Share of Claim Paid / O/S. Click **Generate
-   Excel Reports** to write one workbook per coinsurer, plus a separate
-   **"Unmatched Claims"** workbook for anything that needs manual review.
-   Each coinsurer workbook has two sheets: **"Summary"** (a dashboard —
-   KPI cards, a Paid-vs-Outstanding pie, and a per-insured bar chart, all
-   driven by live Excel formulas) and **"Claims Data"** (every matched
-   claim row for that coinsurer, original claim columns preserved plus
-   the fan-out columns: Coinsurer Name, Coinsurer Share %, Coinsurer
-   Share of Claim Paid/O/S, Matched Policy Doc No., Match Score). The
-   Unmatched Claims workbook highlights every row red (the whole sheet
-   needs review) with a Reason column explaining why.
-3. **Review & Send Emails** — draft, preview/edit, and send a claims
-   recovery-statement email per coinsurer file, with the same shared
-   signature box, dry-run toggle, and per-row Send/Save Edits controls as
-   every other GIMS email workflow. The "To" field accepts multiple
-   addresses separated by a semicolon (Outlook sends to all of them) —
-   see **Multiple recipients per company**, below.
-
-**Performance note:** both matching and Excel generation for this module
-were specifically profiled and optimized against real, large production
-files (a 204,220-row register and a 27,976-claim register) — see
-`PERFORMANCE_NOTES.md`'s Part 4 for the full detail, including the one
-disclosed limitation (a single coinsurer with an extremely large claim
-count is still bound by openpyxl's own per-cell cost once its data sheet
-runs into the millions of cells, since that sheet's workbook also needs
-real embedded charts).
-
-## Company Aliases (merging branch-name variants) and multiple email recipients
-
-Both `claims_register_processor.py` (Claims Register) and
-`receivable_processor.py` (Premium/Claims Email Automation) group source
-rows by a company/coinsurer name field that real data records
-inconsistently — the same real company shows up under dozens of literal
-strings, because branch offices and window takaful units are entered
-separately rather than under one consistent name (confirmed against a
-real 27,976-claim file: 98 distinct names for roughly 25 actual
-companies). `company_alias_resolver.py` is the shared module behind both
-features described below.
-
-### Merging branch-name variants under one real company
-
-1. Run **Load & Match Claims** (Claims Register) or **Analyze / Build
-   Groups** (Premium/Claims Email Automation) at least once first.
-2. Click **Suggest Aliases...** next to it. This scans every distinct
-   raw name the run actually found and tries to match each one against
-   the Company Name list in your Email Lookup File, using (in order of
-   confidence): an exact match; a shared *distinctive* brand word (e.g.
-   both "ADAMJEE INSURANCE CO LTD- ISLAMABAD BRANCH" and "AIC Adamjee
-   House Branch" contain "ADAMJEE", and no other company in the list
-   does); a company's own likely acronym (e.g. "AIC" = Adamjee Insurance
-   **C**ompany, "JGI" = **J**ubilee **G**eneral **I**nsurance) — but only
-   when that acronym uniquely identifies one company; and finally a
-   close-text-similarity check for typos and minor formatting
-   differences. It writes an editable Excel file with one row per raw
-   name — the "Canonical Company" column is **pre-filled only where the
-   match is confident**; anything ambiguous is left **blank and
-   highlighted amber**, with a plain-English "Match Reason" explaining
-   why (e.g. "acronym 'AIC' is ambiguous — could be any of: Adamjee,
-   Alfalah, Alpha, Asia Insurance Company"). Nothing is ever merged on a
-   guess — a name with no confident match, or left blank by you, keeps
-   behaving exactly like today: its own separate file/email.
-3. Open the generated file, review it, and fill in or correct
-   "Canonical Company" for any row you want merged. Save it.
-4. Browse to that saved file in the **Company Aliases File** field, and
-   run matching/analysis again. Every raw name mapped in the file now
-   lands in one combined output file (and one combined email) under its
-   canonical company name instead of its own separate one.
-
-This is a genuinely safe operation to re-run: financial totals and claim/
-row counts are unaffected by merging (only *which output file* a row
-lands in changes) — nothing is added, dropped, or double-counted.
-
-### Multiple recipients per company
-
-The Email Lookup File (`Co-insurance_Companies_List.xlsx`-style) can list
-**more than one email address per company**, each on its own row directly
-below that company's name — this is parsed automatically, cleaned (a
-`Name <email>` wrapper, or a stray trailing `>` or `;` left over from a
-copy-pasted email, is stripped down to just the address), and every
-address for that company is sent to as a combined "To" list. You can also
-just type multiple addresses straight into the "To" field on the Review &
-Send Emails tab yourself — separate them with a semicolon and Outlook
-will send to all of them.
-
-## Customizing the email template
-
-
-Edit the `DEFAULT_TEMPLATE` dict in `email_generator.py`, or save additional
-templates at runtime (the `save_template()` function is ready to be wired to a
-"Save as new template" button if you want multiple templates — e.g. "First
-Reminder" vs "Final Notice" — let me know and I'll add that UI).
-
-Placeholders currently supported: `{client_name}`, `{greeting_name}`, `{amount}`,
-`{report_date}`, `{signature}`. `{greeting_name}` resolves to the matched POC
-name if one exists for that client, otherwise the company name — use it in the
-"Dear ..." line. `{signature}` resolves to whatever is saved in the "Your
-Signature" box on tab 3 (falls back to a generic Finance Department signature
-if left blank). Add more by including the field name in the template and
-passing it into `fields` in `build_email_drafts()`.
-
-## Packaging as a Windows .exe (optional)
-
-Once you've tested it with `python app.py`, you can package it as a single
-executable so non-technical staff can just double-click it:
+## Packaging as a Windows .exe
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed app.py
+pyinstaller GIMS.spec
 ```
+Produces `dist/GIMS/` — an `onedir` build (a folder of files, not a single
+self-extracting exe) is used deliberately: a onefile exe re-unpacks itself
+on every launch and both antivirus software and OneDrive's own sync
+scanning tend to flag it far more aggressively than a plain folder of
+files. Copy the whole `GIMS` folder into OneDrive, not just the `.exe`, and
+run `GIMS.exe` from inside it. See `README_ONEDRIVE_FIX.md` for the icon
+setup and the two OneDrive habits worth adopting (mark the folder "Always
+keep on this device"; point each module's own output folder at a local,
+non-synced location for large batch runs).
 
-The `.exe` will appear in `dist/app.exe`.
+## Known limitations / things to confirm on the target machine
 
-## Known limitations / things to confirm with you
-
-- **Outlook COM automation only works on Windows** with Outlook installed —
-  I could not test the actual send step in this environment, only the dry-run
-  logic. Please test a dry run first, then try sending to yourself before
-  using it on real clients.
-- **Year breakdown source**: defaults to Issue Date; switch to Comm. Date in
-  the dropdown on tab 1 if that better matches how Finance recognizes balances.
-- Threshold currently applies to each client's **Grand Total** (summed across
-  all departments and years) — as originally specified. Let me know if you'd
-  instead want it applied per department (e.g. flag a client if any single
-  department alone exceeds the threshold).
-- Email matching is by **exact client name** between the balance sheet and the
-  lookup file. If names differ slightly (e.g. "LTD" vs "LIMITED"), those rows
-  will show as "missing email" for manual entry — I can add fuzzy matching if
-  this turns out to be common in your data.
+- **Outlook send, native Excel PivotTables/COM automation, and Excel-COM
+  ScreenUpdating speedups** were built and correctness-checked but could
+  only be exercised in dry-run/fallback mode in the development
+  environment (no Windows/Excel available there) — confirm on a real
+  Windows + Outlook + Excel machine before relying on them.
+- **Parallel workbook generation** was correctness-verified (identical,
+  valid output every time) but only throughput-tested on a single-CPU-core
+  development sandbox — worth a timing check on a real multi-core machine
+  for a large batch.
+- **One disclosed performance floor**: a single coinsurer/company bucket
+  with tens of thousands of rows still takes roughly a minute to write
+  (see Performance, above) — not a bug, a ceiling worth knowing about.
+- **Withholding Tax matching is exact-only by design** — a payee name that
+  differs from the NTN Locator's own spelling beyond simple case/
+  punctuation/whitespace normalization will not match, and is correctly
+  flagged for manual review rather than guessed at.
+- Emails are matched to companies/clients by **exact name** (after the
+  merge-key fallback described above) — a spelling difference the merge
+  logic doesn't already cover will still show as "missing email" for
+  manual entry.
