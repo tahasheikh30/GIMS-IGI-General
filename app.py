@@ -52,6 +52,8 @@ import reinsurance_generator as rig
 import deferred_commission_processor as dcp
 import deferred_commission_generator as dcg
 import deferred_commission_ledger_processor as dclp
+import withholding_tax_processor as wtp
+import withholding_tax_generator as wtg
 
 try:
     import keyring
@@ -256,6 +258,18 @@ class BalanceApp(tk.Tk):
         self.dc_last_output_file = None
         self.dc_ledger_pdf_path = None            # last-browsed Ledger Balance PDF path (Deferred Commission's own three GL accounts)
         self.dc_ledger_parse_result = None        # last deferred_commission_ledger_processor.parse_deferred_commission_ledger_pdf() result - carried into Generate as the Summary sheet's "Ledger Balances" block
+
+        # Withholding Tax (Income Tax) module state - see withholding_tax_processor.py.
+        # The four inputs are independent files (or independent sheets within
+        # the SAME file - each loader auto-detects its own sheet by content,
+        # so either arrangement works with no extra UI needed).
+        self.wht_gl_file = ""
+        self.wht_locator_file = ""
+        self.wht_status_file = ""
+        self.wht_atl_file = ""
+        self.wht_last_result = None          # last run_withholding_tax_processing() result dict
+        self.wht_output_dir = os.path.join(os.getcwd(), "Withholding Tax")
+        self.wht_last_output_file = None
 
         self._load_logos()
         self._setup_style()
@@ -676,6 +690,13 @@ class BalanceApp(tk.Tk):
                     ("reinsurance_automation", "Reinsurance Automation"),
                     ("deferred_commission", "Deferred Commission"),
                 ]),
+                # "Withholding Tax" nested submenu - currently holds one page
+                # (Income Tax), left as its own nested submenu rather than a
+                # flat leaf item so a future Sales Tax withholding module can
+                # sit alongside it without restructuring the sidebar again.
+                (None, "Withholding Tax", [
+                    ("withholding_tax_income", "Income Tax"),
+                ]),
             ],
             before=coinsurance_header,
         )
@@ -994,6 +1015,11 @@ class BalanceApp(tk.Tk):
         deferred_commission_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["deferred_commission"] = deferred_commission_page
         self._build_deferred_commission_page(deferred_commission_page)
+
+        withholding_tax_page = ttk.Frame(container)
+        withholding_tax_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["withholding_tax_income"] = withholding_tax_page
+        self._build_withholding_tax_page(withholding_tax_page)
 
         pc_email_page = ttk.Frame(container)
         pc_email_page.grid(row=0, column=0, sticky="nsew")
@@ -2977,6 +3003,278 @@ class BalanceApp(tk.Tk):
         else:
             messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
 
+
+    # ---------- Withholding Tax (Income Tax) module ----------
+    def _build_withholding_tax_page(self, parent):
+        """Withholding Tax (Income Tax) - matches the General Ledger against
+        the NTN Locator, Status, and FBR Active Taxpayer List (ATL) files to
+        resolve each payee's NTN/CNIC, tax status, and Filer/Non-Filer
+        standing per ATL sheet. Single-page workflow (no multi-tab notebook,
+        since there's no grouping/email step here) - same scrollable
+        numbered-card pattern as Policy Check / Claims Check, since this is
+        the same shape of task (load a couple of reference files, match a
+        ledger against them, save one highlighted output file)."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, background=self.COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _on_body_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._enable_mousewheel(canvas, _on_mousewheel)
+
+        PAD_X = 20
+
+        # --- Page header ---
+        header = ttk.Frame(body)
+        header.pack(fill="x", padx=PAD_X, pady=(20, 6))
+        ttk.Label(header, text="Withholding Tax \u2014 Income Tax", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        wht_subtitle = ttk.Label(
+            header, text="Matches the General Ledger against the NTN Locator, Status, and FBR Active "
+                          "Taxpayer List (ATL) files to resolve each payee's NTN/CNIC, tax status, and "
+                          "Filer/Non-Filer standing.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        wht_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        def _wrap_wht_subtitle(event):
+            wht_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_wht_subtitle)
+
+        info_badge = tk.Frame(header, bg=self.COLOR_ACCENT_SOFT)
+        info_badge.pack(anchor="w")
+        tk.Frame(info_badge, bg=self.COLOR_GOLD, width=3).pack(side="left", fill="y")
+        tk.Label(info_badge, text="Never guesses a match \u2014 any payee that can't be confidently "
+                                   "identified is highlighted red for manual review",
+                 bg=self.COLOR_ACCENT_SOFT, fg=self.COLOR_PRIMARY, font=("Segoe UI", 9, "bold"),
+                 padx=14, pady=8).pack(side="left")
+
+        # --- Section 1: Input Files ---
+        s1 = self._loss_section_card(body, "1", "Input Files", PAD_X)
+        wht_s1_note = ttk.Label(
+            s1, text="General Ledger, NTN Locator, and Status can be separate files, or sheets within "
+                      "the same workbook - each is auto-detected independently by its own column "
+                      "headers, so either arrangement works. The ATL file is FBR's own multi-sheet "
+                      "Active Taxpayer List and can run into the millions of rows, so loading it can "
+                      "take a minute or so.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        wht_s1_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(wht_s1_note, s1, side_padding=10)
+
+        gl_row = self._premreg_file_row(
+            s1, "General Ledger",
+            "Required column: Payee Name. Any existing NTN/CNIC columns are used only as a fallback "
+            "when the NTN Locator can't confidently identify the payee by name.")
+        self.wht_gl_icon, self.wht_gl_name_var = gl_row[0], gl_row[1]
+        self._make_pill_button(gl_row[2], "Browse...", self._browse_wht_gl_file, bg=self.COLOR_ACCENT).pack(side="left")
+
+        locator_row = self._premreg_file_row(
+            s1, "NTN Locator",
+            "Taxpayer Name matched (exact, after normalizing case/punctuation) against the GL's own Payee Name.")
+        self.wht_locator_icon, self.wht_locator_name_var = locator_row[0], locator_row[1]
+        self._make_pill_button(locator_row[2], "Browse...", self._browse_wht_locator_file, bg=self.COLOR_ACCENT).pack(side="left")
+
+        status_row = self._premreg_file_row(
+            s1, "Status File",
+            "Matched by NTN first, falling back to CNIC - pulls in Status, Address, and Location.")
+        self.wht_status_icon, self.wht_status_name_var = status_row[0], status_row[1]
+        self._make_pill_button(status_row[2], "Browse...", self._browse_wht_status_file, bg=self.COLOR_ACCENT).pack(side="left")
+
+        atl_row = self._premreg_file_row(
+            s1, "ATL File (FBR Active Taxpayer List)",
+            "Multi-sheet - one Filer/Non-Filer column is generated per sheet, named after that sheet.")
+        self.wht_atl_icon, self.wht_atl_name_var = atl_row[0], atl_row[1]
+        self._make_pill_button(atl_row[2], "Browse...", self._browse_wht_atl_file, bg=self.COLOR_ACCENT).pack(side="left")
+
+        # --- Section 2: Run Matching ---
+        s2 = self._loss_section_card(body, "2", "Run Matching", PAD_X)
+        wht_s2_note = ttk.Label(
+            s2, text="Adds NTN, CNIC, Status, Address, Location, and one Filer/Non-Filer column per ATL "
+                      "sheet to the General Ledger. Any payee that can't be confidently identified (no "
+                      "NTN/CNIC could be resolved by name or already on file) is highlighted red in the "
+                      "output for manual review, rather than guessed at.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        wht_s2_note.pack(anchor="w", pady=(0, 12))
+        self._bind_dynamic_wraplength(wht_s2_note, s2, side_padding=10)
+        run_btn = self._make_action_button(s2, "Run Matching", self._run_withholding_tax_match, kind="accent")
+        run_btn.pack(anchor="w")
+        self.wht_summary_var = tk.StringVar(value="")
+        ttk.Label(s2, textvariable=self.wht_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 0))
+
+        self.wht_progress = perf_utils.ProgressBarPanel(s2)
+        self.wht_progress.frame.pack(fill="x", pady=(10, 0))
+
+        # --- Section 3: Log ---
+        s3 = self._loss_section_card(body, "3", "Processing Log", PAD_X, expand_bottom=True)
+        self.wht_log = scrolledtext.ScrolledText(s3, height=14, font=("Consolas", 9),
+                                                   relief="solid", borderwidth=1)
+        self.wht_log.pack(fill="both", expand=True)
+
+    def _browse_wht_gl_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.wht_gl_file = path
+            self.wht_gl_name_var.set(os.path.basename(path))
+            self.wht_gl_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _browse_wht_locator_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.wht_locator_file = path
+            self.wht_locator_name_var.set(os.path.basename(path))
+            self.wht_locator_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _browse_wht_status_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx *.xls"), ("All files", "*.*"),
+        ])
+        if path:
+            self.wht_status_file = path
+            self.wht_status_name_var.set(os.path.basename(path))
+            self.wht_status_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _browse_wht_atl_file(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Excel files", "*.xlsx"), ("All files", "*.*"),
+        ])
+        if path:
+            self.wht_atl_file = path
+            self.wht_atl_name_var.set(os.path.basename(path))
+            self.wht_atl_icon.configure(fg=self.COLOR_ACCENT)
+
+    def _log_wht(self, msg):
+        self.wht_log.insert("end", str(msg) + "\n")
+        self.wht_log.see("end")
+
+    def _run_withholding_tax_match(self):
+        gl_file = self.wht_gl_file
+        locator_file = self.wht_locator_file
+        status_file = self.wht_status_file
+        atl_file = self.wht_atl_file
+
+        if not gl_file:
+            messagebox.showerror("No General Ledger selected", "Browse to the General Ledger file first.")
+            return
+        if not locator_file:
+            messagebox.showerror("No NTN Locator selected", "Browse to the NTN Locator file first.")
+            return
+        if not status_file:
+            messagebox.showerror("No Status file selected", "Browse to the Status file first.")
+            return
+        if not atl_file:
+            messagebox.showerror("No ATL file selected", "Browse to the ATL (Active Taxpayer List) file first.")
+            return
+        for label, path in [("General Ledger", gl_file), ("NTN Locator", locator_file),
+                             ("Status file", status_file), ("ATL file", atl_file)]:
+            if not os.path.exists(path):
+                messagebox.showerror("File not found", f"Could not find the {label}:\n{path}")
+                return
+
+        self.wht_log.delete("1.0", "end")
+        self.wht_summary_var.set("")
+        self._log_wht(f"General Ledger: {os.path.basename(gl_file)}")
+        self._log_wht(f"NTN Locator:    {os.path.basename(locator_file)}")
+        self._log_wht(f"Status file:    {os.path.basename(status_file)}")
+        self._log_wht(f"ATL file:       {os.path.basename(atl_file)}\n")
+        self.status_var.set("Matching withholding tax data...")
+        self.wht_progress.start(total=None, text="Loading files...")
+
+        def worker(report):
+            return wtp.run_withholding_tax_processing(
+                gl_file, None, locator_file, None, status_file, None, atl_file, report=report)
+
+        def on_done(result):
+            self.wht_last_result = result
+            stats = result["stats"]
+            self._log_wht(f"\n{stats['num_matched_locator']:,}/{stats['num_rows']:,} payee(s) matched via "
+                          f"the NTN Locator ({stats['num_not_found_locator']:,} not found, "
+                          f"{stats['num_ambiguous_locator']:,} ambiguous).")
+            self._log_wht(f"{stats['num_manual_review']:,} row(s) need manual review.")
+            self._log_wht(f"{stats['num_status_matched']:,}/{stats['num_rows']:,} matched to a "
+                          f"Status/Address/Location.")
+
+            summary_text = (f"Matched {stats['num_matched_locator']:,}/{stats['num_rows']:,} \u2014 "
+                             f"{stats['num_manual_review']:,} need manual review.")
+            self.wht_summary_var.set(summary_text)
+            self.wht_progress.finish(summary_text)
+            self.status_var.set("Withholding Tax: matching complete. Choose where to save the output.")
+
+            default_name = wtg.build_output_filename(gl_file)
+            default_dir = self._new_run_folder(self.wht_output_dir)
+            output_path = filedialog.asksaveasfilename(
+                title="Save Withholding Tax Working As",
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+                initialdir=default_dir,
+                initialfile=default_name,
+            )
+            self._cleanup_if_empty_dir(default_dir)
+            if not output_path:
+                self._log_wht("\nSave cancelled - results were not written to a file (still available above).")
+                return
+            self._save_wht_output(result, output_path, gl_file)
+
+        def on_error(exc):
+            self.wht_progress.finish("Matching failed - see the Processing Log for details.")
+            self._log_wht(f"\nERROR: {exc}")
+            messagebox.showerror("Matching failed", str(exc))
+            self.status_var.set("Withholding Tax matching failed.")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_wht(msg),
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _save_wht_output(self, result, output_path, gl_file):
+        """Writing the highlighted output workbook is itself a per-row
+        openpyxl write (see withholding_tax_generator.build_withholding_tax_workbook)
+        - kept on a second background pass so a large GL doesn't freeze the
+        save step either."""
+        self.wht_progress.start(total=len(result["merged_df"]), text="Writing output...")
+
+        def worker(report):
+            report(f"Writing {len(result['merged_df']):,} row(s) to {os.path.basename(output_path)}...")
+            wtg.build_withholding_tax_workbook(result, output_path, gl_source_filename=gl_file, report=report)
+
+        def on_done(_):
+            self.wht_last_output_file = output_path
+            self.wht_progress.finish(f"Saved: {os.path.basename(output_path)}")
+            self._log_wht(f"\nSaved: {output_path}")
+            self.status_var.set(f"Withholding Tax saved: {os.path.basename(output_path)}")
+            messagebox.showinfo("Done", f"Withholding Tax working file saved:\n{output_path}")
+
+        def on_error(exc):
+            self.wht_progress.finish("Save failed - see the Processing Log for details.")
+            self._log_wht(f"\nERROR writing output file: {exc}")
+            messagebox.showerror("Could not save report", f"An error occurred while writing the Excel file:\n\n{exc}")
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_wht(msg),
+            on_progress_value=self.wht_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
 
     # ---------- Coinsurance > Premium Register module ----------
     def _build_premium_register_page(self, parent):
