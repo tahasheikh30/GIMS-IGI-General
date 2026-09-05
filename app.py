@@ -4072,8 +4072,7 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
-                   command=self.generate_receivable_reports).pack(side="left", padx=(0, 8))
+        self._make_action_button(top, "Generate Excel Reports", self.generate_receivable_reports, kind="accent").pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Open Output Folder", command=self.open_receivable_output_folder, width=20).pack(side="left")
         self.receivable_results_summary_var = tk.StringVar(value="Run Analyze on tab 1 to see one row per output file here.")
         ttk.Label(top, textvariable=self.receivable_results_summary_var, style="Muted.TLabel").pack(side="right")
@@ -4123,10 +4122,10 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_receivable_emails, width=18).pack(side="left", padx=(0, 12))
+        self._make_action_button(top, "Draft Emails", self.draft_receivable_emails, kind="accent").pack(side="left", padx=(0, 12))
         self.receivable_dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.receivable_dry_run_var).pack(side="left", padx=(0, 12))
-        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_receivable_emails, width=14).pack(side="left")
+        self._make_action_button(top, "Send All", self.send_all_receivable_emails, kind="success").pack(side="left")
 
         sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email - shared with Outstanding Premium)  ", padding=10)
         sig_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -5022,8 +5021,7 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
-                   command=self.generate_claims_register_reports).pack(side="left", padx=(0, 8))
+        self._make_action_button(top, "Generate Excel Reports", self.generate_claims_register_reports, kind="accent").pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Open Output Folder", command=self.open_claims_register_output_folder, width=20).pack(side="left")
         self.claims_results_summary_var = tk.StringVar(value="Run 'Load & Match Claims' on tab 1 to see one row per coinsurer here.")
         ttk.Label(top, textvariable=self.claims_results_summary_var, style="Muted.TLabel").pack(side="right")
@@ -5073,10 +5071,10 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_claims_register_emails, width=18).pack(side="left", padx=(0, 12))
+        self._make_action_button(top, "Draft Emails", self.draft_claims_register_emails, kind="accent").pack(side="left", padx=(0, 12))
         self.claims_dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.claims_dry_run_var).pack(side="left", padx=(0, 12))
-        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_claims_register_emails, width=14).pack(side="left")
+        self._make_action_button(top, "Send All", self.send_all_claims_register_emails, kind="success").pack(side="left")
 
         sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email - shared across every GIMS module)  ", padding=10)
         sig_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -5886,8 +5884,8 @@ class BalanceApp(tk.Tk):
         ttk.Entry(source_box, textvariable=self.email_file_var).grid(row=3, column=1, sticky="ew", **pad)
         ttk.Button(source_box, text="Browse...", command=self.browse_email_file).grid(row=3, column=2, **pad)
 
-        ttk.Button(source_box, text="Load & Validate Data", style="Accent.TButton", width=24,
-                   command=self.load_data).grid(row=4, column=0, sticky="w", padx=10, pady=(10, 4))
+        self._make_action_button(source_box, "Load & Validate Data", self.load_data, kind="accent")\
+            .grid(row=4, column=0, sticky="w", padx=10, pady=(10, 4))
 
         # ---- Section: Threshold & Filters ----
         filter_box = ttk.Labelframe(canvas_frame, text="  Threshold & Filters  ", padding=14)
@@ -5964,8 +5962,7 @@ class BalanceApp(tk.Tk):
         self.company_filter_var = tk.StringVar()
         ttk.Entry(company_row, textvariable=self.company_filter_var, width=90).pack(fill="x", pady=(4, 0))
 
-        self.analyze_btn = ttk.Button(filter_box, text="Analyze / Apply Filters", style="Accent.TButton", width=24,
-                   command=self.analyze)
+        self.analyze_btn = self._make_action_button(filter_box, "Analyze / Apply Filters", self.analyze, kind="accent")
         self.analyze_btn.grid(row=3, column=0, sticky="w", padx=6, pady=(12, 4))
 
         # ---- Section: Log ----
@@ -5980,8 +5977,7 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
-                   command=self.generate_reports).pack(side="left", padx=(0, 8))
+        self._make_action_button(top, "Generate Excel Reports", self.generate_reports, kind="accent").pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Open Output Folder", command=self.open_output_folder, width=20).pack(side="left")
         self.results_summary_var = tk.StringVar(value="Run Analyze on tab 1 to see qualifying clients here.")
         ttk.Label(top, textvariable=self.results_summary_var, style="Muted.TLabel").pack(side="right")
@@ -6019,10 +6015,10 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_emails, width=18).pack(side="left", padx=(0, 12))
+        self._make_action_button(top, "Draft Emails", self.draft_emails, kind="accent").pack(side="left", padx=(0, 12))
         self.dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.dry_run_var).pack(side="left", padx=(0, 12))
-        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_emails, width=14).pack(side="left")
+        self._make_action_button(top, "Send All", self.send_all_emails, kind="success").pack(side="left")
 
         sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email)  ", padding=10)
         sig_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -6811,8 +6807,7 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Generate Excel Reports", style="Accent.TButton", width=24,
-                   command=self.generate_premregsplit_reports).pack(side="left", padx=(0, 8))
+        self._make_action_button(top, "Generate Excel Reports", self.generate_premregsplit_reports, kind="accent").pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Open Output Folder", command=self.open_premregsplit_output_folder, width=20).pack(side="left")
         self.premregsplit_results_summary_var = tk.StringVar(value="Run 'Load & Build Groups' on tab 1 to see one row per company here.")
         ttk.Label(top, textvariable=self.premregsplit_results_summary_var, style="Muted.TLabel").pack(side="right")
@@ -6861,10 +6856,10 @@ class BalanceApp(tk.Tk):
 
         top = ttk.Frame(f)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        ttk.Button(top, text="Draft Emails", style="Accent.TButton", command=self.draft_premregsplit_emails, width=18).pack(side="left", padx=(0, 12))
+        self._make_action_button(top, "Draft Emails", self.draft_premregsplit_emails, kind="accent").pack(side="left", padx=(0, 12))
         self.premregsplit_dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Dry run (preview only, do not actually send)", variable=self.premregsplit_dry_run_var).pack(side="left", padx=(0, 12))
-        ttk.Button(top, text="Send All", style="Send.TButton", command=self.send_all_premregsplit_emails, width=14).pack(side="left")
+        self._make_action_button(top, "Send All", self.send_all_premregsplit_emails, kind="success").pack(side="left")
 
         sig_frame = ttk.Labelframe(f, text="  Your Signature (appears after 'Regards,' in every email - shared across every GIMS module)  ", padding=10)
         sig_frame.pack(fill="x", padx=12, pady=(0, 8))
