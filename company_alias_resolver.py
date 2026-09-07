@@ -33,7 +33,6 @@ that is a completely separate concern from merging (it supplies
 recipient email addresses, never influences which bucket a row lands in)
 and is unchanged here.
 """
-import os
 import re
 import numbers
 

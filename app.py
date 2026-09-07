@@ -8,7 +8,7 @@ import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-from datetime import date, datetime
+from datetime import datetime
 
 import pandas as pd
 

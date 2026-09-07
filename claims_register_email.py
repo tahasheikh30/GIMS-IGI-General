@@ -70,10 +70,6 @@ ABDUL_RAUF_EMAIL = "abdul.rauf@IGI.COM.PK"
 MAJID_MASOOD_EMAIL = "majid.masood@IGI.COM.PK"
 
 
-def _normalize_key(text):
-    return str(text).strip().upper()
-
-
 def build_claims_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
                                         report_date=None, period_text=None, business_type="conventional"):
     """

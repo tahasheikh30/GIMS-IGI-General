@@ -505,7 +505,6 @@ def resolve_department_list(df):
     unrecognized department name (which will default to the "1/24"
     method, since silently dropping real business would be worse)."""
     present = set(df["Department"].unique())
-    canonical_present_map = {}
     warnings = []
     ordered = []
     used_raw_names = set()

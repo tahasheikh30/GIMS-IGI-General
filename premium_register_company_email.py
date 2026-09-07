@@ -83,10 +83,6 @@ SHAKIR_EMAIL = "shakir.ali@IGI.COM.PK"
 JAHANZAIB_EMAIL = "jahanzaib.khan@IGI.COM.PK"
 
 
-def _normalize_key(text):
-    return str(text).strip().upper()
-
-
 def build_premium_register_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None,
                                          report_date=None, period_text=None, business_type="conventional"):
     """

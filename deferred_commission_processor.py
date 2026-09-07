@@ -407,8 +407,6 @@ def run_deferred_commission_calculation(register_filepaths, direct_ledger_filepa
 
 
 if __name__ == "__main__":
-    import sys
-
     register_files = ["/mnt/user-data/uploads/Gross_Premium_-_Conventional_Register_2025_v2.xls",
                        "/mnt/user-data/uploads/Gross_Premium_-_Conventional_Register_June_2026_v2.xls"]
     direct_files = ["/mnt/user-data/uploads/Conv_-_Commission_Exp_Direct__2025_.xlsx",

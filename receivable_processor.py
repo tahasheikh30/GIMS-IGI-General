@@ -76,12 +76,11 @@ instructed), but run_pipeline() surfaces it as a prominent warning so
 this can be confirmed as intended (or the check relaxed for Claims rows)
 before it reaches production use.
 """
-import os
 import re
 import pandas as pd
 
 try:
-    from perf_utils import fast_read_excel_rows, estimate_row_count
+    from perf_utils import fast_read_excel_rows
     _PERF_AVAILABLE = True
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     _PERF_AVAILABLE = False

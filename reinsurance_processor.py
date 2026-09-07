@@ -36,7 +36,7 @@ import re
 
 import pandas as pd
 
-from premium_register_processor import _read_workbook_any_engine, _dedupe_columns
+from premium_register_processor import _read_workbook_any_engine
 from claims_register_processor import _read_full_table_with_continuations
 import upr_processor as up
 

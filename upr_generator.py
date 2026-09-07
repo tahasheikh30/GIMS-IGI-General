@@ -362,7 +362,6 @@ def build_output_filename(period_end, run_date=None):
 
 
 if __name__ == "__main__":
-    import sys
     files = sys.argv[1:] or ["/mnt/user-data/uploads/Gross_Premium_and_Unearned_Premium_Working_-_Conventional_June_2026.xlsx"]
 
     result = up.run_upr_calculation(files, 2026, 6, report=print)

@@ -36,24 +36,16 @@ so this module's grouping behaves identically to Claims Register's and
 Receivable's.
 """
 import os
-import re
 
 import pandas as pd
 
 from premium_register_processor import (
     _read_workbook_any_engine, _build_alias_lookup, _map_columns_to_canonical,
-    find_header_row, _pick_best_sheet, _dedupe_columns,
+    find_header_row, _pick_best_sheet,
 )
 from claims_register_processor import (
     _read_full_table_with_continuations,
 )
-import company_alias_resolver as car
-
-try:
-    from perf_utils import RowProgress
-    _PERF_AVAILABLE = True
-except ImportError:
-    _PERF_AVAILABLE = False
 
 
 REGISTER_ALIASES = {
@@ -326,9 +318,3 @@ def build_company_buckets(df, colmap):
             )
             breakdowns[bucket] = g
     return groups, totals, breakdowns
-
-
-def get_column(colmap, canonical_name):
-    """Convenience passthrough - the real original column name for a
-    canonical field, or None if this source file didn't have it."""
-    return colmap.get(canonical_name)

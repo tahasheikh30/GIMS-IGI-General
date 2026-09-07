@@ -4,10 +4,9 @@ Loads the raw transaction sheet, validates it, and produces
 per-client / per-department / per-year aggregates.
 """
 import pandas as pd
-import numpy as np
 
 try:
-    from perf_utils import fast_read_excel_rows, rows_to_dataframe, estimate_row_count
+    from perf_utils import fast_read_excel_rows, rows_to_dataframe
     _PERF_AVAILABLE = True
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
     _PERF_AVAILABLE = False

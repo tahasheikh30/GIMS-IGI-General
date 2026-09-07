@@ -91,12 +91,6 @@ def safe_filename(name):
     return name[:150]  # keep filenames reasonable length
 
 
-def _write_raw_data_sheet(wb, raw_df):
-    """Add a 'Raw Data' sheet containing the client's original transaction rows."""
-    ws = wb.create_sheet("Raw Data")
-    _write_raw_data_into(ws, raw_df)
-
-
 def _prepare_for_excel(raw_df, date_cols):
     """
     One-time, vectorized cleanup of the whole dataframe before writing,

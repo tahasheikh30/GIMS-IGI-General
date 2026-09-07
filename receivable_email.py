@@ -47,10 +47,6 @@ BODY_TEMPLATE = (
 )
 
 
-def _normalize_key(text):
-    return str(text).strip().upper()
-
-
 def build_receivable_email_drafts(groups, totals, email_lookup, poc_lookup=None, signature=None, report_date=None):
     """
     groups: dict from receivable_processor.build_company_groups()
