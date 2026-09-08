@@ -7084,6 +7084,16 @@ class BalanceApp(tk.Tk):
             report(f"\n{len(coins):,} of {num_rows_loaded:,} row(s) are coinsurer (Leader = \"No\") rows "
                    f"- IGI's own rows are excluded.")
 
+            if not colmap.get("Document No"):
+                report("  WARNING: no 'Document No' column was found in this file - the Our Lead "
+                       "(OP/OE) filter could not be applied, so Direct/Their Lead rows may still be "
+                       "included below.")
+            else:
+                before_lead_filter = len(coins)
+                coins = prcp.filter_to_our_lead_policies(coins, colmap)
+                report(f"Our Lead filter applied (Document No code OP/OE only): {before_lead_filter:,} -> "
+                       f"{len(coins):,} row(s) kept - Direct (DP/DE) and Their Lead/Incoming (IP/IE) rows excluded.")
+
             if date_filter_from or date_filter_to:
                 before_count = len(coins)
                 coins, num_no_date = prcp.filter_by_date(

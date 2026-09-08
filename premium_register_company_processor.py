@@ -229,6 +229,66 @@ def filter_to_coinsurer_rows(df, colmap, exclude_own_company=True):
     return df.loc[keep].reset_index(drop=True)
 
 
+# ---------------------------------------------------------------------------
+# Lead-type filter, from the Document No's own embedded code.
+#
+# The Document No format (e.g. "2026/01/HOFCMOE00210") always ends with a
+# 5-digit serial number, and the 2 letters immediately BEFORE that serial
+# (i.e. the 6th and 7th characters counting from the right, since the
+# serial itself occupies the last 5) identify what kind of business that
+# row is:
+#   D_ = Direct                  DP = Direct Policy,        DE = Direct Endorsement
+#   O_ = Our Lead (coinsurance)  OP = Our Lead Policy,       OE = Our Lead Endorsement
+#   I_ = Their Lead / Incoming   IP = Their Lead Policy,     IE = Their Lead Endorsement
+# Confirmed against the real Premium Register export (e.g.
+# "2026/01/HOFFNOP00008" -> serial "00008", code "OP").
+#
+# Per Finance's own instruction, the Premium Register (company split)
+# output should only ever contain OUR LEAD business (OP/OE) - Direct
+# (DP/DE) and Their Lead/Incoming (IP/IE) rows are excluded from every
+# generated company workbook, regardless of company.
+# ---------------------------------------------------------------------------
+
+LEAD_CODE_KEEP = {"OP", "OE"}
+
+
+def _extract_lead_code(doc_no):
+    """The 2-letter code sitting at the 6th/7th character from the right
+    of a Document No value - see the module note above for the full
+    rationale and a worked example. Returns None (never matches
+    LEAD_CODE_KEEP) for a blank value or one too short to contain a real
+    code, so a malformed/missing reference is simply excluded rather than
+    guessed at."""
+    if pd.isna(doc_no):
+        return None
+    text = str(doc_no).strip()
+    if len(text) < 7:
+        return None
+    return text[-7:-5].upper()
+
+
+def filter_to_our_lead_policies(df, colmap):
+    """
+    Keep only rows whose Document No identifies them as Our Lead business
+    (code "OP" or "OE" - see LEAD_CODE_KEEP / _extract_lead_code above).
+    Direct (DP/DE) and Their Lead/Incoming (IP/IE) rows, and any row whose
+    Document No is missing or doesn't carry a recognizable code at all,
+    are excluded.
+
+    If colmap has no "Document No" column at all, returns df UNCHANGED
+    (there is nothing to filter by on this export shape) - callers should
+    check for this themselves (e.g. to log a warning) rather than this
+    function silently pretending everything was filtered.
+
+    Returns the filtered dataframe (index reset).
+    """
+    doc_col = colmap.get("Document No")
+    if not doc_col or doc_col not in df.columns:
+        return df
+    codes = df[doc_col].map(_extract_lead_code)
+    return df.loc[codes.isin(LEAD_CODE_KEEP)].reset_index(drop=True)
+
+
 def filter_by_date(df, colmap, date_field, start_date=None, end_date=None):
     """
     Restrict df to rows whose date_field ("Issue Date" or "Comm Date")
