@@ -7588,7 +7588,7 @@ class BalanceApp(tk.Tk):
             else:
                 before_lead_filter = len(coins)
                 coins = prcp.filter_to_our_lead_policies(coins, colmap)
-                report(f"Our Lead filter applied (Document No code OP/OE only): {before_lead_filter:,} -> "
+                report(f"Our Lead filter applied (Document No code OP/OE/OO/OC only): {before_lead_filter:,} -> "
                        f"{len(coins):,} row(s) kept - Direct (DP/DE) and Their Lead/Incoming (IP/IE) rows excluded.")
 
             if date_filter_from or date_filter_to:

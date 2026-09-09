@@ -238,18 +238,20 @@ def filter_to_coinsurer_rows(df, colmap, exclude_own_company=True):
 # serial itself occupies the last 5) identify what kind of business that
 # row is:
 #   D_ = Direct                  DP = Direct Policy,        DE = Direct Endorsement
-#   O_ = Our Lead (coinsurance)  OP = Our Lead Policy,       OE = Our Lead Endorsement
+#   O_ = Our Lead (coinsurance)  OP = Our Lead Policy,       OE = Our Lead Endorsement,
+#                                 OO / OC = additional Our Lead transaction codes,
+#                                 kept alongside OP/OE per Finance's own instruction
 #   I_ = Their Lead / Incoming   IP = Their Lead Policy,     IE = Their Lead Endorsement
 # Confirmed against the real Premium Register export (e.g.
 # "2026/01/HOFFNOP00008" -> serial "00008", code "OP").
 #
 # Per Finance's own instruction, the Premium Register (company split)
-# output should only ever contain OUR LEAD business (OP/OE) - Direct
+# output should only ever contain OUR LEAD business (OP/OE/OO/OC) - Direct
 # (DP/DE) and Their Lead/Incoming (IP/IE) rows are excluded from every
 # generated company workbook, regardless of company.
 # ---------------------------------------------------------------------------
 
-LEAD_CODE_KEEP = {"OP", "OE"}
+LEAD_CODE_KEEP = {"OP", "OE", "OO", "OC"}
 
 
 def _extract_lead_code(doc_no):
@@ -270,9 +272,9 @@ def _extract_lead_code(doc_no):
 def filter_to_our_lead_policies(df, colmap):
     """
     Keep only rows whose Document No identifies them as Our Lead business
-    (code "OP" or "OE" - see LEAD_CODE_KEEP / _extract_lead_code above).
-    Direct (DP/DE) and Their Lead/Incoming (IP/IE) rows, and any row whose
-    Document No is missing or doesn't carry a recognizable code at all,
+    (code "OP", "OE", "OO", or "OC" - see LEAD_CODE_KEEP / _extract_lead_code
+    above). Direct (DP/DE) and Their Lead/Incoming (IP/IE) rows, and any row
+    whose Document No is missing or doesn't carry a recognizable code at all,
     are excluded.
 
     If colmap has no "Document No" column at all, returns df UNCHANGED
