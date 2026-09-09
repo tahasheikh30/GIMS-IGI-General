@@ -37,7 +37,30 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 NUM_FORMAT = "#,##0;(#,##0);-"
 
 SUMMARY_SHEET = "Premium Earned Breakup"
-WORKING_SHEET = "Unearned Premium Working"
+WORKING_SHEET = "Unearned Premium Working"  # conventional default - see WORKING_SHEET_LABELS for the Takaful override
+
+# Text overrides applied when business_type="takaful" is passed to
+# build_upr_workbook() - the underlying calculation is identical either
+# way (see upr_processor.py's own GROSS_AMOUNT_ALIASES_BY_TYPE docstring:
+# a Takaful run's Gross Contribution figure lands in the exact same
+# canonical "Gross Premium" column every table-building function already
+# works off), only these display labels change so the output reads
+# correctly for a Contribution Register run rather than a Premium
+# Register run.
+WORKING_SHEET_LABELS = {
+    "conventional": {
+        "working_sheet": "Unearned Premium Working",
+        "table1_title": "Table 1 \u2014 Gross Premium Distribution",
+        "table2_title": "Table 2 \u2014 Unearned Premium Working",
+        "closing_row_label": "Less: Closing Unearned Premium Revenue",
+    },
+    "takaful": {
+        "working_sheet": "Unearned Contribution Working",
+        "table1_title": "Table 1 \u2014 Gross Contribution Distribution",
+        "table2_title": "Table 2 \u2014 Unearned Contribution Working",
+        "closing_row_label": "Less: Closing Unearned Contribution Revenue",
+    },
+}
 
 # Column widths - sized to comfortably fit real PKR figures with commas
 # (confirmed against the real reference file: a single department's own
@@ -184,7 +207,7 @@ def _write_driver_rows(ws, start_row, period_start, label):
     return period_row, year_row
 
 
-def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
+def build_upr_workbook(result, section1_inputs, output_path, run_date=None, business_type="conventional"):
     """
     result: the dict returned by upr_processor.run_upr_calculation().
     section1_inputs: dict with keys "premium_direct", "premium_coinsurance",
@@ -192,9 +215,19 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
         plain numbers (see upr_ledger_processor.py for the four
         premium-income ones being pulled from a PDF instead of typed by
         hand; Opening UPR stays manual for now).
+    business_type: "conventional" (default) or "takaful" - a Takaful run
+        was calculated from a Contribution Register's own Gross
+        Contribution figure (see upr_processor.load_premium_registers'
+        own business_type parameter), so the working sheet's own name
+        and both table titles read "Contribution" instead of "Premium"
+        (see WORKING_SHEET_LABELS above) - the underlying numbers and
+        every formula are otherwise identical either way. A Conventional
+        run is worded exactly as before, with nothing changed.
     Returns output_path.
     """
     run_date = run_date or date.today()
+    labels = WORKING_SHEET_LABELS.get(business_type, WORKING_SHEET_LABELS["conventional"])
+    working_sheet_name = labels["working_sheet"]
     departments = result["departments"]
     gross_table = result["gross_table"]
     unearned_table = result["unearned_table"]
@@ -204,18 +237,19 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
     wb = Workbook()
     wb.remove(wb.active)
 
-    # ---- "Unearned Premium Working" - BOTH tables on one sheet, Table 1
-    # then Table 2 stacked directly below it, matching the real reference
-    # file's own layout exactly (see the module docstring). ----
-    ws_working = wb.create_sheet(WORKING_SHEET)
+    # ---- Working sheet ("Unearned Premium Working" / "Unearned
+    # Contribution Working" for Takaful) - BOTH tables on one sheet,
+    # Table 1 then Table 2 stacked directly below it, matching the real
+    # reference file's own layout exactly (see the module docstring). ----
+    ws_working = wb.create_sheet(working_sheet_name)
     ws_working.sheet_view.showGridLines = False
     subtitle = f"Period: {period_start:%d-%b-%Y} to {period_end:%d-%b-%Y}  \u2022  generated {run_date:%d-%b-%Y}"
-    ws_working.cell(row=1, column=2, value="Unearned Premium Working").font = Font(name="Arial", bold=True, size=14, color="1F4E78")
+    ws_working.cell(row=1, column=2, value=working_sheet_name).font = Font(name="Arial", bold=True, size=14, color="1F4E78")
     ws_working.cell(row=2, column=2, value=subtitle).font = SUBTITLE_FONT
 
-    # Table 1 - Gross Premium Distribution
+    # Table 1 - Gross Premium/Contribution Distribution
     gross_header_row, gross_data_row, gross_total_row = _write_table_block(
-        ws_working, 4, "Table 1 \u2014 Gross Premium Distribution", departments, gross_table)
+        ws_working, 4, labels["table1_title"], departments, gross_table)
 
     # Driver rows (1/24 then 1/6), sitting between the two tables - same
     # relative position as the original file (right after Table 1's own
@@ -237,16 +271,16 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
         period_row, year_row = driver_rows
         return f"={gross_cell}*{col_letter}${period_row}/{col_letter}${year_row}"
 
-    # Table 2 - Unearned Premium Working, starting right after the driver rows
+    # Table 2 - Unearned Premium/Contribution Working, starting right after the driver rows
     table2_start = driver_gap + 3 + 2 + 1  # driver block (2 rows) + gap + blank spacer
     unearned_header_row, unearned_data_row, unearned_total_row = _write_table_block(
-        ws_working, table2_start, "Table 2 \u2014 Unearned Premium Working", departments, unearned_table,
+        ws_working, table2_start, labels["table2_title"], departments, unearned_table,
         value_formula_fn=_unearned_formula)
 
     _apply_working_sheet_column_widths(ws_working)
     ws_working.freeze_panes = ws_working.cell(row=gross_data_row, column=3).coordinate
 
-    unearned_grand_total_cell = f"'{WORKING_SHEET}'!{_col_letter(3 + len(up.TABLE_COLUMNS))}{unearned_total_row}"
+    unearned_grand_total_cell = f"'{working_sheet_name}'!{_col_letter(3 + len(up.TABLE_COLUMNS))}{unearned_total_row}"
 
     # ---- "Premium Earned Breakup" (Section 1 summary) ----
     ws_summary = wb.create_sheet(SUMMARY_SHEET)
@@ -300,7 +334,7 @@ def build_upr_workbook(result, section1_inputs, output_path, run_date=None):
     opening_row = r
     r += 1
 
-    ws_summary.cell(row=r, column=2, value="Less: Closing Unearned Premium Revenue").font = BODY_FONT
+    ws_summary.cell(row=r, column=2, value=labels["closing_row_label"]).font = BODY_FONT
     closing_cell = ws_summary.cell(row=r, column=3, value=f"=-{unearned_grand_total_cell}")
     closing_cell.number_format = NUM_FORMAT
     closing_cell.font = BODY_FONT
@@ -356,9 +390,14 @@ def _recalculate(filepath):
         pass
 
 
-def build_output_filename(period_end, run_date=None):
+def build_output_filename(period_end, run_date=None, business_type="conventional"):
+    """business_type: "conventional" (default) or "takaful" - a Takaful
+    run inserts "_Takaful" into the filename, same convention used by
+    Claims Register / Premium Register (split) for their own Business
+    Type toggle."""
     run_date = run_date or date.today()
-    return f"UPR_Working_{period_end:%b%Y}_{run_date:%d%m%Y}.xlsx"
+    type_part = "_Takaful" if business_type == "takaful" else ""
+    return f"UPR_Working{type_part}_{period_end:%b%Y}_{run_date:%d%m%Y}.xlsx"
 
 
 if __name__ == "__main__":

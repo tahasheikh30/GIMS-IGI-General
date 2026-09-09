@@ -52,6 +52,8 @@ import reinsurance_generator as rig
 import deferred_commission_processor as dcp
 import deferred_commission_generator as dcg
 import deferred_commission_ledger_processor as dclp
+import deferred_wakala_fee_processor as dwfp
+import deferred_wakala_fee_generator as dwfg
 import withholding_tax_processor as wtp
 import withholding_tax_generator as wtg
 
@@ -258,6 +260,21 @@ class BalanceApp(tk.Tk):
         self.dc_last_output_file = None
         self.dc_ledger_pdf_path = None            # last-browsed Ledger Balance PDF path (Deferred Commission's own three GL accounts)
         self.dc_ledger_parse_result = None        # last deferred_commission_ledger_processor.parse_deferred_commission_ledger_pdf() result - carried into Generate as the Summary sheet's "Ledger Balances" block
+
+        # Deferred Wakala Fee (Takaful) module state - see
+        # deferred_wakala_fee_processor.py. Wakala Fee % per department is
+        # entered by hand on tab 2 (self.dwf_pct_vars, a
+        # {department: tk.StringVar} dict created in that tab's own build
+        # method, per this file's own convention that every tk.Variable
+        # lives in its build method rather than __init__).
+        self.dwf_register_paths = []              # list of uploaded Contribution Register filepaths
+        self.dwf_loaded_df = None                  # concatenated Contribution Register rows - used only to populate the period dropdown
+        self.dwf_period_options = []               # [{"year","month","label"}, ...] populated after loading the register
+        self.dwf_last_result = None                # last run_deferred_wakala_fee_calculation() result dict
+        self.dwf_last_wakala_pct = {}              # {department: percent} used for the last Calculate click, carried through to Generate
+        self.dwf_last_opening = 0.0                # Opening Deferred Wakala Fees entered on tab 2, used at generate time
+        self.dwf_output_dir = os.path.join(os.getcwd(), "Deferred Wakala Fee")
+        self.dwf_last_output_file = None
 
         # Withholding Tax (Income Tax) module state - see withholding_tax_processor.py.
         # The four inputs are independent files (or independent sheets within
@@ -689,6 +706,7 @@ class BalanceApp(tk.Tk):
                     ("upr_automation", "UPR Automation"),
                     ("reinsurance_automation", "Reinsurance Automation"),
                     ("deferred_commission", "Deferred Commission"),
+                    ("deferred_wakala_fee", "Deferred Wakala Fee"),
                 ]),
                 # "Withholding Tax" nested submenu - currently holds one page
                 # (Income Tax), left as its own nested submenu rather than a
@@ -1015,6 +1033,11 @@ class BalanceApp(tk.Tk):
         deferred_commission_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["deferred_commission"] = deferred_commission_page
         self._build_deferred_commission_page(deferred_commission_page)
+
+        deferred_wakala_fee_page = ttk.Frame(container)
+        deferred_wakala_fee_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["deferred_wakala_fee"] = deferred_wakala_fee_page
+        self._build_deferred_wakala_fee_page(deferred_wakala_fee_page)
 
         withholding_tax_page = ttk.Frame(container)
         withholding_tax_page.grid(row=0, column=0, sticky="nsew")
@@ -1652,14 +1675,38 @@ class BalanceApp(tk.Tk):
         PAD_X = 16
 
         s1 = self._loss_section_card(body, "1", "Premium Register File(s)", PAD_X)
+
+        # Business Type - Conventional (default) or Takaful. Determines
+        # which register/column this run actually reads: Conventional
+        # reads a plain Premium Register's own "Gross Premium/
+        # Contribution" column; Takaful reads a Contribution Register's
+        # own "Gross Contribution" column instead - see
+        # upr_processor.load_premium_registers' own business_type
+        # parameter for the full rationale. Both land in the identical
+        # canonical amount column downstream, so the 1/24 vs 1/6
+        # amortization logic itself never changes - only which file/
+        # column is read, and the working sheet's own display labels
+        # (see upr_generator.WORKING_SHEET_LABELS), depend on this
+        # toggle. self.upr_business_type_var is a tk.StringVar created
+        # here (not in __init__) per this file's own convention that
+        # every tk.Variable lives in its build method.
+        business_type_row = ttk.Frame(s1)
+        business_type_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(business_type_row, text="Business Type:", style="Panel.TLabel",
+                  font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0, 14))
+        self.upr_business_type_var = tk.StringVar(value="conventional")
+        ttk.Radiobutton(business_type_row, text="Conventional", variable=self.upr_business_type_var,
+                         value="conventional", command=self._update_upr_business_type_note).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(business_type_row, text="Takaful", variable=self.upr_business_type_var,
+                         value="takaful", command=self._update_upr_business_type_note).pack(side="left")
+
+        self.upr_s1_note_var = tk.StringVar()
         upr_s1_note = ttk.Label(
-            s1, text="Upload one consolidated file (with a sheet per year) or several separate per-year "
-                      "files - either works, every qualifying sheet across every file is combined before "
-                      "anything is calculated. Required columns: Department/Class, Comm Date, Gross "
-                      "Premium/Contribution.",
+            s1, textvariable=self.upr_s1_note_var,
             style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
         upr_s1_note.pack(anchor="w", pady=(0, 10))
         self._bind_dynamic_wraplength(upr_s1_note, s1, side_padding=10)
+        self._update_upr_business_type_note()
 
         list_card = tk.Frame(s1, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
         list_card.pack(fill="x")
@@ -1715,6 +1762,29 @@ class BalanceApp(tk.Tk):
 
         self._finalize_scroll_passthrough(body)
 
+    def _update_upr_business_type_note(self):
+        """Keeps Section 1's own file-requirements note in sync with
+        whichever Business Type radio button is currently selected -
+        called once at build time and again every time that variable
+        changes. Nothing about matching/amortization itself depends on
+        this; it only changes what the note tells the person to expect
+        from their uploaded file(s), and (at Load Register(s) time) which
+        column is actually read - see _load_upr_registers."""
+        if self.upr_business_type_var.get() == "takaful":
+            self.upr_s1_note_var.set(
+                "Upload one consolidated Contribution Register (with a sheet per year) or several "
+                "separate per-year files - either works, every qualifying sheet across every file is "
+                "combined before anything is calculated. Required columns: Department/Class, Comm Date, "
+                "Gross Contribution."
+            )
+        else:
+            self.upr_s1_note_var.set(
+                "Upload one consolidated Premium Register (with a sheet per year) or several separate "
+                "per-year files - either works, every qualifying sheet across every file is combined "
+                "before anything is calculated. Required columns: Department/Class, Comm Date, Gross "
+                "Premium/Contribution."
+            )
+
     def _log_upr(self, msg):
         self.upr_register_log.insert("end", str(msg) + "\n")
         self.upr_register_log.see("end")
@@ -1751,9 +1821,13 @@ class BalanceApp(tk.Tk):
         self.status_var.set("Loading premium register(s)...")
         self.upr_load_progress.start(total=None, text="Loading...")
         paths = list(self.upr_register_paths)
+        # Read on the main thread, same rule as every other Tkinter
+        # variable this worker closure captures below - Tkinter widgets/
+        # variables must never be queried from a background thread.
+        business_type = self.upr_business_type_var.get()
 
         def worker(report):
-            df, meta = uprp.load_premium_registers(paths, report=report)
+            df, meta = uprp.load_premium_registers(paths, report=report, business_type=business_type)
             return df, meta
 
         def on_done(result):
@@ -2083,9 +2157,13 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("Invalid entry", str(e))
             return
 
+        # Read on the main thread, same rule as every other Tkinter
+        # variable this worker closure captures below.
+        business_type = self.upr_business_type_var.get()
+
         output_dir = self._new_run_folder(base_output_dir)
         result = self.upr_last_result
-        filename = uprg.build_output_filename(result["period_end"])
+        filename = uprg.build_output_filename(result["period_end"], business_type=business_type)
         output_file = os.path.join(output_dir, filename)
 
         self.upr_gen_log.delete("1.0", "end")
@@ -2093,7 +2171,7 @@ class BalanceApp(tk.Tk):
         self.upr_gen_progress.start(total=None, text="Generating...")
 
         def worker(report):
-            return uprg.build_upr_workbook(result, section1, output_file)
+            return uprg.build_upr_workbook(result, section1, output_file, business_type=business_type)
 
         def on_done(fp):
             self.upr_last_output_file = fp
@@ -2998,6 +3076,425 @@ class BalanceApp(tk.Tk):
 
     def _open_dc_output_folder(self):
         output_dir = os.path.dirname(self.dc_last_output_file) if self.dc_last_output_file else self.dc_output_dir_var.get().strip()
+        if output_dir and os.path.exists(output_dir):
+            os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
+
+
+    # ---------- Deferred Wakala Fee (Takaful) module ----------
+    def _build_deferred_wakala_fee_page(self, parent):
+        """Deferred Wakala Fee (Takaful): upload the Contribution
+        Register(s), select a period, enter a Wakala Fee % for each
+        department plus the Opening Deferred Wakala Fees balance, and
+        generate the Deferred Wakala Fees working workbook - same 3-tab
+        shape as Reinsurance Automation, since the underlying calculation
+        reuses UPR's own period/bucketing/amortization logic directly
+        once every row's own Wakala Fee has been computed."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Deferred Wakala Fee", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        dwf_subtitle = ttk.Label(
+            header, text="Computes each Contribution Register row's own Wakala Fee - (Gross Contribution + "
+                          "Admin) x that row's own Department's Wakala Fee % - then amortizes it using the "
+                          "same 1/24 (most departments) / 1/6 (Marine, Travel) method as UPR Automation to "
+                          "produce the Closing Deferred Wakala Fees figure for a selected 12-month period.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        dwf_subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+
+        def _wrap_dwf_subtitle(event):
+            dwf_subtitle.configure(wraplength=max(200, event.width - 4))
+        header.bind("<Configure>", _wrap_dwf_subtitle)
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        tab_register = ttk.Frame(notebook)
+        tab_wakala = ttk.Frame(notebook)
+        tab_generate = ttk.Frame(notebook)
+        notebook.add(tab_register, text="1. Contribution Register & Period")
+        notebook.add(tab_wakala, text="2. Wakala Fee % & Calculate")
+        notebook.add(tab_generate, text="3. Generate & Save")
+
+        self._build_dwf_tab_register(tab_register)
+        self._build_dwf_tab_wakala(tab_wakala)
+        self._build_dwf_tab_generate(tab_generate)
+
+    # ---- Tab 1: Contribution Register file(s) + period ----
+    def _build_dwf_tab_register(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s1 = self._loss_section_card(body, "1", "Contribution Register File(s)", PAD_X)
+        dwf_s1_note = ttk.Label(
+            s1, text="Upload one consolidated Contribution Register (with a sheet per year) or several "
+                      "separate per-year files - either works, every qualifying sheet across every file is "
+                      "combined before anything is calculated. Required columns: Department/Class, Comm "
+                      "Date, Gross Contribution, Admin.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dwf_s1_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dwf_s1_note, s1, side_padding=10)
+
+        list_card = tk.Frame(s1, bg=self.COLOR_PANEL_ALT, highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_card.pack(fill="x")
+        list_outer = tk.Frame(list_card, bg=self.COLOR_PANEL_ALT)
+        list_outer.pack(fill="x", padx=12, pady=10)
+
+        list_frame = tk.Frame(list_outer, bg="white", highlightbackground=self.COLOR_BORDER, highlightthickness=1)
+        list_frame.pack(fill="x")
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+        self.dwf_register_listbox = tk.Listbox(list_frame, height=5, font=("Segoe UI", 10), selectmode="extended",
+                                                 activestyle="none", relief="flat", borderwidth=0,
+                                                 bg="white", selectbackground=self.COLOR_ACCENT, selectforeground="white",
+                                                 highlightthickness=0, yscrollcommand=list_scroll.set)
+        list_scroll.configure(command=self.dwf_register_listbox.yview)
+        self.dwf_register_listbox.pack(side="left", fill="both", expand=True)
+        list_scroll.pack(side="right", fill="y")
+
+        toolbar = tk.Frame(list_outer, bg=self.COLOR_PANEL_ALT)
+        toolbar.pack(fill="x", pady=(8, 0))
+        self._make_pill_button(toolbar, "Browse...", self._add_dwf_register_files, bg=self.COLOR_ACCENT).pack(side="left")
+        self._make_pill_button(toolbar, "Remove Selected", self._remove_dwf_register_file,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, outline=True).pack(side="left", padx=(8, 0))
+        self._make_pill_button(toolbar, "Clear All", self._clear_dwf_register_files,
+                                bg=self.COLOR_PANEL, fg=self.COLOR_WARN, outline=True).pack(side="left", padx=(8, 0))
+
+        load_row = ttk.Frame(s1)
+        load_row.pack(fill="x", pady=(10, 0))
+        self.dwf_load_btn = self._make_action_button(load_row, "Load Register(s)", self._load_dwf_registers, kind="accent")
+        self.dwf_load_btn.pack(side="left")
+
+        self.dwf_load_progress = perf_utils.ProgressBarPanel(s1)
+        self.dwf_load_progress.frame.pack(fill="x", pady=(8, 0))
+
+        s2 = self._loss_section_card(body, "2", "Period", PAD_X, expand_bottom=True)
+        dwf_s2_note = ttk.Label(
+            s2, text="Select the period END month - the calculation covers exactly the 12 months ending "
+                      "there. If the uploaded register(s) don't reach back or forward far enough to cover "
+                      "the full 12 months, an error is raised rather than guessing.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        dwf_s2_note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(dwf_s2_note, s2, side_padding=10)
+
+        period_row = ttk.Frame(s2)
+        period_row.pack(fill="x")
+        ttk.Label(period_row, text="Period (ending month)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.dwf_period_var = tk.StringVar()
+        self.dwf_period_combo = ttk.Combobox(period_row, textvariable=self.dwf_period_var, state="readonly", width=22)
+        self.dwf_period_combo.pack(side="left")
+
+        self.dwf_register_log = scrolledtext.ScrolledText(s2, height=8, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.dwf_register_log.pack(fill="both", expand=True, pady=(12, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_dwf(self, msg):
+        self.dwf_register_log.insert("end", str(msg) + "\n")
+        self.dwf_register_log.see("end")
+
+    def _add_dwf_register_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        added = 0
+        for p in paths:
+            if p not in self.dwf_register_paths:
+                self.dwf_register_paths.append(p)
+                self.dwf_register_listbox.insert("end", os.path.basename(p))
+                added += 1
+        if added:
+            self.status_var.set(f"Deferred Wakala Fee: added {added} file(s) ({len(self.dwf_register_paths)} total).")
+
+    def _remove_dwf_register_file(self):
+        selected = list(self.dwf_register_listbox.curselection())
+        if not selected:
+            return
+        for idx in reversed(selected):
+            self.dwf_register_listbox.delete(idx)
+            del self.dwf_register_paths[idx]
+
+    def _clear_dwf_register_files(self):
+        self.dwf_register_listbox.delete(0, "end")
+        self.dwf_register_paths.clear()
+
+    def _load_dwf_registers(self):
+        if not self.dwf_register_paths:
+            messagebox.showerror("No files selected", "Browse to at least one Contribution Register file first.")
+            return
+
+        self.dwf_register_log.delete("1.0", "end")
+        self.status_var.set("Loading contribution register(s)...")
+        self.dwf_load_progress.start(total=None, text="Loading...")
+        paths = list(self.dwf_register_paths)
+
+        def worker(report):
+            df, meta = dwfp.load_contribution_registers(paths, report=report)
+            return df, meta
+
+        def on_done(result):
+            df, meta = result
+            self.dwf_loaded_df = df
+            self.dwf_load_progress.finish(f"Loaded {len(df):,} row(s).")
+            self._log_dwf(f"Loaded {len(df):,} usable row(s) from {len(meta['sheets_used'])} sheet(s): "
+                          + ", ".join(f"{fn} [{sn}]" for fn, sn in meta["sheets_used"]))
+            if meta["excluded_rows"]:
+                self._log_dwf(f"{meta['excluded_rows']:,} row(s) excluded (missing Department, Comm Date, "
+                              f"or Gross Contribution, or an implausibly old Comm Date).")
+
+            options = dwfp.get_available_period_options(df)
+            self.dwf_period_options = options
+            self.dwf_period_combo.configure(values=[o["label"] for o in options])
+            if options:
+                self.dwf_period_combo.current(0)
+            self.status_var.set(f"Deferred Wakala Fee: {len(df):,} row(s) loaded. Choose a period, then go to tab 2.")
+
+        def on_error(exc):
+            self.dwf_load_progress.finish("Failed - see the log for details.")
+            self._log_dwf(f"ERROR: {exc}")
+            messagebox.showerror("Could not load register(s)", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress=lambda msg: self._log_dwf(msg),
+            on_progress_value=self.dwf_load_progress.update,
+            on_done=on_done, on_error=on_error,
+            busy_widgets=[self.dwf_load_btn],
+        )
+
+    # ---- Tab 2: Wakala Fee % by department + Opening Balance + Calculate ----
+    def _build_dwf_tab_wakala(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s3 = self._loss_section_card(body, "3", "Wakala Fee % by Department", PAD_X)
+        ttk.Label(s3, text="Enter each department's own Wakala Fee % - every row in that department is "
+                            "charged (Gross Contribution + Admin) x this percentage. A department left "
+                            "blank defaults to 0%.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left",
+                  wraplength=900).pack(anchor="w", pady=(0, 10))
+
+        # self.dwf_pct_vars: {department: tk.StringVar} - created here, per
+        # this file's own convention that every tk.Variable lives in its
+        # build method rather than __init__. One text entry per department
+        # on upr_processor's own fixed DEPARTMENT_ORDER list, laid out in
+        # a simple two-column grid so nine entries don't run into one long
+        # vertical strip.
+        self.dwf_pct_vars = {}
+        pct_grid = ttk.Frame(s3)
+        pct_grid.pack(fill="x")
+        n_cols = 3
+        for i, dept in enumerate(dwfp.DEPARTMENT_ORDER):
+            row, col = divmod(i, n_cols)
+            cell = ttk.Frame(pct_grid)
+            cell.grid(row=row, column=col, sticky="w", padx=(0, 24), pady=6)
+            ttk.Label(cell, text=dept, style="Panel.TLabel", width=14).pack(side="left", padx=(0, 6))
+            var = tk.StringVar()
+            ttk.Entry(cell, textvariable=var, width=8, font=("Segoe UI", 10)).pack(side="left")
+            ttk.Label(cell, text="%", style="Panel.TLabel").pack(side="left", padx=(4, 0))
+            self.dwf_pct_vars[dept] = var
+
+        s4 = self._loss_section_card(body, "4", "Opening Balance", PAD_X)
+        ttk.Label(s4, text="Opening Deferred Wakala Fees",
+                  style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(s4, text="This isn't in any register - it's the prior period's own Closing figure, entered "
+                            "by hand for now.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 6))
+        self.dwf_opening_var = tk.StringVar()
+        ttk.Entry(s4, textvariable=self.dwf_opening_var, width=22, font=("Segoe UI", 10)).pack(anchor="w")
+
+        s5 = self._loss_section_card(body, "5", "Run Calculation", PAD_X, expand_bottom=True)
+        ttk.Label(s5, text="Computes each row's own Wakala Fee from the register loaded on tab 1, then builds "
+                            "both tables (Gross Wakala Fee Distribution and Deferred Wakala Fees) for the "
+                            "period selected there.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        calc_btn = self._make_action_button(s5, "Calculate", self._run_dwf_calculation, kind="accent")
+        calc_btn.pack(anchor="w")
+
+        self.dwf_calc_progress = perf_utils.ProgressBarPanel(s5)
+        self.dwf_calc_progress.frame.pack(fill="x", pady=(10, 0))
+
+        self.dwf_calc_summary_var = tk.StringVar(value="")
+        ttk.Label(s5, textvariable=self.dwf_calc_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 8))
+
+        tree_frame = ttk.Frame(s5)
+        tree_frame.pack(fill="both", expand=True)
+        columns = ("department", "method", "wakala_total", "deferred_total")
+        self.dwf_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
+        self.dwf_results_tree.heading("department", text="Department")
+        self.dwf_results_tree.heading("method", text="Method")
+        self.dwf_results_tree.heading("wakala_total", text="Gross Wakala Fee Total")
+        self.dwf_results_tree.heading("deferred_total", text="Deferred Total")
+        self.dwf_results_tree.column("department", width=180)
+        self.dwf_results_tree.column("method", width=80, anchor="center")
+        self.dwf_results_tree.column("wakala_total", width=180, anchor="e")
+        self.dwf_results_tree.column("deferred_total", width=170, anchor="e")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.dwf_results_tree.yview)
+        self.dwf_results_tree.configure(yscrollcommand=vsb.set)
+        self.dwf_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self._finalize_scroll_passthrough(body)
+
+    def _collect_dwf_wakala_pct(self):
+        """Reads self.dwf_pct_vars on the MAIN thread (Tkinter variables
+        must never be queried from a background thread) and returns
+        {department: percent_float}. A blank entry is treated as 0%, not
+        an error - leaving a department blank is the normal way to say
+        "this department has no Wakala Fee". Raises ValueError with a
+        message ready to show the user if a non-blank entry isn't a
+        valid number."""
+        pct_by_department = {}
+        for dept, var in self.dwf_pct_vars.items():
+            text = var.get().strip().replace("%", "")
+            if not text:
+                pct_by_department[dept] = 0.0
+                continue
+            try:
+                pct_by_department[dept] = float(text)
+            except ValueError:
+                raise ValueError(f"'{text}' isn't a valid Wakala Fee % for {dept}.")
+        return pct_by_department
+
+    def _run_dwf_calculation(self):
+        if self.dwf_loaded_df is None:
+            messagebox.showerror("Error", "Load the Contribution Register(s) on tab 1 first.")
+            return
+        if not self.dwf_period_options:
+            messagebox.showerror("Error", "No period options available - load register(s) with usable Comm Date values first.")
+            return
+        selected_label = self.dwf_period_var.get()
+        option = next((o for o in self.dwf_period_options if o["label"] == selected_label), None)
+        if option is None:
+            messagebox.showerror("Error", "Select a period on tab 1 first.")
+            return
+
+        try:
+            wakala_pct = self._collect_dwf_wakala_pct()
+        except ValueError as e:
+            messagebox.showerror("Invalid entry", str(e))
+            return
+
+        opening_text = self.dwf_opening_var.get().strip().replace(",", "")
+        try:
+            opening_deferred = float(opening_text) if opening_text else 0.0
+        except ValueError:
+            messagebox.showerror("Invalid entry", f"'{opening_text}' isn't a valid number for Opening Deferred Wakala Fees.")
+            return
+
+        paths = list(self.dwf_register_paths)
+        period_year, period_month = option["year"], option["month"]
+        self.dwf_calc_summary_var.set("")
+        self.dwf_calc_progress.start(total=None, text="Calculating...")
+
+        def worker(report):
+            return dwfp.run_deferred_wakala_fee_calculation(paths, wakala_pct, period_year, period_month, report=report)
+
+        def on_done(result):
+            self.dwf_last_result = result
+            self.dwf_last_wakala_pct = wakala_pct
+            self.dwf_last_opening = opening_deferred
+            self.dwf_calc_progress.finish("Done.")
+            self.dwf_calc_summary_var.set(
+                f"Closing Deferred Wakala Fees: PKR {result['closing_deferred_wakala']:,.0f}")
+
+            self.dwf_results_tree.delete(*self.dwf_results_tree.get_children())
+            for dept in result["departments"]:
+                wt = dwfp.row_total(result["wakala_table"][dept])
+                dt = dwfp.row_total(result["deferred_table"][dept])
+                self.dwf_results_tree.insert("", "end", values=(
+                    dept, result["methods"][dept], f"{wt:,.0f}", f"{dt:,.0f}"
+                ))
+            for w in result["warnings"]:
+                self._log_dwf(f"WARNING: {w}")
+            self.status_var.set(f"Deferred Wakala Fee: Closing = PKR {result['closing_deferred_wakala']:,.0f}. See tab 3 to generate.")
+
+        def on_error(exc):
+            self.dwf_calc_progress.finish("Failed - see the message for details.")
+            messagebox.showerror("Calculation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.dwf_calc_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    # ---- Tab 3: Generate & Save ----
+    def _build_dwf_tab_generate(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+
+        s6 = self._loss_section_card(body, "6", "Generate & Save", PAD_X, expand_bottom=True)
+        out_row = ttk.Frame(s6)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.dwf_output_dir_var = tk.StringVar(value=self.dwf_output_dir)
+        ttk.Entry(out_row, textvariable=self.dwf_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_dwf_output_dir).pack(side="left")
+
+        gen_row = ttk.Frame(s6)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate Deferred Wakala Fee Workbook", self._generate_dwf_workbook, kind="accent").pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_dwf_output_folder).pack(side="left", padx=(8, 0))
+
+        self.dwf_gen_progress = perf_utils.ProgressBarPanel(s6)
+        self.dwf_gen_progress.frame.pack(fill="x", pady=(4, 8))
+
+        self.dwf_gen_log = scrolledtext.ScrolledText(s6, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.dwf_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._finalize_scroll_passthrough(body)
+
+    def _log_dwf_gen(self, msg):
+        self.dwf_gen_log.insert("end", str(msg) + "\n")
+        self.dwf_gen_log.see("end")
+
+    def _browse_dwf_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.dwf_output_dir_var.set(path)
+
+    def _generate_dwf_workbook(self):
+        if self.dwf_last_result is None:
+            messagebox.showerror("Nothing to generate", "Run Calculate on tab 2 first.")
+            return
+        base_output_dir = self.dwf_output_dir_var.get().strip()
+        if not base_output_dir:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+
+        output_dir = self._new_run_folder(base_output_dir)
+        result = self.dwf_last_result
+        opening_deferred = getattr(self, "dwf_last_opening", 0.0)
+        filename = dwfg.build_output_filename(result["period_end"])
+        output_file = os.path.join(output_dir, filename)
+
+        self.dwf_gen_log.delete("1.0", "end")
+        self.status_var.set("Generating Deferred Wakala Fee workbook...")
+        self.dwf_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return dwfg.build_deferred_wakala_fee_workbook(result, opening_deferred, output_file)
+
+        def on_done(fp):
+            self.dwf_last_output_file = fp
+            self.dwf_gen_progress.finish("Done.")
+            self._log_dwf_gen(f"Generated: {fp}")
+            messagebox.showinfo("Done", f"Deferred Wakala Fee workbook generated:\n{fp}")
+            self.status_var.set(f"Deferred Wakala Fee: generated {os.path.basename(fp)}.")
+
+        def on_error(exc):
+            self.dwf_gen_progress.finish("Failed - see the log for details.")
+            self._log_dwf_gen(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker,
+            on_progress_value=self.dwf_gen_progress.update,
+            on_done=on_done, on_error=on_error,
+        )
+
+    def _open_dwf_output_folder(self):
+        output_dir = os.path.dirname(self.dwf_last_output_file) if self.dwf_last_output_file else self.dwf_output_dir_var.get().strip()
         if output_dir and os.path.exists(output_dir):
             os.startfile(output_dir) if hasattr(os, "startfile") else os.system(f'open "{output_dir}"')
         else:

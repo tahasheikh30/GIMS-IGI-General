@@ -121,14 +121,39 @@ class UPRError(Exception):
 # Column alias matching (same pattern as every other GIMS loader)
 # ---------------------------------------------------------------------------
 
+# "Gross Premium" is the canonical amount column downstream (Table 1/
+# Table 2, every bucketing/amortization function) always sums under -
+# for a Takaful run this same canonical column is populated from the
+# Contribution Register's own "Gross Contribution" column instead of a
+# Premium Register's "Gross Premium/Contribution" column (see
+# GROSS_AMOUNT_ALIASES_BY_TYPE below). Nothing downstream of loading
+# needs to know which business type produced the figure - only the
+# generator's own display labels (build_upr_workbook's business_type
+# parameter) need to say "Contribution" instead of "Premium".
 ALIASES = {
     "Department": ["department/class", "department / class", "department", "class", "class of business"],
     "Comm Date": ["comm date", "commencement date", "comm. date", "comm  date"],
-    "Gross Premium": [
+    "Doc Ref": ["doc ref #", "doc ref#", "doc ref number", "document no", "document number", "doc ref"],
+}
+
+# The amount-column aliases are business-type-specific: a Conventional
+# run reads the Premium Register's own "Gross Premium/Contribution"
+# column; a Takaful run reads the Contribution Register's own "Gross
+# Contribution" column (confirmed real header text: "Gross \nContribution"
+# - a literal newline inside the cell - which normalizes down to "gross
+# contribution" via _normalize_header's own "\n" -> " " replacement).
+# Both are always mapped to the SAME canonical "Gross Premium" field
+# below, so every downstream function (build_gross_premium_table,
+# assign_buckets, etc.) stays completely unchanged regardless of which
+# business type produced the figure.
+GROSS_AMOUNT_ALIASES_BY_TYPE = {
+    "conventional": [
         "gross premium/contribution", "gross premium / contribution", "gross premium contribution",
         "gross premium", "grosspremium", "premium/contribution", "premium",
     ],
-    "Doc Ref": ["doc ref #", "doc ref#", "doc ref number", "document no", "document number", "doc ref"],
+    "takaful": [
+        "gross contribution", "gross  contribution", "grosscontribution", "contribution",
+    ],
 }
 
 
@@ -139,38 +164,59 @@ def _normalize_header(value):
     return text
 
 
-def _build_alias_lookup():
+def _build_alias_lookup(business_type="conventional"):
+    """{normalized_header: canonical_name} for a given business type -
+    the base Department/Comm Date/Doc Ref aliases plus whichever amount-
+    column aliases apply for `business_type` (see
+    GROSS_AMOUNT_ALIASES_BY_TYPE above), all mapped to the same
+    canonical "Gross Premium" field. Falls back to the conventional
+    amount aliases for an unrecognized business_type value, rather than
+    raising, so a stale/unexpected caller degrades gracefully instead of
+    failing to find a header row at all."""
     lookup = {}
     for canonical, aliases in ALIASES.items():
         for a in aliases:
             lookup[a] = canonical
+    for a in GROSS_AMOUNT_ALIASES_BY_TYPE.get(business_type, GROSS_AMOUNT_ALIASES_BY_TYPE["conventional"]):
+        lookup[a] = "Gross Premium"
     return lookup
 
 
-_ALIAS_LOOKUP = _build_alias_lookup()
+# Module-level default (conventional) - kept for any external caller that
+# still imports _ALIAS_LOOKUP directly; load_premium_registers below
+# always builds its own lookup from business_type instead of relying on
+# this module-level one.
+_ALIAS_LOOKUP = _build_alias_lookup("conventional")
 
 
-def _map_columns_to_canonical(columns):
+def _map_columns_to_canonical(columns, alias_lookup=None):
+    alias_lookup = alias_lookup if alias_lookup is not None else _ALIAS_LOOKUP
     mapping = {}
     for col in columns:
         norm = _normalize_header(col)
-        if norm in _ALIAS_LOOKUP:
-            mapping[col] = _ALIAS_LOOKUP[norm]
+        if norm in alias_lookup:
+            mapping[col] = alias_lookup[norm]
     return mapping
 
 
-def _find_header_row(preview_df, max_scan=25, min_score=2):
+def _find_header_row(preview_df, max_scan=25, min_score=2, alias_lookup=None):
     """Scan the first `max_scan` rows for whichever one scores highest
     against the alias list - handles banner/title rows sitting above the
     real header (confirmed: the real Premium Register has 5 such rows
-    above its own header). Returns (row_index_or_None, score)."""
+    above its own header). Returns (row_index_or_None, score).
+
+    alias_lookup: which alias set to score against - defaults to the
+        module-level conventional lookup for backward compatibility;
+        load_premium_registers always passes its own business-type-
+        specific lookup explicitly (see _build_alias_lookup)."""
+    alias_lookup = alias_lookup if alias_lookup is not None else _ALIAS_LOOKUP
     best_row, best_score = None, 0
     for i in range(min(max_scan, len(preview_df))):
         score = 0
         for v in preview_df.iloc[i].tolist():
             if pd.isna(v):
                 continue
-            if _normalize_header(v) in _ALIAS_LOOKUP:
+            if _normalize_header(v) in alias_lookup:
                 score += 1
         if score > best_score:
             best_score, best_row = score, i
@@ -194,13 +240,23 @@ def _read_full_sheet(xls, resolved_filepath, filepath, sheet_name, report=None):
     return pd.read_excel(xls, sheet_name=sheet_name, header=None)
 
 
-def load_premium_registers(filepaths, report=None):
+def load_premium_registers(filepaths, report=None, business_type="conventional"):
     """
     Load and concatenate every qualifying sheet across every given
     filepath. "Qualifying" means: its own header row (auto-detected,
     skipping any banner/title rows above it) scores at least 2 against
     the alias list AND, once mapped, actually has Department, Comm Date,
     and Gross Premium columns identified.
+
+    business_type: "conventional" (default) or "takaful" - selects which
+        amount-column aliases are used to identify the Gross Premium
+        column (see GROSS_AMOUNT_ALIASES_BY_TYPE): a Conventional run
+        reads a Premium Register's own "Gross Premium/Contribution"
+        column; a Takaful run reads a Contribution Register's own
+        "Gross Contribution" column instead. Either way the loaded
+        figure lands in the same canonical "Gross Premium" column below,
+        so every downstream function is unaffected by which business
+        type was selected.
 
     Every sheet in every uploaded workbook that qualifies is included -
     not just the single best-scoring one - since the whole point of this
@@ -238,6 +294,8 @@ def load_premium_registers(filepaths, report=None):
     if not filepaths:
         raise UPRError("No premium register file(s) provided.")
 
+    alias_lookup = _build_alias_lookup(business_type)
+
     frames = []
     sheets_used, sheets_skipped = [], []
     total_rows_read = 0
@@ -250,7 +308,7 @@ def load_premium_registers(filepaths, report=None):
 
         for sheet_name in xls.sheet_names:
             preview = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=25)
-            header_row, score = _find_header_row(preview)
+            header_row, score = _find_header_row(preview, alias_lookup=alias_lookup)
             if header_row is None:
                 sheets_skipped.append((fname, sheet_name, "no recognizable header row found"))
                 continue
@@ -263,7 +321,7 @@ def load_premium_registers(filepaths, report=None):
             data.columns = columns
             data = data.dropna(how="all")
 
-            colmap = _map_columns_to_canonical(data.columns)
+            colmap = _map_columns_to_canonical(data.columns, alias_lookup=alias_lookup)
             inv = {}
             for orig, canon in colmap.items():
                 inv.setdefault(canon, orig)
@@ -611,10 +669,14 @@ def grand_total(table, departments):
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_upr_calculation(filepaths, period_year, period_month, report=None):
+def run_upr_calculation(filepaths, period_year, period_month, report=None, business_type="conventional"):
     """
     Full pipeline: load -> validate coverage -> bucket -> build both
-    tables. Returns a result dict:
+    tables. business_type: "conventional" (default) or "takaful" -
+    passed straight through to load_premium_registers (see its own
+    docstring) so a Takaful run reads a Contribution Register's own
+    "Gross Contribution" column instead of a Premium Register's "Gross
+    Premium/Contribution" column. Returns a result dict:
       {
         "period_start", "period_end": date,
         "departments": [str, ...],
@@ -630,7 +692,7 @@ def run_upr_calculation(filepaths, period_year, period_month, report=None):
     can't be read, don't have the required columns, or don't cover the
     full selected period.
     """
-    df, meta = load_premium_registers(filepaths, report=report)
+    df, meta = load_premium_registers(filepaths, report=report, business_type=business_type)
     if report:
         report(f"Loaded {len(df):,} usable row(s) from {len(meta['sheets_used'])} sheet(s) "
                f"({meta['excluded_rows']:,} row(s) excluded - missing Department/Comm Date/Gross Premium).")
