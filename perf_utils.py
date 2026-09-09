@@ -31,11 +31,11 @@ Three independent problems are solved here:
    individual cell (the pattern used throughout report_generator.py and
    receivable_generator.py) is the dominant cost once you get into the
    hundreds of thousands of rows - worse than the pandas iteration
-   itself. style_budget_ok() below is a simple row-count gate the
-   generators use to skip per-cell font/border on very large sheets
-   (values and number formats are always kept - only the cosmetic
-   per-cell font/border is skipped past the threshold, and a note is
-   logged so this is never a silent behavior change).
+   itself. StyleIndexCache below (see Part 4) removes that cost directly
+   by reusing openpyxl's own internal style index instead of re-hashing
+   the same Font/Border combination on every cell, so every generator can
+   apply full styling at any row count without needing a row-count gate
+   that skips it.
 
 3. NO VISUAL FEEDBACK WHILE GENERATING EXCEL FILES
    ProgressBarPanel is a small ttk.Progressbar + status label meant to
@@ -821,14 +821,3 @@ class StyleIndexCache:
             cell.alignment = alignment
         if number_format is not None:
             cell.number_format = number_format
-
-
-# ---------------------------------------------------------------------------
-# 5. Write-side style budget
-# ---------------------------------------------------------------------------
-
-STYLE_ROW_THRESHOLD = 50000  # above this, skip per-cell font/border (values + number formats are always kept)
-
-
-def style_budget_ok(n_rows):
-    return n_rows <= STYLE_ROW_THRESHOLD

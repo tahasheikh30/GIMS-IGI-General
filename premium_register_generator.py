@@ -11,8 +11,8 @@ PERFORMANCE NOTE: a leader file can itself run into the hundreds of
 thousands of rows, so this writer follows the same pattern as
 report_generator.py / receivable_generator.py: NaN/date cleanup is done
 once, vectorized, over whole columns rather than per-cell, iteration
-uses itertuples() instead of iterrows(), and perf_utils.style_budget_ok()
-gates the purely cosmetic per-cell styling on very large outputs.
+uses itertuples() instead of iterrows(), and perf_utils.StyleIndexCache
+makes the purely cosmetic per-cell styling cheap even on very large outputs.
 Critically, the red "Not Matched" row highlighting is NOT gated by the
 style budget even on huge files - that highlight is the whole point of
 this report (it's what tells someone which rows need manual entry), not
@@ -30,11 +30,8 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 try:
-    from perf_utils import style_budget_ok, RowProgress, StyleIndexCache
+    from perf_utils import RowProgress, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
-    def style_budget_ok(n_rows):
-        return True
-
     class RowProgress:
         def __init__(self, *a, **k):
             pass

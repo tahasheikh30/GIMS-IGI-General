@@ -39,11 +39,8 @@ from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterPrope
 import company_alias_resolver as car
 
 try:
-    from perf_utils import style_budget_ok, ThrottledReporter, StyleIndexCache
+    from perf_utils import ThrottledReporter, StyleIndexCache
 except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
-    def style_budget_ok(n_rows):
-        return True
-
     class ThrottledReporter:
         def __init__(self, *a, **k):
             pass

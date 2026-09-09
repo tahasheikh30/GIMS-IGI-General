@@ -46,14 +46,6 @@ from premium_register_processor import _read_workbook_any_engine
 from claims_register_processor import _read_full_table_with_continuations
 import upr_processor as up
 
-try:
-    from perf_utils import fast_read_excel_rows, estimate_row_count
-    _PERF_AVAILABLE = True
-except ImportError:  # perf_utils.py not yet added to this checkout, degrade gracefully
-    _PERF_AVAILABLE = False
-
-FAST_READ_ROW_THRESHOLD = 100000
-
 WAKALA_FEE_LABEL = "Wakala Fee"
 
 

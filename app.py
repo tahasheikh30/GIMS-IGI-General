@@ -57,13 +57,6 @@ import deferred_wakala_fee_generator as dwfg
 import withholding_tax_processor as wtp
 import withholding_tax_generator as wtg
 
-try:
-    import keyring
-    KEYRING_AVAILABLE = True
-except ImportError:  # keyring not installed - password slots still work, just have to be
-    KEYRING_AVAILABLE = False  # retyped each run instead of saved to the OS credential store
-
-
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 GIMS_LOGO_PATH = os.path.join(ASSETS_DIR, "gims_logo_cropped.png")
 COMPANY_LOGO_PATH = os.path.join(ASSETS_DIR, "company_logo_cropped.png")
