@@ -179,8 +179,8 @@ PREMIUM_PAYABLE_ALIASES = ["premium payable", "premium payable amount"]
 # this column). Added alongside Premium Payable after a confirmed real
 # case where a register's own "Premium Payable" column was almost
 # entirely zero file-wide (2 of 230,105 rows) - not a bug in the
-# matching/pull-through logic, but that specific snapshot's actual
-# payable balances were carried under Claims Payable/Commission Payable
+# pull-through logic, but that specific snapshot's actual payable
+# balances were carried under Claims Payable/Commission Payable
 # instead, which only shows up in Total Payable, never in Premium
 # Payable alone. Looked up and pulled through the exact same way -
 # see find_total_payable_column / match_leader_file's own
@@ -403,6 +403,15 @@ def _read_workbook_any_engine(filepath):
     LibreOffice is available, raise a clear, actionable error rather than
     a confusing pandas/import traceback.
 
+    If xlrd IS installed but still fails (e.g. the file itself is
+    corrupted or truncated), that real error is captured and surfaced in
+    the final message rather than being silently swallowed - otherwise a
+    genuinely broken source file looks identical to "xlrd isn't
+    installed", which sends someone down the wrong troubleshooting path
+    entirely (confirmed real case: a truncated .xls file raised
+    xlrd.compdoc.CompDocError, which used to be caught by a bare
+    'except Exception: pass' and reported as a missing-dependency error).
+
     Returns (xls, resolved_filepath) - xls is a pd.ExcelFile (used for
     the cheap header-row preview scans, which stay on pandas' own
     reader), resolved_filepath is the path load_raw_data should hand to
@@ -416,16 +425,31 @@ def _read_workbook_any_engine(filepath):
     if ext != ".xls":
         return pd.ExcelFile(filepath), filepath
 
+    xlrd_error = None
     try:
         return pd.ExcelFile(filepath, engine="xlrd"), filepath
     except ImportError:
         pass  # xlrd not installed - try the LibreOffice fallback below
-    except Exception:
-        pass  # any other xlrd read issue - still worth trying the fallback
+    except Exception as e:
+        # xlrd IS installed but couldn't read this specific file - keep
+        # the real error so it can be reported below instead of masked
+        # by a generic "install xlrd" message that would be actively
+        # misleading here (installing xlrd again won't fix a corrupted file).
+        xlrd_error = e
 
     import shutil
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
+        if xlrd_error is not None:
+            raise RuntimeError(
+                f"Could not read '{os.path.basename(filepath)}' - the 'xlrd' package is installed, but "
+                f"reading this specific file with it failed: {xlrd_error!r}. This almost always means the "
+                f"file itself is corrupted, truncated, or was only partially copied/downloaded - it usually "
+                f"is NOT a missing-dependency problem, so reinstalling xlrd will not fix it. Try getting a "
+                f"fresh copy of this file from its original source and opening it directly in Excel first to "
+                f"confirm it isn't damaged. (A local LibreOffice install, which would otherwise be tried as a "
+                f"second way to read this file, was not found on this machine either.)"
+            )
         raise RuntimeError(
             f"Could not read '{os.path.basename(filepath)}' - it's a legacy .xls file, which "
             "needs either the 'xlrd' package (pip install xlrd>=2.0.1) or a local LibreOffice "
@@ -439,9 +463,12 @@ def _read_workbook_any_engine(filepath):
     )
     converted = os.path.join(tmp_dir, os.path.splitext(os.path.basename(filepath))[0] + ".xlsx")
     if result.returncode != 0 or not os.path.exists(converted):
+        xlrd_note = f" (xlrd also failed to read it directly: {xlrd_error!r})" if xlrd_error is not None else ""
         raise RuntimeError(
             f"Could not read '{os.path.basename(filepath)}' - LibreOffice conversion from .xls "
-            f"to .xlsx failed: {result.stderr.decode(errors='ignore')[:300]}"
+            f"to .xlsx failed: {result.stderr.decode(errors='ignore')[:300]}{xlrd_note}. This usually means "
+            f"the file itself is corrupted or incomplete rather than a tooling problem - try getting a fresh "
+            f"copy of the file."
         )
     return pd.ExcelFile(converted), converted
 
