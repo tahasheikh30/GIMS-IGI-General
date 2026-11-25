@@ -2,7 +2,6 @@ __pycache__/
 output/
 dist/
 build/
-GIMS.spec
 receivable_run_history.json
 receivable_output/
 
