@@ -55,6 +55,7 @@ import pandas as pd
 from premium_register_processor import _read_workbook_any_engine
 from claims_register_processor import _read_full_table_with_continuations
 import upr_processor as up
+import reinsurance_processor as rip
 
 # The six departments that carry a Premium Register, in working order.
 DEPARTMENTS = ["Fire", "Marine", "Motor", "Miscellaneous", "Engineering", "Bond"]
@@ -366,6 +367,73 @@ def load_all(register_files, fac_files, report=None):
     if not registers and not fac:
         raise CommissionIncomeError("No register files were provided.")
     return {"registers": registers, "fac": fac, "meta": {"registers": reg_meta, "fac": fac_meta}}
+
+
+# ---------------------------------------------------------------------------
+# Upload-all: work out which register is which from its FILE NAME, the same
+# way Reinsurance Automation does (its own detect_department_from_filename /
+# detect_register_year_from_filename are reused, so both modules always agree
+# on what a name like "Eng. 2025 v2.xls" means).
+# ---------------------------------------------------------------------------
+
+def classify_register_files(paths):
+    """Sort a pile of Premium Register files into (department, slot).
+
+    The department comes from the file name (Fire, Marine, Motor,
+    Miscellaneous/Misc, Engineering/Eng, Bond). The slot comes from the
+    year in the file name: the HIGHEST year found across the files is the
+    current-year register and that year minus one is the previous-year
+    register. Nothing is guessed beyond that - a file that can't be placed
+    is reported in `problems` (never silently dropped) and can still be
+    browsed to by hand.
+
+    Returns {"assigned": {(department, slot): path}, "problems": [str],
+             "current_year": int|None, "previous_year": int|None}.
+    """
+    detected = []
+    problems = []
+    for path in paths:
+        fname = os.path.basename(path)
+        dept = rip.detect_department_from_filename(path)
+        year = rip.detect_register_year_from_filename(path)
+        if dept is None:
+            if "fac" in fname.lower():
+                problems.append(f"'{fname}': looks like a FAC register - FAC files go in the FAC boxes, not here.")
+            else:
+                problems.append(f"'{fname}': no department found in the file name (expected Fire, Marine, Motor, "
+                                f"Misc, Eng or Bond) - browse to it manually.")
+            continue
+        if dept not in DEPARTMENTS:
+            problems.append(f"'{fname}': detected as {dept}, which has no register in this module - ignored.")
+            continue
+        if year is None:
+            problems.append(f"'{fname}' ({dept}): no year (e.g. 2025 / 2026) found in the file name - browse to it manually.")
+            continue
+        detected.append((dept, year, path, fname))
+
+    if not detected:
+        return {"assigned": {}, "problems": problems, "current_year": None, "previous_year": None}
+
+    current_year = max(y for _d, y, _p, _f in detected)
+    previous_year = current_year - 1
+    assigned, taken_by = {}, {}
+    for dept, year, path, fname in detected:
+        if year == current_year:
+            slot = SLOT_CURRENT
+        elif year == previous_year:
+            slot = SLOT_PREVIOUS
+        else:
+            problems.append(f"'{fname}' ({dept}): year {year} is neither the current year ({current_year}) nor the "
+                            f"previous year ({previous_year}) - not used.")
+            continue
+        if (dept, slot) in assigned:
+            problems.append(f"'{fname}' ({dept}, {year}): another file ('{taken_by[(dept, slot)]}') was already taken "
+                            f"for this slot - this one was skipped. Browse to the right one manually if needed.")
+            continue
+        assigned[(dept, slot)] = path
+        taken_by[(dept, slot)] = fname
+    return {"assigned": assigned, "problems": problems,
+            "current_year": current_year, "previous_year": previous_year}
 
 
 # ---------------------------------------------------------------------------

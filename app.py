@@ -3562,6 +3562,13 @@ class BalanceApp(tk.Tk):
         note.pack(anchor="w", pady=(0, 10))
         self._bind_dynamic_wraplength(note, s1, side_padding=10)
 
+        up_row = ttk.Frame(s1)
+        up_row.pack(fill="x", pady=(0, 10))
+        self._make_action_button(up_row, "Upload All Registers (auto-detect)", self._upload_all_ci_registers, kind="accent").pack(side="left")
+        ttk.Label(up_row, text="  Select every department register together (not the FAC ones) - each is placed by the "
+                                "department and year in its file name, like Reinsurance Automation.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
+
         grid = ttk.Frame(s1)
         grid.pack(fill="x")
         ttk.Label(grid, text="Department", style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 10))
@@ -3626,6 +3633,34 @@ class BalanceApp(tk.Tk):
         if path:
             self.ci_files[(key, slot)] = path
             self.ci_file_vars[(key, slot)].set(os.path.basename(path))
+
+    def _upload_all_ci_registers(self):
+        """Pick all the department registers in one go; each is slotted by
+        the department and year in its file name (cip.classify_register_files).
+        FAC registers are not part of this - they have their own boxes."""
+        paths = filedialog.askopenfilenames(title="Select all the department Premium Registers (not the FAC ones)",
+                                            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        if not paths:
+            return
+        result = cip.classify_register_files(list(paths))
+        for (dept, slot), path in result["assigned"].items():
+            self.ci_files[(dept, slot)] = path
+            self.ci_file_vars[(dept, slot)].set(os.path.basename(path))
+        self.ci_register_log.delete("1.0", "end")
+        if result["current_year"]:
+            self._log_ci(f"Current year = {result['current_year']}, previous year = {result['previous_year']} "
+                         f"(from the file names).")
+        for (dept, slot), path in sorted(result["assigned"].items(),
+                                         key=lambda kv: (cip.DEPARTMENTS.index(kv[0][0]), kv[0][1] != cip.SLOT_PREVIOUS)):
+            self._log_ci(f"  {dept} - {slot} year: {os.path.basename(path)}")
+        missing = [f"{d} ({s})" for d in cip.DEPARTMENTS for s in cip.SLOTS if (d, s) not in self.ci_files]
+        if missing:
+            self._log_ci("Still empty: " + ", ".join(missing))
+        for msg in result["problems"]:
+            self._log_ci(f"NOTE: {msg}")
+        if result["problems"]:
+            messagebox.showwarning("Some files were not placed", "\n\n".join(result["problems"][:10]))
+        self.status_var.set(f"Commission Income: {len(result['assigned'])} register(s) placed from file names.")
 
     def _clear_ci_files(self):
         self.ci_files.clear()
