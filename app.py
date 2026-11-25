@@ -64,6 +64,62 @@ GIMS_LOGO_PATH = os.path.join(ASSETS_DIR, "gims_logo_cropped.png")
 COMPANY_LOGO_PATH = os.path.join(ASSETS_DIR, "company_logo_cropped.png")
 
 
+# ---------------------------------------------------------------------------
+# Card-aware ttk widgets.
+#
+# Every module lays its controls out on white "cards" (see _loss_section_card)
+# but a plain ttk.Frame / ttk.Label / ttk.Checkbutton / ttk.Radiobutton
+# takes the PAGE colour (COLOR_BG, a cool grey) from the global style - so any
+# row, grid or label dropped into a card showed up as a grey patch (a
+# "shadow") behind the white card surface. Rather than restyle hundreds of
+# widgets one by one, a widget created WITHOUT an explicit style inside a
+# white parent now takes the matching white "Panel.*" style automatically,
+# for every module (existing and future) and for widgets built later at
+# runtime (result tables, dynamic rows). A widget with an explicit style of
+# its own is left alone, except the two grey page-colour styles that are
+# only ever wrong on a card (plain "TFrame" and "Muted.TLabel"), which are
+# swapped for their white equivalents.
+# ---------------------------------------------------------------------------
+def _parent_is_white_panel(master):
+    """True when `master` paints the white card colour, so a child should too."""
+    try:
+        if master is None:
+            return False
+        if isinstance(master, (ttk.Labelframe,)):
+            return True
+        if isinstance(master, ttk.Widget):
+            style_name = str(master.cget("style"))
+            return style_name.startswith("Panel")
+        return str(master.cget("bg")).lower() == BalanceApp.COLOR_PANEL.lower()
+    except Exception:
+        return False
+
+
+def _install_card_aware_widgets():
+    swaps = {
+        ttk.Frame: {"": "Panel.TFrame", "TFrame": "Panel.TFrame"},
+        ttk.Label: {"": "Panel.TLabel", "TLabel": "Panel.TLabel", "Muted.TLabel": "PanelMuted.TLabel"},
+        ttk.Checkbutton: {"": "Panel.TCheckbutton", "TCheckbutton": "Panel.TCheckbutton"},
+        ttk.Radiobutton: {"": "Panel.TRadiobutton", "TRadiobutton": "Panel.TRadiobutton"},
+    }
+
+    def wrap(original_init, mapping):
+        def patched_init(self, master=None, **kw):
+            try:
+                if "background" not in kw and _parent_is_white_panel(master):
+                    new_style = mapping.get(str(kw.get("style", "")))
+                    if new_style:
+                        kw["style"] = new_style
+            except Exception:
+                pass
+            original_init(self, master, **kw)
+        return patched_init
+
+    for cls, mapping in swaps.items():
+        cls.__init__ = wrap(cls.__init__, mapping)
+
+
+
 class BalanceApp(tk.Tk):
     # Palette - a refined "deep navy + sapphire + muted gold" scheme,
     # chosen for a more premium, editorial feel than a generic flat-UI
@@ -433,6 +489,9 @@ class BalanceApp(tk.Tk):
         style.configure("TCombobox", padding=6)
         style.configure("TCheckbutton", background=self.COLOR_BG, font=base_font)
         style.configure("TRadiobutton", background=self.COLOR_BG, font=base_font)
+        style.configure("Panel.TCheckbutton", background=self.COLOR_PANEL, font=base_font)
+        style.configure("Panel.TRadiobutton", background=self.COLOR_PANEL, font=base_font)
+        style.configure("PanelMuted.TLabel", background=self.COLOR_PANEL, foreground=self.COLOR_MUTED, font=("Segoe UI", 9))
         style.configure("Horizontal.TSeparator", background=self.COLOR_BORDER)
         style.configure("Horizontal.TScrollbar", background=self.COLOR_PANEL_ALT, troughcolor=self.COLOR_BG, bordercolor=self.COLOR_BG)
         style.configure("Vertical.TScrollbar", background="#C7D2E0", troughcolor=self.COLOR_PANEL_ALT,
@@ -3564,10 +3623,12 @@ class BalanceApp(tk.Tk):
 
         up_row = ttk.Frame(s1)
         up_row.pack(fill="x", pady=(0, 10))
-        self._make_action_button(up_row, "Upload All Registers (auto-detect)", self._upload_all_ci_registers, kind="accent").pack(side="left")
-        ttk.Label(up_row, text="  Select every department register together (not the FAC ones) - each is placed by the "
-                                "department and year in its file name, like Reinsurance Automation.",
-                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
+        self._make_action_button(up_row, "Upload All Registers (auto-detect)", self._upload_all_ci_registers, kind="accent").pack(anchor="w")
+        up_note = ttk.Label(up_row, text="Select every department register together (not the FAC ones) - each is placed by the "
+                                          "department and year in its file name, like Reinsurance Automation.",
+                            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        up_note.pack(anchor="w", fill="x", pady=(6, 0))
+        self._bind_dynamic_wraplength(up_note, up_row, side_padding=10)
 
         grid = ttk.Frame(s1)
         grid.pack(fill="x")
@@ -8374,5 +8435,6 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
 
+    _install_card_aware_widgets()
     app = BalanceApp()
     app.mainloop()
