@@ -54,6 +54,8 @@ import deferred_commission_generator as dcg
 import deferred_commission_ledger_processor as dclp
 import deferred_wakala_fee_processor as dwfp
 import deferred_wakala_fee_generator as dwfg
+import commission_income_processor as cip
+import commission_income_generator as cig
 import withholding_tax_processor as wtp
 import withholding_tax_generator as wtg
 
@@ -268,6 +270,20 @@ class BalanceApp(tk.Tk):
         self.dwf_last_opening = 0.0                # Opening Deferred Wakala Fees entered on tab 2, used at generate time
         self.dwf_output_dir = os.path.join(os.getcwd(), "Deferred Wakala Fee")
         self.dwf_last_output_file = None
+
+        # Commission Income (Finance) module state - see
+        # commission_income_processor.py. ci_files holds the browsed paths
+        # keyed (department or "FAC", slot); ci_pct_vars holds the per-
+        # Treaty-Description % boxes ((department, desc_key) -> (current
+        # StringVar, previous StringVar)), rebuilt after each load.
+        self.ci_files = {}
+        self.ci_bundle = None                      # cip.load_all() result
+        self.ci_period_options = []
+        self.ci_pct_vars = {}
+        self.ci_last_result = None
+        self.ci_last_opening = 0.0
+        self.ci_output_dir = os.path.join(os.getcwd(), "Commission Income")
+        self.ci_last_output_file = None
 
         # Withholding Tax (Income Tax) module state - see withholding_tax_processor.py.
         # The four inputs are independent files (or independent sheets within
@@ -700,6 +716,7 @@ class BalanceApp(tk.Tk):
                     ("reinsurance_automation", "Reinsurance Automation"),
                     ("deferred_commission", "Deferred Commission"),
                     ("deferred_wakala_fee", "Deferred Wakala Fee"),
+                    ("commission_income", "Commission Income"),
                 ]),
                 # "Withholding Tax" nested submenu - currently holds one page
                 # (Income Tax), left as its own nested submenu rather than a
@@ -1031,6 +1048,11 @@ class BalanceApp(tk.Tk):
         deferred_wakala_fee_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["deferred_wakala_fee"] = deferred_wakala_fee_page
         self._build_deferred_wakala_fee_page(deferred_wakala_fee_page)
+
+        commission_income_page = ttk.Frame(container)
+        commission_income_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["commission_income"] = commission_income_page
+        self._build_commission_income_page(commission_income_page)
 
         withholding_tax_page = ttk.Frame(container)
         withholding_tax_page.grid(row=0, column=0, sticky="nsew")
@@ -3493,6 +3515,396 @@ class BalanceApp(tk.Tk):
         else:
             messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
 
+
+
+    # ---------- Commission Income (Finance) module ----------
+    def _build_commission_income_page(self, parent):
+        """Commission Income: six departments x two Premium Registers
+        (previous + current year) and two FAC Outward Registers, a
+        commission % per Treaty Description, then the RI Commission
+        Income / RI Unearned Commission working - see
+        commission_income_processor.py."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Commission Income", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        subtitle = ttk.Label(
+            header, text="Treaty commission = Treaty Premium x a commission % you enter for each Treaty Description, "
+                          "plus the FAC commission from the FAC Outward Register. Every line is placed in a Period "
+                          "(Previous / month / Future Policies) by its commencement date (Marine FAC lines use the "
+                          "Acceptance Date), then amortized with the same 1/24 method as UPR Automation to give the "
+                          "closing RI Unearned Commission.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+        header.bind("<Configure>", lambda e: subtitle.configure(wraplength=max(200, e.width - 4)))
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        tab_reg, tab_pct, tab_gen = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
+        notebook.add(tab_reg, text="1. Registers & Period")
+        notebook.add(tab_pct, text="2. Commission % & Calculate")
+        notebook.add(tab_gen, text="3. Generate & Save")
+        self.ci_notebook = notebook
+        self._build_ci_tab_registers(tab_reg)
+        self._build_ci_tab_pct(tab_pct)
+        self._build_ci_tab_generate(tab_gen)
+
+    # ---- Tab 1 ----
+    def _build_ci_tab_registers(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+        s1 = self._loss_section_card(body, "1", "Premium Registers (6 departments x 2 years)", PAD_X)
+        note = ttk.Label(
+            s1, text="One register per department for the previous year and one for the current year. Required "
+                      "columns: Policy, Treaty Description, Comm Date (commencement date), Treaty Premium. A "
+                      "register saved across several sheets (legacy .xls) is merged automatically.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(note, s1, side_padding=10)
+
+        grid = ttk.Frame(s1)
+        grid.pack(fill="x")
+        ttk.Label(grid, text="Department", style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(grid, text="Previous year register", style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="w")
+        ttk.Label(grid, text="Current year register", style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(row=0, column=3, sticky="w", padx=(12, 0))
+        self.ci_file_vars = {}
+        for i, dept in enumerate(cip.DEPARTMENTS, start=1):
+            ttk.Label(grid, text=dept, style="Panel.TLabel").grid(row=i, column=0, sticky="w", padx=(0, 10), pady=3)
+            for slot, col in ((cip.SLOT_PREVIOUS, 1), (cip.SLOT_CURRENT, 3)):
+                var = tk.StringVar()
+                self.ci_file_vars[(dept, slot)] = var
+                ttk.Entry(grid, textvariable=var, width=34, state="readonly").grid(row=i, column=col, sticky="w", pady=3, padx=(12 if col == 3 else 0, 0))
+                ttk.Button(grid, text="Browse...", width=9,
+                           command=lambda d=dept, s=slot: self._browse_ci_file(d, s)).grid(row=i, column=col + 1, padx=(4, 0), pady=3)
+
+        s2 = self._loss_section_card(body, "2", "FAC Outward Registers", PAD_X)
+        note2 = ttk.Label(
+            s2, text="One FAC Outward Register per year. Required columns: Policy#, Department, Comm Date, "
+                      "Acceptance Date, Comm amt. Marine lines use the Acceptance Date (the FAC register has no "
+                      "commencement date for Marine).",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        note2.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(note2, s2, side_padding=10)
+        fgrid = ttk.Frame(s2)
+        fgrid.pack(fill="x")
+        for i, (slot, label) in enumerate(((cip.SLOT_PREVIOUS, "Previous year FAC"), (cip.SLOT_CURRENT, "Current year FAC"))):
+            ttk.Label(fgrid, text=label, style="Panel.TLabel", width=18).grid(row=i, column=0, sticky="w", pady=3)
+            var = tk.StringVar()
+            self.ci_file_vars[("FAC", slot)] = var
+            ttk.Entry(fgrid, textvariable=var, width=60, state="readonly").grid(row=i, column=1, sticky="w", pady=3)
+            ttk.Button(fgrid, text="Browse...", width=9,
+                       command=lambda s=slot: self._browse_ci_file("FAC", s)).grid(row=i, column=2, padx=(4, 0), pady=3)
+
+        s3 = self._loss_section_card(body, "3", "Load & Period", PAD_X, expand_bottom=True)
+        row = ttk.Frame(s3)
+        row.pack(fill="x")
+        self.ci_load_btn = self._make_action_button(row, "Load Registers", self._load_ci_registers, kind="accent")
+        self.ci_load_btn.pack(side="left")
+        ttk.Button(row, text="Clear All", command=self._clear_ci_files).pack(side="left", padx=(8, 0))
+        self.ci_load_progress = perf_utils.ProgressBarPanel(s3)
+        self.ci_load_progress.frame.pack(fill="x", pady=(8, 0))
+
+        prow = ttk.Frame(s3)
+        prow.pack(fill="x", pady=(10, 0))
+        ttk.Label(prow, text="Period (ending month)", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.ci_period_var = tk.StringVar()
+        self.ci_period_combo = ttk.Combobox(prow, textvariable=self.ci_period_var, state="readonly", width=22)
+        self.ci_period_combo.pack(side="left")
+        ttk.Label(prow, text="  covers the 12 months ending there; older = Previous, later = Future Policies",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
+
+        self.ci_register_log = scrolledtext.ScrolledText(s3, height=9, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.ci_register_log.pack(fill="both", expand=True, pady=(12, 0))
+        self._finalize_scroll_passthrough(body)
+
+    def _log_ci(self, msg):
+        self.ci_register_log.insert("end", str(msg) + "\n")
+        self.ci_register_log.see("end")
+
+    def _browse_ci_file(self, key, slot):
+        path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        if path:
+            self.ci_files[(key, slot)] = path
+            self.ci_file_vars[(key, slot)].set(os.path.basename(path))
+
+    def _clear_ci_files(self):
+        self.ci_files.clear()
+        for var in self.ci_file_vars.values():
+            var.set("")
+        self.ci_bundle = None
+        self.ci_period_options = []
+        self.ci_period_combo.configure(values=[])
+        self.ci_period_var.set("")
+
+    def _load_ci_registers(self):
+        register_files = {}
+        for dept in cip.DEPARTMENTS:
+            slots = {s: self.ci_files[(dept, s)] for s in cip.SLOTS if (dept, s) in self.ci_files}
+            if slots:
+                register_files[dept] = slots
+        fac_files = {s: self.ci_files[("FAC", s)] for s in cip.SLOTS if ("FAC", s) in self.ci_files}
+        if not register_files:
+            messagebox.showerror("No registers", "Browse to at least one department Premium Register first.")
+            return
+        if not fac_files:
+            if not messagebox.askyesno("No FAC register", "No FAC Outward Register was selected - FAC commission will be zero. Continue?"):
+                return
+        self.ci_register_log.delete("1.0", "end")
+        self.status_var.set("Commission Income: loading registers...")
+        self.ci_load_progress.start(total=None, text="Loading...")
+
+        def worker(report):
+            return cip.load_all(register_files, fac_files, report=report)
+
+        def on_done(bundle):
+            self.ci_bundle = bundle
+            self.ci_load_progress.finish("Loaded.")
+            options = cip.available_period_options(bundle)
+            # Default to the latest month that is not in the future.
+            today = datetime.today()
+            default_idx = next((i for i, o in enumerate(options) if (o["year"], o["month"]) <= (today.year, today.month)), 0)
+            self.ci_period_options = options
+            self.ci_period_combo.configure(values=[o["label"] for o in options])
+            if options:
+                self.ci_period_combo.current(default_idx)
+            self._populate_ci_pct_table(cip.scan_treaty_descriptions(bundle))
+            self.status_var.set("Commission Income: registers loaded. Choose a period, then go to tab 2.")
+            self._log_ci("Loaded. Go to tab 2 to enter the commission % for each Treaty Description.")
+
+        def on_error(exc):
+            self.ci_load_progress.finish("Failed - see the log.")
+            self._log_ci(f"ERROR: {exc}")
+            messagebox.showerror("Could not load registers", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_progress=lambda m: self._log_ci(m),
+            on_progress_value=self.ci_load_progress.update,
+            on_done=on_done, on_error=on_error, busy_widgets=[self.ci_load_btn])
+
+    # ---- Tab 2 ----
+    def _build_ci_tab_pct(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+        s4 = self._loss_section_card(body, "4", "Commission % by Treaty Description", PAD_X)
+        note = ttk.Label(
+            s4, text="The system lists every Treaty Description found in the registers, by department, with its "
+                      "total Treaty Premium. Enter the commission % for each (e.g. 26 for 26%). Rates can differ "
+                      "between years, so there is one box per register year - a previous-year box left blank uses "
+                      "the current-year %. A description left without a % is treated as 0% and reported.",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(note, s4, side_padding=10)
+        self.ci_pct_frame = ttk.Frame(s4)
+        self.ci_pct_frame.pack(fill="x")
+        ttk.Label(self.ci_pct_frame, text="Load the registers on tab 1 first.", style="Panel.TLabel",
+                  foreground=self.COLOR_MUTED).pack(anchor="w")
+
+        s5 = self._loss_section_card(body, "5", "Opening Balance", PAD_X)
+        ttk.Label(s5, text="Opening RI Unearned Commission (the prior period's closing - entered by hand)",
+                  style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        self.ci_opening_var = tk.StringVar()
+        ttk.Entry(s5, textvariable=self.ci_opening_var, width=22, font=("Segoe UI", 10)).pack(anchor="w")
+
+        s6 = self._loss_section_card(body, "6", "Run Calculation", PAD_X, expand_bottom=True)
+        calc_btn = self._make_action_button(s6, "Calculate", self._run_ci_calculation, kind="accent")
+        calc_btn.pack(anchor="w")
+        self.ci_calc_progress = perf_utils.ProgressBarPanel(s6)
+        self.ci_calc_progress.frame.pack(fill="x", pady=(10, 0))
+        self.ci_calc_summary_var = tk.StringVar(value="")
+        ttk.Label(s6, textvariable=self.ci_calc_summary_var, foreground=self.COLOR_SUCCESS,
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(10, 8))
+        tree_frame = ttk.Frame(s6)
+        tree_frame.pack(fill="both", expand=True)
+        cols = ("department", "method", "treaty", "fac", "total", "unearned")
+        self.ci_results_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8)
+        for c, text, w, a in (("department", "Department", 150, "w"), ("method", "Method", 70, "center"),
+                               ("treaty", "Treaty Commission", 150, "e"), ("fac", "FAC Commission", 150, "e"),
+                               ("total", "Total Commission", 150, "e"), ("unearned", "Unearned", 150, "e")):
+            self.ci_results_tree.heading(c, text=text)
+            self.ci_results_tree.column(c, width=w, anchor=a)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.ci_results_tree.yview)
+        self.ci_results_tree.configure(yscrollcommand=vsb.set)
+        self.ci_results_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self._finalize_scroll_passthrough(body)
+
+    def _populate_ci_pct_table(self, rows):
+        """Rebuilds the per-description % entry table from the scanned
+        descriptions. Previously typed values are kept for a description
+        that is still present."""
+        old = {k: (v[0].get(), v[1].get()) for k, v in self.ci_pct_vars.items()}
+        for child in self.ci_pct_frame.winfo_children():
+            child.destroy()
+        self.ci_pct_vars = {}
+        if not rows:
+            ttk.Label(self.ci_pct_frame, text="No Treaty Descriptions found.", style="Panel.TLabel").pack(anchor="w")
+            return
+        heads = ["Department", "Treaty Description", "Treaty Premium (previous yr)", "Treaty Premium (current yr)",
+                 "% previous yr", "% current yr"]
+        for j, h in enumerate(heads):
+            ttk.Label(self.ci_pct_frame, text=h, style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=j, sticky="w", padx=(0, 12), pady=(0, 4))
+        last_dept = None
+        for i, r in enumerate(rows, start=1):
+            dept_text = r["department"] if r["department"] != last_dept else ""
+            last_dept = r["department"]
+            ttk.Label(self.ci_pct_frame, text=dept_text, style="Panel.TLabel", font=("Segoe UI", 9, "bold")).grid(row=i, column=0, sticky="w", padx=(0, 12), pady=2)
+            ttk.Label(self.ci_pct_frame, text=r["description"], style="Panel.TLabel").grid(row=i, column=1, sticky="w", padx=(0, 12))
+            ttk.Label(self.ci_pct_frame, text=f"{r['previous_premium']:,.0f}", style="Panel.TLabel").grid(row=i, column=2, sticky="e", padx=(0, 12))
+            ttk.Label(self.ci_pct_frame, text=f"{r['current_premium']:,.0f}", style="Panel.TLabel").grid(row=i, column=3, sticky="e", padx=(0, 12))
+            key = (r["department"], r["key"])
+            prev_old, cur_old = old.get(key, ("", ""))
+            pv, cv = tk.StringVar(value=prev_old), tk.StringVar(value=cur_old)
+            ttk.Entry(self.ci_pct_frame, textvariable=pv, width=8).grid(row=i, column=4, sticky="w", padx=(0, 12))
+            ttk.Entry(self.ci_pct_frame, textvariable=cv, width=8).grid(row=i, column=5, sticky="w")
+            self.ci_pct_vars[key] = (cv, pv)  # (current, previous)
+
+    def _collect_ci_rates(self):
+        """Reads the % boxes on the MAIN thread. Returns {department:
+        {description_key: {"current": pct|None, "previous": pct|None}}}.
+        Blank = None (see processor: blank previous falls back to
+        current; blank current is 0%)."""
+        def parse(text, label):
+            text = text.strip().replace("%", "")
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                raise ValueError(f"'{text}' isn't a valid % for {label}.")
+        rates = {}
+        for (dept, key), (cv, pv) in self.ci_pct_vars.items():
+            label = f"{dept} - {key or cip.BLANK_DESC_LABEL}"
+            rates.setdefault(dept, {})[key] = {
+                cip.SLOT_CURRENT: parse(cv.get(), label + " (current year)"),
+                cip.SLOT_PREVIOUS: parse(pv.get(), label + " (previous year)"),
+            }
+        return rates
+
+    def _run_ci_calculation(self):
+        if self.ci_bundle is None:
+            messagebox.showerror("Error", "Load the registers on tab 1 first.")
+            return
+        option = next((o for o in self.ci_period_options if o["label"] == self.ci_period_var.get()), None)
+        if option is None:
+            messagebox.showerror("Error", "Select a period on tab 1 first.")
+            return
+        try:
+            rates = self._collect_ci_rates()
+        except ValueError as e:
+            messagebox.showerror("Invalid entry", str(e))
+            return
+        opening_text = self.ci_opening_var.get().strip().replace(",", "")
+        try:
+            opening = float(opening_text) if opening_text else 0.0
+        except ValueError:
+            messagebox.showerror("Invalid entry", f"'{opening_text}' isn't a valid number for the opening balance.")
+            return
+        bundle = self.ci_bundle
+        self.ci_calc_summary_var.set("")
+        self.ci_calc_progress.start(total=None, text="Calculating...")
+
+        def worker(report):
+            return cip.run_commission_income_calculation(bundle, rates, option["year"], option["month"], report=report)
+
+        def on_done(result):
+            self.ci_last_result = result
+            self.ci_last_opening = opening
+            self.ci_calc_progress.finish("Done.")
+            self.ci_calc_summary_var.set(f"Closing RI Unearned Commission: PKR {result['closing_unearned']:,.0f}")
+            self.ci_results_tree.delete(*self.ci_results_tree.get_children())
+            for dept in result["departments"]:
+                tr = sum(result["income"][s][dept]["treaty"] for s in cip.SLOTS)
+                fc = sum(result["income"][s][dept]["fac"] for s in cip.SLOTS)
+                un = cip.row_total(result["unearned_table"][dept])
+                self.ci_results_tree.insert("", "end", values=(dept, result["methods"][dept], f"{tr:,.0f}", f"{fc:,.0f}", f"{tr + fc:,.0f}", f"{un:,.0f}"))
+            for w in result["warnings"]:
+                self._log_ci(f"WARNING: {w}")
+            if result["warnings"]:
+                messagebox.showwarning("Calculated with warnings", "\n".join(result["warnings"][:12]))
+            self.status_var.set(f"Commission Income: closing unearned = PKR {result['closing_unearned']:,.0f}. See tab 3 to generate.")
+
+        def on_error(exc):
+            self.ci_calc_progress.finish("Failed - see the message.")
+            messagebox.showerror("Calculation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_progress_value=self.ci_calc_progress.update,
+            on_done=on_done, on_error=on_error)
+
+    # ---- Tab 3 ----
+    def _build_ci_tab_generate(self, tab):
+        body = self._make_upr_scrollable_body(tab)
+        PAD_X = 16
+        s7 = self._loss_section_card(body, "7", "Generate & Save", PAD_X, expand_bottom=True)
+        ttk.Label(s7, text="The workbook carries policy-level detail for every register (well over 200,000 rows for a full "
+                            "set), so generating can take a few minutes.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
+        out_row = ttk.Frame(s7)
+        out_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.ci_output_dir_var = tk.StringVar(value=self.ci_output_dir)
+        ttk.Entry(out_row, textvariable=self.ci_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_ci_output_dir).pack(side="left")
+        gen_row = ttk.Frame(s7)
+        gen_row.pack(fill="x", pady=(4, 8))
+        self._make_action_button(gen_row, "Generate Commission Income Workbook", self._generate_ci_workbook, kind="accent").pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_ci_output_folder).pack(side="left", padx=(8, 0))
+        self.ci_gen_progress = perf_utils.ProgressBarPanel(s7)
+        self.ci_gen_progress.frame.pack(fill="x", pady=(4, 8))
+        self.ci_gen_log = scrolledtext.ScrolledText(s7, height=10, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.ci_gen_log.pack(fill="both", expand=True, pady=(8, 0))
+        self._finalize_scroll_passthrough(body)
+
+    def _browse_ci_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.ci_output_dir_var.set(path)
+
+    def _generate_ci_workbook(self):
+        if self.ci_last_result is None:
+            messagebox.showerror("Nothing to generate", "Run Calculate on tab 2 first.")
+            return
+        base = self.ci_output_dir_var.get().strip()
+        if not base:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+        output_dir = self._new_run_folder(base)
+        result, opening = self.ci_last_result, self.ci_last_opening
+        output_file = os.path.join(output_dir, cig.build_output_filename(result["period_end"]))
+        self.ci_gen_log.delete("1.0", "end")
+        self.status_var.set("Generating Commission Income workbook...")
+        self.ci_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            return cig.build_commission_income_workbook(result, opening, output_file, report=report)
+
+        def on_done(fp):
+            self.ci_last_output_file = fp
+            self.ci_gen_progress.finish("Done.")
+            self._log_ci_gen(f"Generated: {fp}")
+            messagebox.showinfo("Done", f"Commission Income workbook generated:\n{fp}")
+            self.status_var.set(f"Commission Income: generated {os.path.basename(fp)}.")
+
+        def on_error(exc):
+            self.ci_gen_progress.finish("Failed - see the log.")
+            self._log_ci_gen(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(
+            self, worker, on_progress=lambda m: self._log_ci_gen(m),
+            on_progress_value=self.ci_gen_progress.update, on_done=on_done, on_error=on_error)
+
+    def _log_ci_gen(self, msg):
+        self.ci_gen_log.insert("end", str(msg) + "\n")
+        self.ci_gen_log.see("end")
+
+    def _open_ci_output_folder(self):
+        d = os.path.dirname(self.ci_last_output_file) if self.ci_last_output_file else self.ci_output_dir_var.get().strip()
+        if d and os.path.exists(d):
+            os.startfile(d) if hasattr(os, "startfile") else os.system(f'open "{d}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
 
     # ---------- Withholding Tax (Income Tax) module ----------
     def _build_withholding_tax_page(self, parent):
