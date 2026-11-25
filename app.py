@@ -65,6 +65,33 @@ COMPANY_LOGO_PATH = os.path.join(ASSETS_DIR, "company_logo_cropped.png")
 
 
 # ---------------------------------------------------------------------------
+# Mouse wheel / touchpad scrolling.
+#
+# A mouse wheel notch is a <MouseWheel> delta of exactly +/-120, but a laptop
+# touchpad's two-finger scroll sends a stream of SMALL deltas (typically
+# 10-60). The old handlers did int(-1 * (event.delta / 120)), which rounds
+# every one of those small steps to 0 - so a mouse wheel scrolled and a
+# two-finger swipe did nothing at all. This helper keeps the fractional
+# remainder between events so small deltas add up to whole scroll units
+# (a mouse notch is still exactly one unit).
+# ---------------------------------------------------------------------------
+_wheel_remainder = 0.0
+
+
+def _wheel_units(event):
+    """Whole yview_scroll 'units' for this <MouseWheel> event, carrying the
+    fractional remainder over to the next event."""
+    global _wheel_remainder
+    step = -event.delta / 120.0
+    if step * _wheel_remainder < 0:   # direction changed: drop the leftover
+        _wheel_remainder = 0.0
+    _wheel_remainder += step
+    units = int(round(_wheel_remainder, 6))   # round() absorbs float dust (4.9999999 -> 5)
+    _wheel_remainder -= units
+    return units
+
+
+# ---------------------------------------------------------------------------
 # Card-aware ttk widgets.
 #
 # Every module lays its controls out on white "cards" (see _loss_section_card)
@@ -714,7 +741,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         tk.Frame(sidebar, bg=self.COLOR_SIDEBAR, height=24).pack(fill="x")
@@ -1171,7 +1198,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         PAD_X = 20
@@ -1678,7 +1705,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         # Stashed so _finalize_scroll_passthrough (called once, after all
@@ -4033,7 +4060,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         PAD_X = 20
@@ -4306,7 +4333,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         PAD_X = 20
@@ -4677,7 +4704,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         PAD_X = 20
@@ -4941,7 +4968,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
@@ -5165,7 +5192,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         body.columnconfigure(0, weight=0)
@@ -5810,7 +5837,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
@@ -6117,7 +6144,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         body.columnconfigure(0, weight=0)
@@ -6852,7 +6879,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
@@ -7061,7 +7088,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         # Give the list a fixed proportion and the preview panel the rest,
@@ -7640,7 +7667,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         pad = {"padx": 10, "pady": 8}
@@ -7893,7 +7920,7 @@ class BalanceApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            canvas.yview_scroll(_wheel_units(event), "units")
         self._enable_mousewheel(canvas, _on_mousewheel)
 
         body.columnconfigure(0, weight=0)
