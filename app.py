@@ -4209,9 +4209,9 @@ class BalanceApp(tk.Tk):
         form = ttk.Frame(s3)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
-        self.tr_to_var, self.tr_cc_var, self.tr_cc2_var, self.tr_subject_var = (tk.StringVar() for _ in range(4))
+        self.tr_to_var, self.tr_cc_var, self.tr_bcc_var, self.tr_subject_var = (tk.StringVar() for _ in range(4))
         self.tr_email_entries = []
-        for i, (label, var) in enumerate((("To", self.tr_to_var), ("CC", self.tr_cc_var), ("CC2", self.tr_cc2_var),
+        for i, (label, var) in enumerate((("To", self.tr_to_var), ("CC", self.tr_cc_var), ("BCC", self.tr_bcc_var),
                                           ("Subject", self.tr_subject_var))):
             ttk.Label(form, text=label, style="Panel.TLabel", width=10).grid(row=i, column=0, sticky="w", pady=3)
             e = ttk.Entry(form, textvariable=var)
@@ -4398,16 +4398,15 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("No selection", "Choose a stock or a bank first.")
             return
         send = self.tr_delivery_var.get() == "send"
-        to = cc = subject = body = ""
+        to = cc = bcc = subject = body = ""
         dry = True
         if send:
-            to, cc1, cc2 = self.tr_to_var.get().strip(), self.tr_cc_var.get().strip(), self.tr_cc2_var.get().strip()
-            for text, label, required in ((to, "To", True), (cc1, "CC", False), (cc2, "CC2", False)):
+            to, cc, bcc = self.tr_to_var.get().strip(), self.tr_cc_var.get().strip(), self.tr_bcc_var.get().strip()
+            for text, label, required in ((to, "To", True), (cc, "CC", False), (bcc, "BCC", False)):
                 problem = self._tr_address_problem(text, label, required)
                 if problem:
                     messagebox.showerror("Check the email addresses", problem)
                     return
-            cc = "; ".join(p for p in (cc1, cc2) if p)
             subject = self.tr_subject_var.get().strip()
             if not subject:
                 messagebox.showerror("No subject", "Enter a subject for the email.")
@@ -4417,8 +4416,8 @@ class BalanceApp(tk.Tk):
             eg.save_signature(signature)   # shared signature store across every GIMS module
             dry = self.tr_dry_run_var.get()
             if not dry and not messagebox.askyesno(
-                    "Confirm", f"Send this report to {to}{' (cc: ' + cc + ')' if cc else ''} through Outlook now? "
-                               f"This cannot be undone."):
+                    "Confirm", f"Send this report to {to}{' (cc: ' + cc + ')' if cc else ''}{' (bcc: ' + bcc + ')' if bcc else ''} "
+                               f"through Outlook now? This cannot be undone."):
                 return
         base = self.tr_output_dir_var.get().strip()
         if not base:
@@ -4443,7 +4442,7 @@ class BalanceApp(tk.Tk):
             except ImportError:
                 com_ok = False
             try:
-                ok, msg = osend.send_email(to, subject, body, path, dry, cc=cc or None)
+                ok, msg = osend.send_email(to, subject, body, path, dry, cc=cc or None, bcc=bcc or None)
             finally:
                 if com_ok:
                     pythoncom.CoUninitialize()
