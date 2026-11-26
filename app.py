@@ -447,6 +447,8 @@ class BalanceApp(tk.Tk):
         self.tr_auto_text = ("", "")
         self.tr_last_output_file = None
         self.tr_output_dir = os.path.join(os.getcwd(), "Trading Reports")
+        self._tr_refresh_job = None        # pending debounced refresh after typing a date
+        self._tr_last_counts = None        # stock counts last shown in the list (for the date filter)
 
         # Withholding Tax (Income Tax) module state - see withholding_tax_processor.py.
         # The four inputs are independent files (or independent sheets within
@@ -4122,19 +4124,20 @@ class BalanceApp(tk.Tk):
 
     # ---------- Trading Reports (Finance > Trading) module ----------
     def _build_trading_reports_page(self, parent):
-        """Trading Reports: load the four trading-account reports, then
-        produce either a STOCK working (one stock across every account) or a
-        BANK working (one account, to send to that bank) as a two-sheet
-        workbook - saved, or e-mailed through Outlook. See
-        trading_reports_processor.py."""
+        """Trading Reports: load the trading-account reports, optionally
+        narrow them to a date or period, then produce either a STOCK working
+        (one or several stocks across every account) or a BANK working (one
+        account, to send to that bank) as a two-sheet workbook - saved, or
+        e-mailed through Outlook. See trading_reports_processor.py."""
         header = ttk.Frame(parent)
         header.pack(fill="x", padx=20, pady=(20, 6))
         ttk.Label(header, text="Trading Reports", font=("Segoe UI Semibold", 18, "bold"),
                   foreground=self.COLOR_PRIMARY).pack(anchor="w")
         subtitle = ttk.Label(
-            header, text="Load the trading-account reports (one per fund manager), then either total one stock across "
-                          "every account or produce one bank's transaction report. Each workbook has a Summary sheet "
-                          "and a Transactions sheet, and can be saved or e-mailed.",
+            header, text="Load the trading-account reports (one per fund manager), then either total one or more stocks "
+                          "across every account or produce one bank's transaction report, for the whole file or just a "
+                          "date or period. Each workbook has a Summary sheet and a Transactions sheet, and can be saved "
+                          "or e-mailed.",
             foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
         subtitle.pack(anchor="w", fill="x", pady=(2, 10))
         header.bind("<Configure>", lambda e: subtitle.configure(wraplength=max(200, e.width - 4)))
@@ -4172,31 +4175,88 @@ class BalanceApp(tk.Tk):
         # ---- 2. Working ----
         s2 = self._loss_section_card(body, "2", "Choose the Working", PAD_X)
         self.tr_mode_var = tk.StringVar(value="stock")
-        ttk.Radiobutton(s2, text="Shares bought for a stock across all accounts", variable=self.tr_mode_var, value="stock",
-                        command=self._on_tr_mode_change).pack(anchor="w")
+        ttk.Radiobutton(s2, text="Shares bought for one or more stocks across all accounts", variable=self.tr_mode_var,
+                        value="stock", command=self._on_tr_mode_change).pack(anchor="w")
         ttk.Radiobutton(s2, text="Transaction report for one bank", variable=self.tr_mode_var, value="bank",
                         command=self._on_tr_mode_change).pack(anchor="w", pady=(2, 8))
-        sel = ttk.Frame(s2)
-        sel.pack(fill="x")
-        self.tr_stock_label = ttk.Label(sel, text="Stock", style="Panel.TLabel", width=10)
-        self.tr_stock_var = tk.StringVar()
-        self.tr_stock_combo = ttk.Combobox(sel, textvariable=self.tr_stock_var, state="readonly", width=60)
-        self.tr_bank_label = ttk.Label(sel, text="Bank", style="Panel.TLabel", width=10)
+
+        # stock picker: a multi-select list (one click = one stock; Ctrl/Shift+click = several)
+        picker = ttk.Frame(s2)          # holds whichever of the stock list / bank picker is showing
+        picker.pack(fill="x")
+        self.tr_stock_frame = ttk.Frame(picker)
+        self.tr_stock_frame.pack(fill="x")
+        list_row = ttk.Frame(self.tr_stock_frame)
+        list_row.pack(fill="x")
+        ttk.Label(list_row, text="Stocks", style="Panel.TLabel", width=10).pack(side="left", anchor="n", pady=3)
+        lb_wrap = ttk.Frame(list_row)
+        lb_wrap.pack(side="left", fill="x", expand=True)
+        self.tr_stock_list = tk.Listbox(lb_wrap, selectmode="extended", height=8, exportselection=False,
+                                        font=("Segoe UI", 10), relief="solid", borderwidth=1, activestyle="none",
+                                        selectbackground=self.COLOR_PRIMARY, selectforeground="#FFFFFF")
+        lb_scroll = ttk.Scrollbar(lb_wrap, orient="vertical", command=self.tr_stock_list.yview)
+        self.tr_stock_list.configure(yscrollcommand=lb_scroll.set)
+        self.tr_stock_list.pack(side="left", fill="x", expand=True)
+        lb_scroll.pack(side="left", fill="y")
+        self.tr_stock_list.bind("<<ListboxSelect>>", lambda e: self._refresh_tr_selection())
+        btn_row = ttk.Frame(self.tr_stock_frame)
+        btn_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(btn_row, text="", width=10).pack(side="left")
+        ttk.Button(btn_row, text="Select all", command=self._select_all_tr_stocks).pack(side="left")
+        ttk.Button(btn_row, text="Clear selection", command=self._clear_tr_stock_selection).pack(side="left", padx=(6, 0))
+        ttk.Label(btn_row, text="  Click one stock, or Ctrl+click / Shift+click to pick several.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).pack(side="left")
+        multi_row = ttk.Frame(self.tr_stock_frame)
+        multi_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(multi_row, text="Several stocks", style="Panel.TLabel", width=12).pack(side="left")
+        self.tr_multi_output_var = tk.StringVar(value="combined")
+        self.tr_multi_radios = []
+        for text, val in (("One workbook with all the selected stocks", "combined"), ("A separate workbook for each stock", "separate")):
+            rb = ttk.Radiobutton(multi_row, text=text, variable=self.tr_multi_output_var, value=val,
+                                 command=self._refresh_tr_selection)
+            rb.pack(side="left", padx=(0, 14))
+            self.tr_multi_radios.append(rb)
+
+        # bank picker
+        self.tr_bank_frame = ttk.Frame(picker)
+        ttk.Label(self.tr_bank_frame, text="Bank", style="Panel.TLabel", width=10).pack(side="left")
         self.tr_bank_var = tk.StringVar()
-        self.tr_bank_combo = ttk.Combobox(sel, textvariable=self.tr_bank_var, state="readonly", width=40)
-        self.tr_stock_label.grid(row=0, column=0, sticky="w", pady=3)
-        self.tr_stock_combo.grid(row=0, column=1, sticky="w", pady=3)
-        self.tr_bank_label.grid(row=0, column=0, sticky="w", pady=3)
-        self.tr_bank_combo.grid(row=0, column=1, sticky="w", pady=3)
-        ttk.Label(sel, text="Include", style="Panel.TLabel", width=10).grid(row=1, column=0, sticky="w", pady=3)
+        self.tr_bank_combo = ttk.Combobox(self.tr_bank_frame, textvariable=self.tr_bank_var, state="readonly", width=40)
+        self.tr_bank_combo.pack(side="left")
+        self.tr_bank_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tr_selection())
+
+        # buy/sell + date filter (apply to both workings)
+        opts = ttk.Frame(s2)
+        opts.pack(fill="x", pady=(10, 0))
+        ttk.Label(opts, text="Include", style="Panel.TLabel", width=10).grid(row=0, column=0, sticky="w", pady=3)
         self.tr_side_var = tk.StringVar(value=trp.SIDE_BOTH)
-        self.tr_side_combo = ttk.Combobox(sel, textvariable=self.tr_side_var, state="readonly", width=22, values=trp.SIDE_OPTIONS)
-        self.tr_side_combo.grid(row=1, column=1, sticky="w", pady=3)
-        for combo in (self.tr_stock_combo, self.tr_bank_combo, self.tr_side_combo):
-            combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tr_selection())
+        side_combo = ttk.Combobox(opts, textvariable=self.tr_side_var, state="readonly", width=22, values=trp.SIDE_OPTIONS)
+        side_combo.grid(row=0, column=1, sticky="w", pady=3)
+        side_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tr_selection())
+        ttk.Label(opts, text="Date filter", style="Panel.TLabel", width=10).grid(row=1, column=0, sticky="w", pady=3)
+        date_row = ttk.Frame(opts)
+        date_row.grid(row=1, column=1, sticky="w", pady=3)
+        self.tr_date_field_var = tk.StringVar(value=trp.DATE_FIELDS[0])
+        date_field_combo = ttk.Combobox(date_row, textvariable=self.tr_date_field_var, state="readonly", width=16, values=trp.DATE_FIELDS)
+        date_field_combo.pack(side="left")
+        date_field_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tr_selection())
+        ttk.Label(date_row, text="  From", style="Panel.TLabel").pack(side="left")
+        self.tr_from_var = tk.StringVar()
+        ttk.Entry(date_row, textvariable=self.tr_from_var, width=12).pack(side="left", padx=(4, 0))
+        ttk.Label(date_row, text="  To", style="Panel.TLabel").pack(side="left")
+        self.tr_to_var_date = tk.StringVar()
+        self.tr_to_entry = ttk.Entry(date_row, textvariable=self.tr_to_var_date, width=12)
+        self.tr_to_entry.pack(side="left", padx=(4, 0))
+        self.tr_single_day_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(date_row, text="Single day (From date only)", variable=self.tr_single_day_var,
+                        command=self._on_tr_single_day_change).pack(side="left", padx=(12, 0))
+        for var in (self.tr_from_var, self.tr_to_var_date):
+            var.trace_add("write", lambda *_a: self._schedule_tr_refresh())
+        self.tr_date_hint_var = tk.StringVar(value="Dates as DD-MM-YYYY (e.g. 20-10-2026). Leave both blank for the whole file.")
+        ttk.Label(s2, textvariable=self.tr_date_hint_var, style="Panel.TLabel", foreground=self.COLOR_MUTED,
+                  font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
         self.tr_selection_var = tk.StringVar(value="")
-        ttk.Label(s2, textvariable=self.tr_selection_var, style="Panel.TLabel", foreground=self.COLOR_MUTED,
-                  font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        ttk.Label(s2, textvariable=self.tr_selection_var, style="Panel.TLabel", foreground=self.COLOR_PRIMARY,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(8, 0))
         self._on_tr_mode_change()
 
         # ---- 3. Save or send ----
@@ -4275,12 +4335,14 @@ class BalanceApp(tk.Tk):
                 self.tr_files_tree.insert("", "end", values=(f["bank"], f["code"], f["file"], f"{f['rows']:,}", dates, f["flagged"] or ""))
             self.tr_stocks = trp.list_stocks(bundle)
             self.tr_banks = trp.list_banks(bundle)
-            self.tr_stock_combo.configure(values=[f"{s['symbol']} - {s['company']}  ({s['trades']} trades)" for s in self.tr_stocks])
             self.tr_bank_combo.configure(values=[f"{b['bank']}  ({b['code']})" for b in self.tr_banks])
-            if self.tr_stocks:
-                self.tr_stock_combo.current(0)
             if self.tr_banks:
                 self.tr_bank_combo.current(0)
+            d = bundle["data"]
+            self.tr_date_hint_var.set(
+                f"Dates as DD-MM-YYYY (e.g. 20-10-2026). Leave both blank for the whole file. "
+                f"The loaded reports cover {d['Trade Date'].min():%d-%b-%Y} to {d['Trade Date'].max():%d-%b-%Y}.")
+            self._fill_tr_stock_list()
             self._log_tr(f"Loaded {len(bundle['data']):,} trade(s) from {len(bundle['files'])} account(s); "
                          f"{len(self.tr_stocks)} stock(s).")
             for w in bundle["warnings"]:
@@ -4301,56 +4363,138 @@ class BalanceApp(tk.Tk):
         self.tr_bundle = None
         self.tr_stocks, self.tr_banks = [], []
         self.tr_files_tree.delete(*self.tr_files_tree.get_children())
-        for combo in (self.tr_stock_combo, self.tr_bank_combo):
-            combo.configure(values=[])
-            combo.set("")
+        self.tr_stock_list.delete(0, "end")
+        self.tr_bank_combo.configure(values=[])
+        self.tr_bank_combo.set("")
         self.tr_selection_var.set("")
 
-    # ---- selection ----
-    def _on_tr_mode_change(self):
-        stock = self.tr_mode_var.get() == "stock"
-        for w in (self.tr_stock_label, self.tr_stock_combo):
-            (w.grid if stock else w.grid_remove)()
-        for w in (self.tr_bank_label, self.tr_bank_combo):
-            (w.grid_remove if stock else w.grid)()
+    # ---- selection / date filter ----
+    def _fill_tr_stock_list(self, counts=None):
+        """(Re)fill the stock list. `counts` is {symbol: trades inside the date
+        filter}; stocks with none in the period stay listed but greyed out.
+        The current selection is kept."""
+        selected = {self.tr_stocks[i]["symbol"] for i in self.tr_stock_list.curselection() if i < len(self.tr_stocks)}
+        self.tr_stock_list.delete(0, "end")
+        for i, s in enumerate(self.tr_stocks):
+            n = s["trades"] if counts is None else counts.get(s["symbol"], 0)
+            self.tr_stock_list.insert("end", f"{s['symbol']} - {s['company']}   ({n} trade{'s' if n != 1 else ''})")
+            if n == 0:
+                self.tr_stock_list.itemconfig(i, fg="#9AA5B1")
+            if s["symbol"] in selected:
+                self.tr_stock_list.selection_set(i)
+
+    def _select_all_tr_stocks(self):
+        self.tr_stock_list.selection_set(0, "end")
         self._refresh_tr_selection()
 
-    def _current_tr_working(self):
-        """Build the working for the current selection (cheap, in memory).
-        Returns None when nothing is selected yet; raises
-        trp.TradingReportsError for a selection with no matching trades."""
+    def _clear_tr_stock_selection(self):
+        self.tr_stock_list.selection_clear(0, "end")
+        self._refresh_tr_selection()
+
+    def _on_tr_single_day_change(self):
+        self.tr_to_entry.configure(state="disabled" if self.tr_single_day_var.get() else "normal")
+        self._refresh_tr_selection()
+
+    def _schedule_tr_refresh(self):
+        """Typing in a date box refreshes the selection after a short pause."""
+        if self._tr_refresh_job is not None:
+            self.after_cancel(self._tr_refresh_job)
+        self._tr_refresh_job = self.after(350, self._refresh_tr_selection)
+
+    def _tr_view_bundle(self):
+        """The loaded reports narrowed by the date filter boxes. Raises
+        trp.TradingReportsError for an unreadable / reversed / empty filter."""
+        date_from = trp.parse_filter_date(self.tr_from_var.get())
+        if self.tr_single_day_var.get():
+            if date_from is None:
+                raise trp.TradingReportsError("Enter the date in the From box for a single day.")
+            date_to = date_from
+        else:
+            date_to = trp.parse_filter_date(self.tr_to_var_date.get())
+        return trp.apply_date_filter(self.tr_bundle, date_from, date_to, self.tr_date_field_var.get())
+
+    def _on_tr_mode_change(self):
+        stock = self.tr_mode_var.get() == "stock"
+        if stock:
+            self.tr_bank_frame.pack_forget()
+            self.tr_stock_frame.pack(fill="x")
+        else:
+            self.tr_stock_frame.pack_forget()
+            self.tr_bank_frame.pack(fill="x")
+        self._refresh_tr_selection()
+
+    def _selected_tr_symbols(self):
+        return [self.tr_stocks[i]["symbol"] for i in self.tr_stock_list.curselection() if i < len(self.tr_stocks)]
+
+    def _current_tr_request(self):
+        """Build what the current selection asks for (in memory, cheap).
+        Returns None when nothing is selected yet, else a dict:
+          workings  - the workings to write, one workbook each
+          text      - the working the default e-mail text is written from
+          separate  - True when several stocks get one workbook each
+          skipped   - [(symbol, reason)] selected stocks with no matching trades
+        Raises trp.TradingReportsError for a bad date filter or an empty selection."""
         if not self.tr_bundle:
             return None
+        view = self._tr_view_bundle()
         side = self.tr_side_var.get() or trp.SIDE_BOTH
-        if self.tr_mode_var.get() == "stock":
-            idx = self.tr_stock_combo.current()
-            if idx < 0 or idx >= len(self.tr_stocks):
+        if self.tr_mode_var.get() == "bank":
+            idx = self.tr_bank_combo.current()
+            if idx < 0 or idx >= len(self.tr_banks):
                 return None
-            return trp.build_stock_working(self.tr_bundle, self.tr_stocks[idx]["symbol"], side)
-        idx = self.tr_bank_combo.current()
-        if idx < 0 or idx >= len(self.tr_banks):
+            w = trp.build_bank_working(view, self.tr_banks[idx]["code"], side)
+            return {"workings": [w], "text": w, "separate": False, "skipped": []}
+        symbols = self._selected_tr_symbols()
+        if not symbols:
             return None
-        return trp.build_bank_working(self.tr_bundle, self.tr_banks[idx]["code"], side)
+        if len(symbols) == 1:
+            w = trp.build_stock_working(view, symbols[0], side)
+            return {"workings": [w], "text": w, "separate": False, "skipped": []}
+        combined = trp.build_multi_stock_working(view, symbols, side)
+        if self.tr_multi_output_var.get() == "separate":
+            return {"workings": combined["stocks"], "text": combined, "separate": True, "skipped": combined["skipped"]}
+        return {"workings": [combined], "text": combined, "separate": False, "skipped": combined["skipped"]}
 
     def _refresh_tr_selection(self):
-        """Update the one-line description of the selection and, unless the
-        subject/message were edited by hand, their default text."""
+        """Refresh the stock counts for the date filter, the one-line
+        description of the selection and - unless the subject/message were
+        edited by hand - their default text."""
+        self._tr_refresh_job = None
+        if not self.tr_bundle:
+            return
+        multi_ok = len(self._selected_tr_symbols()) > 1 and self.tr_mode_var.get() == "stock"
+        for rb in self.tr_multi_radios:
+            rb.configure(state="normal" if multi_ok else "disabled")
         try:
-            working = self._current_tr_working()
+            view = self._tr_view_bundle()
         except trp.TradingReportsError as e:
             self.tr_selection_var.set(str(e))
             return
-        if working is None:
+        counts = view["data"].groupby("Symbol").size().to_dict()
+        if self._tr_last_counts != counts:
+            self._fill_tr_stock_list(counts)
+            self._tr_last_counts = counts
+        try:
+            req = self._current_tr_request()
+        except trp.TradingReportsError as e:
+            self.tr_selection_var.set(str(e))
+            return
+        if req is None:
             self.tr_selection_var.set("")
             return
-        t = working["total"]
-        if working["kind"] == "stock":
-            self.tr_selection_var.set(
-                f"{working['symbol']}: {t['trades']} trade(s) - bought {t['buy_qty']:,.0f} share(s), sold {t['sell_qty']:,.0f}.")
+        w, t = req["text"], req["text"]["total"]
+        if w["kind"] == "stock":
+            msg = f"{w['symbol']}: {t['trades']} trade(s) - bought {t['buy_qty']:,.0f} share(s), sold {t['sell_qty']:,.0f}."
+        elif w["kind"] == "multi":
+            how = "one workbook each" if req["separate"] else "one combined workbook"
+            n_stocks = len(w["stocks"])
+            msg = f"{n_stocks} stock{'s' if n_stocks != 1 else ''}, {t['trades']} trade(s) in total ({how})."
+            if req["skipped"]:
+                msg += f"  No trades for: {', '.join(sym for sym, _why in req['skipped'])}."
         else:
-            self.tr_selection_var.set(
-                f"{working['bank']}: {t['trades']} trade(s) across {len(working['rows'])} stock(s).")
-        subject, body = trp.default_email_text(working, "")
+            msg = f"{w['bank']}: {t['trades']} trade(s) across {len(w['rows'])} stock(s)."
+        self.tr_selection_var.set(msg)
+        subject, body = trp.default_email_text(w, "", separate=req["separate"])
         current_subject, current_body = self.tr_subject_var.get(), self.tr_body_text.get("1.0", "end").rstrip("\n")
         last_subject, last_body = self.tr_auto_text
         if current_subject in ("", last_subject) and current_body in ("", last_body.rstrip("\n")):
@@ -4390,13 +4534,14 @@ class BalanceApp(tk.Tk):
             messagebox.showerror("No reports", "Upload the trading account reports first.")
             return
         try:
-            working = self._current_tr_working()
+            req = self._current_tr_request()
         except trp.TradingReportsError as e:
             messagebox.showerror("Nothing to report", str(e))
             return
-        if working is None:
-            messagebox.showerror("No selection", "Choose a stock or a bank first.")
+        if req is None:
+            messagebox.showerror("No selection", "Choose a stock (or several) or a bank first.")
             return
+        workings, separate = req["workings"], req["separate"]
         send = self.tr_delivery_var.get() == "send"
         to = cc = bcc = subject = body = ""
         dry = True
@@ -4415,25 +4560,30 @@ class BalanceApp(tk.Tk):
             body = self.tr_body_text.get("1.0", "end").rstrip() + ("\n" + signature if signature else "")
             eg.save_signature(signature)   # shared signature store across every GIMS module
             dry = self.tr_dry_run_var.get()
+            files_note = f" ({len(workings)} workbooks attached)" if len(workings) > 1 else ""
             if not dry and not messagebox.askyesno(
-                    "Confirm", f"Send this report to {to}{' (cc: ' + cc + ')' if cc else ''}{' (bcc: ' + bcc + ')' if bcc else ''} "
-                               f"through Outlook now? This cannot be undone."):
+                    "Confirm", f"Send this report to {to}{' (cc: ' + cc + ')' if cc else ''}{' (bcc: ' + bcc + ')' if bcc else ''}"
+                               f"{files_note} through Outlook now? This cannot be undone."):
                 return
         base = self.tr_output_dir_var.get().strip()
         if not base:
             messagebox.showerror("No output folder", "Set an output folder first.")
             return
         output_dir = self._new_run_folder(base)
-        path = os.path.join(output_dir, trp.build_filename(working))
+        paths = [os.path.join(output_dir, trp.build_filename(w)) for w in workings]
+        skipped = req["skipped"]
         self.tr_log.delete("1.0", "end")
         self.status_var.set("Trading Reports: generating...")
         self.tr_gen_progress.start(total=None, text="Generating...")
 
         def worker(report):
-            trg.write_trading_workbook(working, path)
-            report(f"Saved: {path}")
+            for w, path in zip(workings, paths):
+                trg.write_trading_workbook(w, path)
+                report(f"Saved: {path}")
+            for sym, _why in skipped:
+                report(f"NOTE: {sym} has no matching trades and was left out.")
             if not send:
-                return {"path": path, "send": None}
+                return {"paths": paths, "send": None}
             # Outlook (COM) must be initialised on whichever thread calls it.
             try:
                 import pythoncom
@@ -4442,27 +4592,30 @@ class BalanceApp(tk.Tk):
             except ImportError:
                 com_ok = False
             try:
-                ok, msg = osend.send_email(to, subject, body, path, dry, cc=cc or None, bcc=bcc or None)
+                attach = paths if len(paths) > 1 else paths[0]
+                ok, msg = osend.send_email(to, subject, body, attach, dry, cc=cc or None, bcc=bcc or None)
             finally:
                 if com_ok:
                     pythoncom.CoUninitialize()
-            return {"path": path, "send": (ok, msg)}
+            return {"paths": paths, "send": (ok, msg)}
 
         def on_done(res):
-            self.tr_last_output_file = res["path"]
+            self.tr_last_output_file = res["paths"][0]
             self.tr_gen_progress.finish("Done.")
+            where = res["paths"][0] if len(res["paths"]) == 1 else f"{os.path.dirname(res['paths'][0])}  ({len(res['paths'])} workbooks)"
+            left_out = f"\n\nLeft out (no matching trades): {', '.join(s for s, _w in skipped)}" if skipped else ""
             if res["send"] is None:
-                messagebox.showinfo("Done", f"Report saved:\n{res['path']}")
-                self.status_var.set(f"Trading Reports: saved {os.path.basename(res['path'])}.")
+                messagebox.showinfo("Done", f"Saved:\n{where}{left_out}")
+                self.status_var.set(f"Trading Reports: saved {len(res['paths'])} workbook(s).")
                 return
             ok, msg = res["send"]
             if dry and not msg.startswith("[DRY RUN]"):
                 msg = "[DRY RUN] " + msg      # outlook_sender already labels its own dry-run message
             self._log_tr(msg)
             if ok:
-                messagebox.showinfo("Done", f"{msg}\n\nThe workbook is also saved at:\n{res['path']}")
+                messagebox.showinfo("Done", f"{msg}\n\nSaved at:\n{where}{left_out}")
             else:
-                messagebox.showerror("Email not sent", f"{msg}\n\nThe workbook was saved at:\n{res['path']}")
+                messagebox.showerror("Email not sent", f"{msg}\n\nThe workbook(s) were saved at:\n{where}")
             self.status_var.set(f"Trading Reports: {msg}")
 
         def on_error(exc):

@@ -34,6 +34,12 @@ always what is shown):
   * a row with no buy/sell quantity, or with both
 The same account appearing in two different files is an error, because
 adding the same report twice would double-count every trade.
+
+DATE FILTER: a month's report can be narrowed to a period or a single day on
+the trade date (or settlement date) before either working is built -
+apply_date_filter(). MULTIPLE STOCKS: build_multi_stock_working() combines
+several stocks into one workbook; the screen can alternatively write one
+workbook per stock.
 """
 import os
 import re
@@ -281,6 +287,58 @@ def load_reports(paths, report=None):
 
 
 # ---------------------------------------------------------------------------
+# Date filter
+# ---------------------------------------------------------------------------
+DATE_FIELDS = ["Trade Date", "Settlement Date"]
+_DATE_FORMATS = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%d %b %Y", "%d-%B-%Y", "%d %B %Y", "%d.%m.%Y"]
+
+
+def parse_filter_date(text):
+    """Read a date typed on the screen. Blank -> None (no limit). Day comes
+    before month (30-10-2026 = 30 October); YYYY-MM-DD and 30-Oct-2026 work too."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return pd.Timestamp(pd.to_datetime(text, format=fmt))
+        except (ValueError, TypeError):
+            continue
+    raise TradingReportsError(f"Could not read the date '{text}'. Use DD-MM-YYYY (for example 20-10-2026) or YYYY-MM-DD.")
+
+
+def apply_date_filter(bundle, date_from=None, date_to=None, field="Trade Date"):
+    """Return a copy of the bundle limited to trades whose `field` (Trade
+    Date or Settlement Date) falls in [date_from, date_to], both inclusive;
+    either bound may be None. The returned bundle remembers the filter so
+    the workings and workbooks can state the period."""
+    if field not in DATE_FIELDS:
+        raise TradingReportsError(f"Unknown date field '{field}'.")
+    if date_from is None and date_to is None:
+        out = dict(bundle)
+        out["filter"] = None
+        return out
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise TradingReportsError("The From date is after the To date.")
+    d = bundle["data"]
+    keep = pd.Series(True, index=d.index)
+    if date_from is not None:
+        keep &= d[field] >= date_from
+    if date_to is not None:
+        keep &= d[field] <= date_to
+    filtered = d[keep].reset_index(drop=True)
+    lo = f"{date_from:%d-%b-%Y}" if date_from is not None else "the start"
+    hi = f"{date_to:%d-%b-%Y}" if date_to is not None else "the end"
+    if filtered.empty:
+        have = f"{d[field].min():%d-%b-%Y} to {d[field].max():%d-%b-%Y}"
+        raise TradingReportsError(f"No trades with a {field.lower()} from {lo} to {hi}. The loaded reports cover {have}.")
+    out = dict(bundle)
+    out["data"] = filtered
+    out["filter"] = {"from": date_from, "to": date_to, "field": field}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Lists for the screen
 # ---------------------------------------------------------------------------
 
@@ -340,10 +398,21 @@ def _summarize(group):
     }
 
 
-def _meta(df):
+def _meta(df, bundle=None):
+    """Dates for headings and file names. `date_from`/`date_to` are the first and
+    last TRADE dates in the selection; `period_from`/`period_to` are what the
+    report states as its period - the date filter when one is set, otherwise
+    the actual span of the field it is describing."""
+    flt = (bundle or {}).get("filter") or {}
+    field = flt.get("field", "Trade Date")
+    actual_from = df[field].min() if len(df) else None
+    actual_to = df[field].max() if len(df) else None
     return {
         "date_from": df["Trade Date"].min() if len(df) else None,
         "date_to": df["Trade Date"].max() if len(df) else None,
+        "period_from": flt.get("from") or actual_from,
+        "period_to": flt.get("to") or actual_to,
+        "date_label": "Settlement dates" if field == "Settlement Date" else "Trade dates",
         "flagged": int((df["Flag"] != "").sum()),
     }
 
@@ -373,7 +442,7 @@ def build_stock_working(bundle, symbol, side=SIDE_BOTH):
     tx = tx.sort_values(["Trade Date", "_o", "Settlement Date"], kind="stable").drop(columns="_o").reset_index(drop=True)
     return {
         "kind": "stock", "symbol": symbol, "company": stock["Stock Name"].iloc[0], "side": side,
-        "rows": rows, "total": _summarize(selected), "transactions": tx, "meta": _meta(selected),
+        "rows": rows, "total": _summarize(selected), "transactions": tx, "meta": _meta(selected, bundle),
     }
 
 
@@ -400,7 +469,33 @@ def build_bank_working(bundle, code, side=SIDE_BOTH):
     tx = selected.sort_values(["Trade Date", "Symbol", "Settlement Date"], kind="stable").reset_index(drop=True)
     return {
         "kind": "bank", "code": code, "bank": _bank_name(code), "side": side,
-        "rows": rows, "total": _summarize(selected), "transactions": tx, "meta": _meta(selected),
+        "rows": rows, "total": _summarize(selected), "transactions": tx, "meta": _meta(selected, bundle),
+    }
+
+
+def build_multi_stock_working(bundle, symbols, side=SIDE_BOTH):
+    """Several stocks in ONE workbook.
+
+    Returns {"kind": "multi", "side", "stocks": [stock workings, in symbol
+    order], "skipped": [(symbol, reason)], "transactions": all the
+    stocks' trades, "total": summary of everything, "meta": {...}}.
+    A stock with no matching trades (date filter / buys-only etc.) is
+    skipped and reported rather than failing the whole request."""
+    stocks, skipped = [], []
+    for symbol in sorted(set(symbols)):
+        try:
+            stocks.append(build_stock_working(bundle, symbol, side))
+        except TradingReportsError as e:
+            skipped.append((symbol, str(e)))
+    if not stocks:
+        detail = "; ".join(f"{sym}: {why}" for sym, why in skipped)
+        raise TradingReportsError(f"None of the selected stocks has matching trades. {detail}")
+    tx = pd.concat([w["transactions"] for w in stocks], ignore_index=True)
+    tx["_o"] = tx["Account Code"].map(lambda c: ACCOUNT_ORDER.get(c, 99))
+    tx = tx.sort_values(["Symbol", "Trade Date", "_o", "Settlement Date"], kind="stable").drop(columns="_o").reset_index(drop=True)
+    return {
+        "kind": "multi", "side": side, "stocks": stocks, "skipped": skipped,
+        "transactions": tx, "total": _summarize(tx), "meta": _meta(tx, bundle),
     }
 
 
@@ -409,31 +504,44 @@ def build_bank_working(bundle, code, side=SIDE_BOTH):
 # ---------------------------------------------------------------------------
 
 def _period_text(meta):
-    a, b = meta["date_from"], meta["date_to"]
+    a, b = meta.get("period_from"), meta.get("period_to")
     if a is None or b is None or pd.isna(a) or pd.isna(b):
         return ""
-    return f"{a:%d-%b-%Y} to {b:%d-%b-%Y}"
+    return f"{a:%d-%b-%Y}" if a == b else f"{a:%d-%b-%Y} to {b:%d-%b-%Y}"
 
 
 def working_title(working):
     if working["kind"] == "stock":
         return f"{working['symbol']} - {working['company']}"
+    if working["kind"] == "multi":
+        n = len(working["stocks"])
+        return f"{n} stock{'s' if n != 1 else ''}: " + ", ".join(w["symbol"] for w in working["stocks"])
     return f"{working['bank']} (Account {working['code']})"
 
 
+def _span(meta):
+    a, b = meta.get("period_from"), meta.get("period_to")
+    if a is None or pd.isna(a):
+        return "report"
+    return f"{a:%d%b%Y}" if a == b else f"{a:%d%b%Y}_to_{b:%d%b%Y}"
+
+
 def build_filename(working):
-    meta = working["meta"]
-    a, b = meta["date_from"], meta["date_to"]
-    span = f"{a:%d%b%Y}_to_{b:%d%b%Y}" if a is not None and not pd.isna(a) else "report"
+    span = _span(working["meta"])
     if working["kind"] == "stock":
         name = f"Trading_Report_{working['symbol']}_{span}"
+    elif working["kind"] == "multi":
+        symbols = [w["symbol"] for w in working["stocks"]]
+        label = "_".join(symbols) if len(symbols) <= 3 else f"{len(symbols)}_stocks"
+        name = f"Trading_Report_{label}_{span}"
     else:
         name = f"Trading_Report_{working['bank']}_{working['code']}_{span}"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name) + ".xlsx"
 
 
-def default_email_text(working, signature):
-    """(subject, body) - editable on the screen."""
+def default_email_text(working, signature, separate=False):
+    """(subject, body) - editable on the screen. `separate` is for several
+    stocks sent as one e-mail with one workbook per stock."""
     period = _period_text(working["meta"])
     if working["kind"] == "stock":
         subject = f"Trading Report - {working['symbol']} - {period}"
@@ -442,6 +550,23 @@ def default_email_text(working, signature):
             f"Please find attached the trading report for {working['company']} ({working['symbol']}) across our "
             f"trading accounts for the period {period}.\n\n"
             "The first sheet gives the summary by account and the second sheet lists the transactions.\n\n"
+            "Regards,\n"
+        )
+    elif working["kind"] == "multi":
+        symbols = ", ".join(w["symbol"] for w in working["stocks"])
+        subject = f"Trading Report - {symbols} - {period}"
+        if len(working["stocks"]) > 3:
+            subject = f"Trading Report - {len(working['stocks'])} stocks - {period}"
+        if separate:
+            how = "A separate workbook is attached for each stock: the first sheet of each gives the summary by account and the second sheet lists the transactions."
+            what = "the trading reports"
+        else:
+            how = "The first sheet gives the summary by stock and account and the second sheet lists the transactions."
+            what = "the trading report"
+        body = (
+            "Dear Sir/Madam,\n\n"
+            f"Please find attached {what} for {symbols} across our trading accounts for the period {period}.\n\n"
+            f"{how}\n\n"
             "Regards,\n"
         )
     else:

@@ -7,6 +7,11 @@ Writes the Trading Reports workbook: two sheets for either working.
                  the bank that performed it (stock working) or the account
                  header (bank working), and a Total line.
 
+A workbook for SEVERAL stocks (kind "multi") keeps the same two sheets: the
+Summary shows each stock's banks with a total line per stock and a grand
+total of the amounts (share quantities of different stocks are never added
+together); the Transactions sheet lists every trade, grouped by stock.
+
 All figures are written as plain VALUES, not formulas, on purpose: these
 files are e-mailed to the banks, and an Excel attachment opened in Protected
 View (or previewed on a phone) does not calculate formulas, so formula cells
@@ -84,14 +89,84 @@ def _summary_columns(side):
     return buy + sell + net_qty + tail
 
 
+def _write_summary_multi(wb, working):
+    ws = wb.active
+    ws.title = "Summary"
+    ws.sheet_view.showGridLines = False
+    side, meta = working["side"], working["meta"]
+    _title_block(ws, working, "Trading Summary - " + trp.working_title(working))
+    info = [("Stocks", ", ".join(f"{w['symbol']} - {w['company']}" for w in working["stocks"])),
+            (meta["date_label"], trp._period_text(meta)), ("Transactions", side),
+            ("No. of transactions", working["total"]["trades"]), ("Prepared on", f"{date.today():%d-%b-%Y}")]
+    if working["skipped"]:
+        info.append(("Not included", ", ".join(f"{sym} (no matching trades)" for sym, _why in working["skipped"])))
+    r = 3
+    for label, value in info:
+        _put(ws, r, 1, label, bold=True, border=None, color="6C7A89")
+        _put(ws, r, 2, value, border=None, align="left")
+        r += 1
+
+    num_cols = _summary_columns(side)
+    header_row = r + 1
+    _header(ws, header_row, ["Symbol", "Stock Name", "Bank", "Account"] + [h for h, _k, _f in num_cols])
+    row = header_row + 1
+    amount_keys = {"buy_amount", "sell_amount", "comm", "tax", "net", "trades"}
+    for stock in working["stocks"]:
+        for line in stock["rows"]:
+            if not line["trades"]:
+                continue     # banks that did not trade this stock are left out of the multi-stock summary
+            _put(ws, row, 1, stock["symbol"])
+            _put(ws, row, 2, stock["company"])
+            _put(ws, row, 3, line["bank"])
+            _put(ws, row, 4, line["code"])
+            for j, (_h, key, fmt) in enumerate(num_cols, start=5):
+                v = line[key]
+                _put(ws, row, j, None if _isnull(v) else v, fmt=fmt)
+            row += 1
+        t = stock["total"]
+        _put(ws, row, 1, f"Total {stock['symbol']}", bold=True, fill=TOTAL_FILL, border=TOTAL_BORDER)
+        for c in (2, 3, 4):
+            _put(ws, row, c, None, fill=TOTAL_FILL, border=TOTAL_BORDER)
+        for j, (_h, key, fmt) in enumerate(num_cols, start=5):
+            v = t[key]
+            _put(ws, row, j, None if _isnull(v) else v, fmt=fmt, bold=True, fill=TOTAL_FILL, border=TOTAL_BORDER)
+        row += 1
+    grand = working["total"]
+    navy = dict(bold=True, fill=HEADER_FILL, border=TOTAL_BORDER, color="FFFFFF")
+    _put(ws, row, 1, "Grand total (amounts)", **navy)
+    for c in (2, 3, 4):
+        _put(ws, row, c, None, fill=HEADER_FILL, border=TOTAL_BORDER)
+    for j, (_h, key, fmt) in enumerate(num_cols, start=5):
+        v = grand[key] if key in amount_keys else None      # quantities of different stocks are not added together
+        _put(ws, row, j, None if _isnull(v) else v, fmt=fmt, **navy)
+    row += 2
+
+    notes = ["Net Amount follows the broker report: positive is cash paid on buys, negative is cash received on sells.",
+             "Share quantities and average rates are per stock; only amounts are added across stocks in the grand total."]
+    if meta["flagged"]:
+        notes.append(f"{meta['flagged']} transaction(s) are flagged in the Flag column of the Transactions sheet (figures are as reported).")
+    for n in notes:
+        _put(ws, row, 1, n, border=None).font = Font(name="Arial", italic=True, size=9, color="6C7A89")
+        row += 1
+    for j in range(1, 5 + len(num_cols)):
+        ws.column_dimensions[get_column_letter(j)].width = {1: 22, 2: 34, 3: 16, 4: 10}.get(j, 17)
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
 def _write_summary(wb, working):
+    if working["kind"] == "multi":
+        return _write_summary_multi(wb, working)
     ws = wb.active
     ws.title = "Summary"
     ws.sheet_view.showGridLines = False
     kind, side, meta = working["kind"], working["side"], working["meta"]
     _title_block(ws, working, "Trading Summary - " + trp.working_title(working))
 
-    info = [("Trade dates", trp._period_text(meta)), ("Transactions", side),
+    info = [(meta["date_label"], trp._period_text(meta)), ("Transactions", side),
             ("No. of transactions", working["total"]["trades"]), ("Prepared on", f"{date.today():%d-%b-%Y}")]
     if kind == "stock":
         info.insert(0, ("Stock", trp.working_title(working)))
@@ -153,7 +228,8 @@ def _write_transactions(wb, working):
     kind, meta = working["kind"], working["meta"]
     tx = working["transactions"]
     _title_block(ws, working, "Transactions - " + trp.working_title(working))
-    ws["A3"] = f"Trade dates {trp._period_text(meta)}  \u2022  {working['side']}  \u2022  {len(tx):,} transaction(s)  \u2022  sorted by trade date"
+    ws["A3"] = (f"{meta['date_label']} {trp._period_text(meta)}  \u2022  {working['side']}  \u2022  {len(tx):,} transaction(s)  \u2022  "
+                + ("grouped by stock, then trade date" if kind == "multi" else "sorted by trade date"))
     ws["A3"].font = Font(name="Arial", size=9, italic=True, color="6C7A89")
 
     # (header, DataFrame column, format, width)
@@ -161,7 +237,11 @@ def _write_transactions(wb, working):
               ("Buy Amount", "Buy Amount", AMT, 16), ("Sell Amount", "Sell Amount", AMT, 16),
               ("Comm Rate", "Comm Rate", RATE, 12), ("Comm Amount", "Comm Amount", AMT, 14),
               ("Sales Tax", "Sales Tax", AMT, 12), ("Net Amount", "Net Amount", AMT, 16)]
-    if kind == "stock":
+    if kind == "multi":
+        lead = [("Symbol", "Symbol", None, 10), ("Stock Name", "Stock Name", None, 34), ("Bank", "Bank", None, 16),
+                ("Account", "Account Code", None, 10), ("Trade Date", "Trade Date", DATE_FMT, 13),
+                ("Settlement Date", "Settlement Date", DATE_FMT, 13)]
+    elif kind == "stock":
         lead = [("Bank", "Bank", None, 16), ("Account", "Account Code", None, 10), ("Symbol", "Symbol", None, 10),
                 ("Stock Name", "Stock Name", None, 34), ("Trade Date", "Trade Date", DATE_FMT, 13),
                 ("Settlement Date", "Settlement Date", DATE_FMT, 13)]
@@ -193,7 +273,9 @@ def _write_transactions(wb, working):
 
     # Total line
     total_cols = {"Buy Qty", "Sell Qty", "Buy Amount", "Sell Amount", "Comm Amount", "Sales Tax", "Net Amount"}
-    label_col = 4 if kind == "stock" else 4   # stock-name column
+    if kind == "multi":
+        total_cols -= {"Buy Qty", "Sell Qty"}   # quantities of different stocks are not added together
+    label_col = 2 if kind == "multi" else 4     # the stock-name column carries the word "Total"
     for j, (_h, col, fmt, _w) in enumerate(columns, start=1):
         if col in total_cols:
             _put(ws, r, j, float(tx[col].sum()), fmt=fmt, bold=True, fill=TOTAL_FILL, border=TOTAL_BORDER)

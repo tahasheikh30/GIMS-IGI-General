@@ -14,9 +14,20 @@ except ImportError:
     OUTLOOK_AVAILABLE = False
 
 
+def _attachment_list(attachment_path):
+    """attachment_path may be None, one path, or a list/tuple of paths."""
+    if not attachment_path:
+        return []
+    if isinstance(attachment_path, (list, tuple)):
+        return [p for p in attachment_path if p]
+    return [attachment_path]
+
+
 def send_email(to_address, subject, body, attachment_path=None, dry_run=False, cc=None, bcc=None):
     """
     Send a single email via Outlook.
+    attachment_path: None, one file path, or a list of file paths (every
+        file is attached to the same email).
     cc / bcc: optional strings (semicolon-separated for multiple
         addresses, same convention Outlook's own To field uses) - either
         may be None/blank to leave that field empty.
@@ -32,8 +43,14 @@ def send_email(to_address, subject, body, attachment_path=None, dry_run=False, c
         if bcc:
             extra.append(f"bcc: {bcc}")
         extra_text = f" ({', '.join(extra)})" if extra else ""
-        return True, f"[DRY RUN] Would send to {to_address}{extra_text}: '{subject}'" + \
-                      (f" with attachment {attachment_path}" if attachment_path else "")
+        files = _attachment_list(attachment_path)
+        if len(files) > 1:
+            attach_text = f" with {len(files)} attachments"
+        elif files:
+            attach_text = f" with attachment {files[0]}"
+        else:
+            attach_text = ""
+        return True, f"[DRY RUN] Would send to {to_address}{extra_text}: '{subject}'" + attach_text
 
     if not OUTLOOK_AVAILABLE:
         return False, "pywin32 / Outlook not available on this machine"
@@ -48,8 +65,8 @@ def send_email(to_address, subject, body, attachment_path=None, dry_run=False, c
             mail.BCC = bcc
         mail.Subject = subject
         mail.Body = body
-        if attachment_path:
-            mail.Attachments.Add(attachment_path)
+        for path in _attachment_list(attachment_path):
+            mail.Attachments.Add(path)
         mail.Send()
         return True, f"Sent to {to_address}"
     except Exception as e:
