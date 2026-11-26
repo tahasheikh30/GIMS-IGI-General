@@ -5,6 +5,7 @@ Desktop GUI (Tkinter) - Finance department automation tool.
 Run with:  python app.py
 """
 import os
+import re
 import threading
 import types
 import tkinter as tk
@@ -57,6 +58,8 @@ import deferred_wakala_fee_processor as dwfp
 import deferred_wakala_fee_generator as dwfg
 import commission_income_processor as cip
 import commission_income_generator as cig
+import trading_reports_processor as trp
+import trading_reports_generator as trg
 import withholding_tax_processor as wtp
 import withholding_tax_generator as wtg
 
@@ -432,6 +435,18 @@ class BalanceApp(tk.Tk):
         self.ci_last_opening = 0.0
         self.ci_output_dir = os.path.join(os.getcwd(), "Commission Income")
         self.ci_last_output_file = None
+
+        # Trading Reports (Finance > Trading) module state - see
+        # trading_reports_processor.py. tr_bundle is the loaded reports;
+        # tr_stocks / tr_banks are the selectable lists behind the two
+        # comboboxes; tr_auto_text remembers the last auto-filled
+        # (subject, body) so hand edits are never overwritten.
+        self.tr_bundle = None
+        self.tr_stocks = []
+        self.tr_banks = []
+        self.tr_auto_text = ("", "")
+        self.tr_last_output_file = None
+        self.tr_output_dir = os.path.join(os.getcwd(), "Trading Reports")
 
         # Withholding Tax (Income Tax) module state - see withholding_tax_processor.py.
         # The four inputs are independent files (or independent sheets within
@@ -876,6 +891,11 @@ class BalanceApp(tk.Tk):
                 (None, "Withholding Tax", [
                     ("withholding_tax_income", "Tax Payer Check"),
                 ]),
+                # "Trading" nested submenu - holds the Trading Reports page
+                # (stock / bank workings from the trading-account reports).
+                (None, "Trading", [
+                    ("trading_reports", "Trading Reports"),
+                ]),
             ],
             before=coinsurance_header,
         )
@@ -1204,6 +1224,11 @@ class BalanceApp(tk.Tk):
         commission_income_page.grid(row=0, column=0, sticky="nsew")
         self.nav_pages["commission_income"] = commission_income_page
         self._build_commission_income_page(commission_income_page)
+
+        trading_reports_page = ttk.Frame(container)
+        trading_reports_page.grid(row=0, column=0, sticky="nsew")
+        self.nav_pages["trading_reports"] = trading_reports_page
+        self._build_trading_reports_page(trading_reports_page)
 
         withholding_tax_page = ttk.Frame(container)
         withholding_tax_page.grid(row=0, column=0, sticky="nsew")
@@ -4093,6 +4118,369 @@ class BalanceApp(tk.Tk):
             os.startfile(d) if hasattr(os, "startfile") else os.system(f'open "{d}"')
         else:
             messagebox.showinfo("Not found", "No output folder yet - generate the workbook first.")
+
+
+    # ---------- Trading Reports (Finance > Trading) module ----------
+    def _build_trading_reports_page(self, parent):
+        """Trading Reports: load the four trading-account reports, then
+        produce either a STOCK working (one stock across every account) or a
+        BANK working (one account, to send to that bank) as a two-sheet
+        workbook - saved, or e-mailed through Outlook. See
+        trading_reports_processor.py."""
+        header = ttk.Frame(parent)
+        header.pack(fill="x", padx=20, pady=(20, 6))
+        ttk.Label(header, text="Trading Reports", font=("Segoe UI Semibold", 18, "bold"),
+                  foreground=self.COLOR_PRIMARY).pack(anchor="w")
+        subtitle = ttk.Label(
+            header, text="Load the trading-account reports (one per fund manager), then either total one stock across "
+                          "every account or produce one bank's transaction report. Each workbook has a Summary sheet "
+                          "and a Transactions sheet, and can be saved or e-mailed.",
+            foreground=self.COLOR_MUTED, font=("Segoe UI", 10), justify="left")
+        subtitle.pack(anchor="w", fill="x", pady=(2, 10))
+        header.bind("<Configure>", lambda e: subtitle.configure(wraplength=max(200, e.width - 4)))
+
+        holder = ttk.Frame(parent)
+        holder.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        body = self._make_upr_scrollable_body(holder)
+        PAD_X = 16
+
+        # ---- 1. Reports ----
+        s1 = self._loss_section_card(body, "1", "Trading Account Reports", PAD_X)
+        note = ttk.Label(
+            s1, text="Select all the account reports together. Each report is recognised by the account code in its client "
+                      "name (UBL Funds 22994, Alfalah Funds 22402, MCB Funds 22403, NBP Funds 22302).",
+            style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9), justify="left")
+        note.pack(anchor="w", pady=(0, 10))
+        self._bind_dynamic_wraplength(note, s1, side_padding=10)
+        row = ttk.Frame(s1)
+        row.pack(fill="x")
+        self.tr_upload_btn = self._make_action_button(row, "Upload Reports", self._load_tr_reports, kind="accent")
+        self.tr_upload_btn.pack(side="left")
+        ttk.Button(row, text="Clear", command=self._clear_tr_reports).pack(side="left", padx=(8, 0))
+        self.tr_load_progress = perf_utils.ProgressBarPanel(s1)
+        self.tr_load_progress.frame.pack(fill="x", pady=(8, 0))
+        tree_frame = ttk.Frame(s1)
+        tree_frame.pack(fill="x", pady=(10, 0))
+        cols = ("bank", "account", "file", "trades", "dates", "flagged")
+        self.tr_files_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=5)
+        for c, text, w, a in (("bank", "Bank", 120, "w"), ("account", "Account", 80, "w"), ("file", "File", 260, "w"),
+                               ("trades", "Trades", 70, "e"), ("dates", "Trade dates", 200, "w"), ("flagged", "Flagged", 70, "e")):
+            self.tr_files_tree.heading(c, text=text)
+            self.tr_files_tree.column(c, width=w, anchor=a)
+        self.tr_files_tree.pack(fill="x")
+
+        # ---- 2. Working ----
+        s2 = self._loss_section_card(body, "2", "Choose the Working", PAD_X)
+        self.tr_mode_var = tk.StringVar(value="stock")
+        ttk.Radiobutton(s2, text="Shares bought for a stock across all accounts", variable=self.tr_mode_var, value="stock",
+                        command=self._on_tr_mode_change).pack(anchor="w")
+        ttk.Radiobutton(s2, text="Transaction report for one bank", variable=self.tr_mode_var, value="bank",
+                        command=self._on_tr_mode_change).pack(anchor="w", pady=(2, 8))
+        sel = ttk.Frame(s2)
+        sel.pack(fill="x")
+        self.tr_stock_label = ttk.Label(sel, text="Stock", style="Panel.TLabel", width=10)
+        self.tr_stock_var = tk.StringVar()
+        self.tr_stock_combo = ttk.Combobox(sel, textvariable=self.tr_stock_var, state="readonly", width=60)
+        self.tr_bank_label = ttk.Label(sel, text="Bank", style="Panel.TLabel", width=10)
+        self.tr_bank_var = tk.StringVar()
+        self.tr_bank_combo = ttk.Combobox(sel, textvariable=self.tr_bank_var, state="readonly", width=40)
+        self.tr_stock_label.grid(row=0, column=0, sticky="w", pady=3)
+        self.tr_stock_combo.grid(row=0, column=1, sticky="w", pady=3)
+        self.tr_bank_label.grid(row=0, column=0, sticky="w", pady=3)
+        self.tr_bank_combo.grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Label(sel, text="Include", style="Panel.TLabel", width=10).grid(row=1, column=0, sticky="w", pady=3)
+        self.tr_side_var = tk.StringVar(value=trp.SIDE_BOTH)
+        self.tr_side_combo = ttk.Combobox(sel, textvariable=self.tr_side_var, state="readonly", width=22, values=trp.SIDE_OPTIONS)
+        self.tr_side_combo.grid(row=1, column=1, sticky="w", pady=3)
+        for combo in (self.tr_stock_combo, self.tr_bank_combo, self.tr_side_combo):
+            combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_tr_selection())
+        self.tr_selection_var = tk.StringVar(value="")
+        ttk.Label(s2, textvariable=self.tr_selection_var, style="Panel.TLabel", foreground=self.COLOR_MUTED,
+                  font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        self._on_tr_mode_change()
+
+        # ---- 3. Save or send ----
+        s3 = self._loss_section_card(body, "3", "Save or Send", PAD_X, expand_bottom=True)
+        self.tr_delivery_var = tk.StringVar(value="save")
+        ttk.Radiobutton(s3, text="Save the workbook only", variable=self.tr_delivery_var, value="save",
+                        command=self._on_tr_delivery_change).pack(anchor="w")
+        ttk.Radiobutton(s3, text="Save and send by e-mail (Outlook)", variable=self.tr_delivery_var, value="send",
+                        command=self._on_tr_delivery_change).pack(anchor="w", pady=(2, 8))
+        form = ttk.Frame(s3)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        self.tr_to_var, self.tr_cc_var, self.tr_cc2_var, self.tr_subject_var = (tk.StringVar() for _ in range(4))
+        self.tr_email_entries = []
+        for i, (label, var) in enumerate((("To", self.tr_to_var), ("CC", self.tr_cc_var), ("CC2", self.tr_cc2_var),
+                                          ("Subject", self.tr_subject_var))):
+            ttk.Label(form, text=label, style="Panel.TLabel", width=10).grid(row=i, column=0, sticky="w", pady=3)
+            e = ttk.Entry(form, textvariable=var)
+            e.grid(row=i, column=1, sticky="ew", pady=3)
+            self.tr_email_entries.append(e)
+        ttk.Label(form, text="Separate several addresses with ;  -  addresses are not saved between sessions.",
+                  style="Panel.TLabel", foreground=self.COLOR_MUTED, font=("Segoe UI", 9)).grid(row=4, column=1, sticky="w")
+        ttk.Label(form, text="Message", style="Panel.TLabel", width=10).grid(row=5, column=0, sticky="nw", pady=(8, 3))
+        self.tr_body_text = tk.Text(form, height=8, font=("Segoe UI", 10), wrap="word", relief="solid", borderwidth=1)
+        self.tr_body_text.grid(row=5, column=1, sticky="ew", pady=(8, 3))
+        ttk.Label(form, text="Signature", style="Panel.TLabel", width=10).grid(row=6, column=0, sticky="nw", pady=3)
+        self.tr_signature_text = tk.Text(form, height=3, font=("Segoe UI", 10), wrap="word", relief="solid", borderwidth=1)
+        self.tr_signature_text.grid(row=6, column=1, sticky="ew", pady=3)
+        self.tr_signature_text.insert("1.0", eg.load_signature())
+        self.tr_dry_run_var = tk.BooleanVar(value=True)
+        self.tr_dry_check = ttk.Checkbutton(s3, text="Dry run (preview only, do not actually send)", variable=self.tr_dry_run_var)
+        self.tr_dry_check.pack(anchor="w", pady=(6, 0))
+
+        out_row = ttk.Frame(s3)
+        out_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(out_row, text="Output folder", style="Panel.TLabel").pack(side="left", padx=(0, 8))
+        self.tr_output_dir_var = tk.StringVar(value=self.tr_output_dir)
+        ttk.Entry(out_row, textvariable=self.tr_output_dir_var, width=50).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(out_row, text="Browse...", command=self._browse_tr_output_dir).pack(side="left")
+        gen_row = ttk.Frame(s3)
+        gen_row.pack(fill="x", pady=(10, 4))
+        self.tr_generate_btn = self._make_action_button(gen_row, "Generate Report", self._generate_tr_report, kind="accent")
+        self.tr_generate_btn.pack(side="left")
+        ttk.Button(gen_row, text="Open Output Folder", command=self._open_tr_output_folder).pack(side="left", padx=(8, 0))
+        self.tr_gen_progress = perf_utils.ProgressBarPanel(s3)
+        self.tr_gen_progress.frame.pack(fill="x", pady=(4, 8))
+        self.tr_log = scrolledtext.ScrolledText(s3, height=9, font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.tr_log.pack(fill="both", expand=True, pady=(4, 0))
+        self._finalize_scroll_passthrough(body)
+        self._on_tr_delivery_change()
+
+    def _log_tr(self, msg):
+        self.tr_log.insert("end", str(msg) + "\n")
+        self.tr_log.see("end")
+
+    # ---- loading ----
+    def _load_tr_reports(self):
+        paths = filedialog.askopenfilenames(title="Select the trading account reports",
+                                            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+        if not paths:
+            return
+        paths = list(paths)
+        self.tr_log.delete("1.0", "end")
+        self.status_var.set("Trading Reports: reading reports...")
+        self.tr_load_progress.start(total=None, text="Reading...")
+
+        def worker(report):
+            return trp.load_reports(paths, report=report)
+
+        def on_done(bundle):
+            self.tr_bundle = bundle
+            self.tr_load_progress.finish("Loaded.")
+            self.tr_files_tree.delete(*self.tr_files_tree.get_children())
+            for f in bundle["files"]:
+                dates = f"{f['date_from']:%d-%b-%Y} to {f['date_to']:%d-%b-%Y}"
+                self.tr_files_tree.insert("", "end", values=(f["bank"], f["code"], f["file"], f"{f['rows']:,}", dates, f["flagged"] or ""))
+            self.tr_stocks = trp.list_stocks(bundle)
+            self.tr_banks = trp.list_banks(bundle)
+            self.tr_stock_combo.configure(values=[f"{s['symbol']} - {s['company']}  ({s['trades']} trades)" for s in self.tr_stocks])
+            self.tr_bank_combo.configure(values=[f"{b['bank']}  ({b['code']})" for b in self.tr_banks])
+            if self.tr_stocks:
+                self.tr_stock_combo.current(0)
+            if self.tr_banks:
+                self.tr_bank_combo.current(0)
+            self._log_tr(f"Loaded {len(bundle['data']):,} trade(s) from {len(bundle['files'])} account(s); "
+                         f"{len(self.tr_stocks)} stock(s).")
+            for w in bundle["warnings"]:
+                self._log_tr(f"NOTE: {w}")
+            self._refresh_tr_selection()
+            self.status_var.set("Trading Reports: reports loaded. Choose the working below.")
+
+        def on_error(exc):
+            self.tr_load_progress.finish("Failed - see the message.")
+            self._log_tr(f"ERROR: {exc}")
+            messagebox.showerror("Could not load the reports", str(exc))
+
+        perf_utils.run_in_background(self, worker, on_progress=lambda m: self._log_tr(m),
+                                     on_progress_value=self.tr_load_progress.update,
+                                     on_done=on_done, on_error=on_error, busy_widgets=[self.tr_upload_btn])
+
+    def _clear_tr_reports(self):
+        self.tr_bundle = None
+        self.tr_stocks, self.tr_banks = [], []
+        self.tr_files_tree.delete(*self.tr_files_tree.get_children())
+        for combo in (self.tr_stock_combo, self.tr_bank_combo):
+            combo.configure(values=[])
+            combo.set("")
+        self.tr_selection_var.set("")
+
+    # ---- selection ----
+    def _on_tr_mode_change(self):
+        stock = self.tr_mode_var.get() == "stock"
+        for w in (self.tr_stock_label, self.tr_stock_combo):
+            (w.grid if stock else w.grid_remove)()
+        for w in (self.tr_bank_label, self.tr_bank_combo):
+            (w.grid_remove if stock else w.grid)()
+        self._refresh_tr_selection()
+
+    def _current_tr_working(self):
+        """Build the working for the current selection (cheap, in memory).
+        Returns None when nothing is selected yet; raises
+        trp.TradingReportsError for a selection with no matching trades."""
+        if not self.tr_bundle:
+            return None
+        side = self.tr_side_var.get() or trp.SIDE_BOTH
+        if self.tr_mode_var.get() == "stock":
+            idx = self.tr_stock_combo.current()
+            if idx < 0 or idx >= len(self.tr_stocks):
+                return None
+            return trp.build_stock_working(self.tr_bundle, self.tr_stocks[idx]["symbol"], side)
+        idx = self.tr_bank_combo.current()
+        if idx < 0 or idx >= len(self.tr_banks):
+            return None
+        return trp.build_bank_working(self.tr_bundle, self.tr_banks[idx]["code"], side)
+
+    def _refresh_tr_selection(self):
+        """Update the one-line description of the selection and, unless the
+        subject/message were edited by hand, their default text."""
+        try:
+            working = self._current_tr_working()
+        except trp.TradingReportsError as e:
+            self.tr_selection_var.set(str(e))
+            return
+        if working is None:
+            self.tr_selection_var.set("")
+            return
+        t = working["total"]
+        if working["kind"] == "stock":
+            self.tr_selection_var.set(
+                f"{working['symbol']}: {t['trades']} trade(s) - bought {t['buy_qty']:,.0f} share(s), sold {t['sell_qty']:,.0f}.")
+        else:
+            self.tr_selection_var.set(
+                f"{working['bank']}: {t['trades']} trade(s) across {len(working['rows'])} stock(s).")
+        subject, body = trp.default_email_text(working, "")
+        current_subject, current_body = self.tr_subject_var.get(), self.tr_body_text.get("1.0", "end").rstrip("\n")
+        last_subject, last_body = self.tr_auto_text
+        if current_subject in ("", last_subject) and current_body in ("", last_body.rstrip("\n")):
+            self.tr_subject_var.set(subject)
+            self.tr_body_text.delete("1.0", "end")
+            self.tr_body_text.insert("1.0", body.rstrip("\n"))
+        self.tr_auto_text = (subject, body)
+
+    def _on_tr_delivery_change(self):
+        send = self.tr_delivery_var.get() == "send"
+        for e in self.tr_email_entries:
+            e.configure(state="normal" if send else "disabled")
+        for t in (self.tr_body_text, self.tr_signature_text):
+            t.configure(state="normal" if send else "disabled")
+        self.tr_dry_check.configure(state="normal" if send else "disabled")
+        self.tr_generate_btn.configure(text="Generate and Send" if send else "Generate Report")
+
+    def _browse_tr_output_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.tr_output_dir_var.set(path)
+
+    # ---- generate / send ----
+    @staticmethod
+    def _tr_address_problem(text, label, required):
+        """Returns an error string for a bad address field, else None."""
+        parts = [p.strip() for p in re.split(r"[;,]", text) if p.strip()]
+        if not parts:
+            return f"Enter an email address in the {label} field." if required else None
+        for p in parts:
+            if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", p):
+                return f"'{p}' in the {label} field is not a valid email address."
+        return None
+
+    def _generate_tr_report(self):
+        if not self.tr_bundle:
+            messagebox.showerror("No reports", "Upload the trading account reports first.")
+            return
+        try:
+            working = self._current_tr_working()
+        except trp.TradingReportsError as e:
+            messagebox.showerror("Nothing to report", str(e))
+            return
+        if working is None:
+            messagebox.showerror("No selection", "Choose a stock or a bank first.")
+            return
+        send = self.tr_delivery_var.get() == "send"
+        to = cc = subject = body = ""
+        dry = True
+        if send:
+            to, cc1, cc2 = self.tr_to_var.get().strip(), self.tr_cc_var.get().strip(), self.tr_cc2_var.get().strip()
+            for text, label, required in ((to, "To", True), (cc1, "CC", False), (cc2, "CC2", False)):
+                problem = self._tr_address_problem(text, label, required)
+                if problem:
+                    messagebox.showerror("Check the email addresses", problem)
+                    return
+            cc = "; ".join(p for p in (cc1, cc2) if p)
+            subject = self.tr_subject_var.get().strip()
+            if not subject:
+                messagebox.showerror("No subject", "Enter a subject for the email.")
+                return
+            signature = self.tr_signature_text.get("1.0", "end").strip()
+            body = self.tr_body_text.get("1.0", "end").rstrip() + ("\n" + signature if signature else "")
+            eg.save_signature(signature)   # shared signature store across every GIMS module
+            dry = self.tr_dry_run_var.get()
+            if not dry and not messagebox.askyesno(
+                    "Confirm", f"Send this report to {to}{' (cc: ' + cc + ')' if cc else ''} through Outlook now? "
+                               f"This cannot be undone."):
+                return
+        base = self.tr_output_dir_var.get().strip()
+        if not base:
+            messagebox.showerror("No output folder", "Set an output folder first.")
+            return
+        output_dir = self._new_run_folder(base)
+        path = os.path.join(output_dir, trp.build_filename(working))
+        self.tr_log.delete("1.0", "end")
+        self.status_var.set("Trading Reports: generating...")
+        self.tr_gen_progress.start(total=None, text="Generating...")
+
+        def worker(report):
+            trg.write_trading_workbook(working, path)
+            report(f"Saved: {path}")
+            if not send:
+                return {"path": path, "send": None}
+            # Outlook (COM) must be initialised on whichever thread calls it.
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                com_ok = True
+            except ImportError:
+                com_ok = False
+            try:
+                ok, msg = osend.send_email(to, subject, body, path, dry, cc=cc or None)
+            finally:
+                if com_ok:
+                    pythoncom.CoUninitialize()
+            return {"path": path, "send": (ok, msg)}
+
+        def on_done(res):
+            self.tr_last_output_file = res["path"]
+            self.tr_gen_progress.finish("Done.")
+            if res["send"] is None:
+                messagebox.showinfo("Done", f"Report saved:\n{res['path']}")
+                self.status_var.set(f"Trading Reports: saved {os.path.basename(res['path'])}.")
+                return
+            ok, msg = res["send"]
+            if dry and not msg.startswith("[DRY RUN]"):
+                msg = "[DRY RUN] " + msg      # outlook_sender already labels its own dry-run message
+            self._log_tr(msg)
+            if ok:
+                messagebox.showinfo("Done", f"{msg}\n\nThe workbook is also saved at:\n{res['path']}")
+            else:
+                messagebox.showerror("Email not sent", f"{msg}\n\nThe workbook was saved at:\n{res['path']}")
+            self.status_var.set(f"Trading Reports: {msg}")
+
+        def on_error(exc):
+            self.tr_gen_progress.finish("Failed - see the message.")
+            self._log_tr(f"ERROR: {exc}")
+            messagebox.showerror("Generation failed", str(exc))
+
+        perf_utils.run_in_background(self, worker, on_progress=lambda m: self._log_tr(m),
+                                     on_progress_value=self.tr_gen_progress.update,
+                                     on_done=on_done, on_error=on_error, busy_widgets=[self.tr_generate_btn])
+
+    def _open_tr_output_folder(self):
+        d = os.path.dirname(self.tr_last_output_file) if self.tr_last_output_file else self.tr_output_dir_var.get().strip()
+        if d and os.path.exists(d):
+            os.startfile(d) if hasattr(os, "startfile") else os.system(f'open "{d}"')
+        else:
+            messagebox.showinfo("Not found", "No output folder yet - generate a report first.")
 
     # ---------- Withholding Tax (Income Tax) module ----------
     def _build_withholding_tax_page(self, parent):
